@@ -5257,6 +5257,12 @@ async function run(): Promise<CommanderCommand> {
                 await handlers.attachHandler(row.shortId);
               })();
             }}
+            onKill={row => {
+              void (async () => {
+                const handlers = await import('./cli/bg.js');
+                await handlers.killHandler(row.shortId);
+              })();
+            }}
           />,
         );
         await instance.waitUntilExit();
