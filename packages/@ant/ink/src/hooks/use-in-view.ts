@@ -119,7 +119,7 @@ export function useTerminalViewport(): [
   termRef.current = term
   const computeIsVisible = useCallback(
     (): boolean =>
-      computeIsVisible(nodeRef.current, termRef.current) ?? state.isVisible,
+      computeVisibility(nodeRef.current, termRef.current) ?? state.isVisible,
     [state.isVisible],
   )
 
