@@ -52,7 +52,7 @@ function clampedScrollOffset(node: {
 }
 
 /** 官方 qe 等价：node 是否与 terminal viewport 相交（含滚动祖先修正）。 */
-function computeIsVisible(
+function computeVisibility(
   node: DomNode | null,
   terminal: SizeCtx,
 ): boolean | null {
@@ -103,7 +103,7 @@ export function useTerminalViewport(): [
 
   // 官方 d：计算 + setState（返回最新值；null 时保持现值）
   const check = useCallback((): boolean => {
-    const result = computeIsVisible(nodeRef.current, term)
+    const result = computeVisibility(nodeRef.current, term)
     if (result === null) return state.isVisible
     if (result !== state.isVisible) setState({ isVisible: result })
     return result
