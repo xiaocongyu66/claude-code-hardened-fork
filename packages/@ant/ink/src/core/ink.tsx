@@ -1118,6 +1118,12 @@ export default class Ink {
    * highlight. Matches iTerm2's copy-on-select behavior where the selected
    * region stays visible after the automatic copy.
    */
+  /** 官方 KR 契约：读当前选中文本（无剪贴板副作用）。 */
+  getSelectedText(): string {
+    if (!hasSelection(this.selection)) return '';
+    return getSelectedText(this.selection, this.frontFrame.screen);
+  }
+
   copySelectionNoClear(): string {
     if (!hasSelection(this.selection)) return '';
     const text = getSelectedText(this.selection, this.frontFrame.screen);

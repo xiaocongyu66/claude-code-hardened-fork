@@ -11,6 +11,7 @@ import { ClockContext } from '../components/ClockContext.js'
 
 type VoidFn = () => void
 const noop: VoidFn = () => {}
+const noopSubscribe: (cb: () => void) => VoidFn = () => () => {}
 
 // ── 官方 cB：useDebouncedCallback(fn, ms) ──
 
@@ -77,7 +78,7 @@ export function useAnimationTimer(fps: number | null): number {
   const anchorRef = useRef<number | null>(null)
 
   const subscribe = useMemo(() => {
-    if (!clock || slice === null) return noop
+    if (!clock || slice === null) return noopSubscribe
     return (cb: () => void) =>
       clock.subscribeFollower?.(() => {
         anchorRef.current = clock.now()
@@ -130,7 +131,7 @@ export function useAnimationFrameEx(
   const floor = fps === null ? null : Math.ceil(repaintFloor(fps))
 
   const subscribe: (cb: () => void) => VoidFn = useMemo(() => {
-    if (!clock || floor === null) return noop
+    if (!clock || floor === null) return noopSubscribe
     return (cb: () => void) => clock.subscribeKeepAlive?.(cb) ?? noop
   }, [clock, floor])
 
@@ -222,11 +223,12 @@ function useReducerShim(): [number, VoidFn] {
 }
 
 function useSyncExternalStoreShim2<T>(
-  subscribe: VoidFn,
+  subscribe: (cb: () => void) => VoidFn,
   getSnapshot: () => T,
 ): T {
   const React = require('react') as {
     useSyncExternalStore?: (s: (cb: () => void) => VoidFn, g: () => T) => T
+    useEffect: (f: () => void, d?: unknown[]) => void
     useState: (i: T) => [T, (v: T) => void]
     useEffect: (f: () => VoidFn, d?: unknown[]) => void
     useReducer: (r: (n: number) => number, i: number) => [number, VoidFn]

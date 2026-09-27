@@ -32,6 +32,7 @@ import { ClockContext } from '../components/ClockContext.js'
 
 type VoidFn = () => void
 const noop: VoidFn = () => {}
+const noopSubscribe: (cb: () => void) => VoidFn = () => () => {}
 
 // ── 焦点层（Pue / GV 原文）──
 
@@ -66,7 +67,7 @@ export function useFocus(): FocusManagerApi {
   const focusSubscribe = focusManager?.subscribe as
     | ((cb: () => void) => VoidFn)
     | undefined
-  const subscribe: (cb: () => void) => VoidFn = focusSubscribe ?? noop
+  const subscribe: (cb: () => void) => VoidFn = focusSubscribe ?? noopSubscribe
   const snap = useSyncExternalStoreShim(subscribe, activeElement)
   return useMemo(
     () => ({
@@ -101,7 +102,7 @@ export function useHasFocus(ref: { current: unknown }): boolean {
   const focusSubscribe = focusManager?.subscribe as
     | ((cb: () => void) => VoidFn)
     | undefined
-  const subscribe: (cb: () => void) => VoidFn = focusSubscribe ?? noop
+  const subscribe: (cb: () => void) => VoidFn = focusSubscribe ?? noopSubscribe
   const getSnapshot = useCallback(() => {
     const el = ref.current
     const active = focusManager?.activeElement
@@ -168,7 +169,7 @@ export function useMeasured<T>(getSnapshot: () => T): T {
   const { subscribeLayout } = useContext(AppContext as never) as {
     subscribeLayout?: (cb: () => void) => VoidFn
   }
-  const sub: (cb: () => void) => VoidFn = subscribeLayout ?? noop
+  const sub: (cb: () => void) => VoidFn = subscribeLayout ?? noopSubscribe
   const stored = useSyncExternalStoreShim(sub, getSnapshot)
   const [, force] = useReducer((n: number) => n + 1, 0)
   useEffect(() => {
