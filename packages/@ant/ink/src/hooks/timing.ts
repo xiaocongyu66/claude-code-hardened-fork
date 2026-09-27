@@ -74,7 +74,7 @@ export function useAnimationTimer(fps: number | null): number {
         now: () => number
       }
     | undefined
-  const slice = fps === null ? null : Math.ceil(fps)
+  const slice = fps === null ? null : alignFrameInterval(fps)
   const anchorRef = useRef<number | null>(null)
 
   const subscribe = useMemo(() => {
@@ -105,14 +105,23 @@ export function repaintFloor(fps: number): number {
   return fullRepaint ? Math.max(fps, 480) : fps
 }
 
+/** 官方 Vg=16：帧对齐单位（binary @148979448 实证）。 */
+export const FRAME_ALIGN_MS = 16
+
+/** 官方原文：Math.ceil(Ce(o)/Vg)*Vg——间隔向上对齐到 16ms 倍数。 */
+export function alignFrameInterval(ms: number): number {
+  return Math.ceil(ms / FRAME_ALIGN_MS) * FRAME_ALIGN_MS
+}
+
 /**
- * 官方 Ea 原文：useFrames(fps)——返回 [visibility, tick]。
- * visibility 来自 useInView；tick 以 repaintFloor(fps) 帧对齐，
- * 仅在可见时推进 keepAlive 订阅。
+ * 官方 Ea：useAnimationFrameEx(fps, viewport?)——返回 [viewport, tick]。
+ * viewport 为 useTerminalViewport 的四元组（官方 l=D7()）；tick 以
+ * alignFrameInterval(repaintFloor(fps)) 帧对齐，仅在 viewport 可见且
+ * clock 存在时推进 keepAlive 订阅（官方 b=!!r&&h&&o!==null）。
  */
 export function useAnimationFrameEx(
   fps: number | null = 16,
-  inView:
+  viewport:
     | [
         setRef: (n: unknown) => void,
         isVisible: boolean,
@@ -120,38 +129,42 @@ export function useAnimationFrameEx(
         compute: () => boolean,
       ]
     | null = null,
-): [(node: unknown) => void, number] {
+): [
+  viewport: [
+    setRef: (n: unknown) => void,
+    isVisible: boolean,
+    forceCheck: () => boolean,
+    compute: () => boolean,
+  ],
+  tick: number,
+] {
   const clock = useContext(ClockContext as never) as
     | {
         subscribeKeepAlive?: (cb: () => void) => VoidFn
         now: () => number
       }
     | undefined
-  const [, isVisible, , compute] = inView ?? [noop, true, noop, () => true]
-  const floor = fps === null ? null : Math.ceil(repaintFloor(fps))
+  const [, isVisible] = viewport ?? [noop, true]
+  const floor = fps === null ? null : alignFrameInterval(repaintFloor(fps))
+  const alive = !!clock && isVisible && fps !== null
 
-  const subscribe: (cb: () => void) => VoidFn = useMemo(() => {
-    if (!clock || floor === null) return noopSubscribe
-    return (cb: () => void) => clock.subscribeKeepAlive?.(cb) ?? noop
-  }, [clock, floor])
-
-  const tickRef = useRef(0)
-  const [, force] = useReducerShim()
+  const subscribe = useCallback(
+    (cb: () => void) =>
+      alive && clock?.subscribeKeepAlive
+        ? clock.subscribeKeepAlive(cb)
+        : noopSubscribe,
+    [alive, clock],
+  )
   const getSnapshot = useCallback(() => {
-    if (!clock || floor === null) return 0
-    return (tickRef.current = Math.max(
-      tickRef.current,
-      Math.floor(clock.now() / floor) * floor,
-    ))
-  }, [clock, floor])
+    if (!alive || !clock || floor === null) return 0
+    return Math.floor(clock.now() / floor) * floor
+  }, [alive, clock, floor])
 
   const tick = useSyncExternalStoreShim2(
-    isVisible ? subscribe : noop,
+    alive ? subscribe : noopSubscribe,
     getSnapshot,
   )
-  void compute
-  void force
-  return [noop as unknown as (node: unknown) => void, tick]
+  return [viewport ?? [noop, true, noop, () => true], tick]
 }
 
 // ── 官方 _r：useTimeout（函数·数值双态重载）──

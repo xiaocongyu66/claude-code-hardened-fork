@@ -172,7 +172,7 @@ export function useMeasured<T>(getSnapshot: () => T): T {
   const sub: (cb: () => void) => VoidFn = subscribeLayout ?? noopSubscribe
   const stored = useSyncExternalStoreShim(sub, getSnapshot)
   const [, force] = useReducer((n: number) => n + 1, 0)
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!Object.is(getSnapshot(), stored)) force()
   })
   return stored
@@ -197,10 +197,69 @@ export interface PaintedWindow {
   of: number
 }
 
+/** 官方 Ko/Qe：可视窗口计算（滚动裁剪后 {first,last,of}；不可视/无滚动容器为 undefined）。 */
+function paintedWindow(node: DomNodeLike | null): PaintedWindow | undefined {
+  if (!node?.yogaNode) return undefined
+  if (node.yogaNode.getDisplay?.() === 1) return undefined
+  let offset = 0
+  let cur: DomNodeLike | null | undefined = node
+  for (;;) {
+    const parent = cur?.parentNode as DomNodeLike | null | undefined
+    if (!parent?.yogaNode || !cur?.yogaNode) return undefined
+    offset += cur.yogaNode.getComputedTop()
+    const grand = parent.parentNode as DomNodeLike | null | undefined
+    if (
+      grand?.yogaNode !== undefined &&
+      (grand.style?.overflowY ?? grand.style?.overflow) === 'scroll'
+    ) {
+      // 官方 Ko：滚动容器可视窗口
+      const { scrollTopRendered, yogaNode } = parent as {
+        scrollTopRendered?: number
+        yogaNode?: Yg & {
+          getComputedBorder?(i: number): number
+          getComputedPadding?(i: number): number
+        }
+      }
+      const itemHeight = cur.yogaNode.getComputedHeight()
+      if (scrollTopRendered === undefined || !yogaNode || !itemHeight)
+        return undefined
+      const borderTop = yogaNode.getComputedBorder?.(1) ?? 0
+      const innerH =
+        yogaNode.getComputedHeight() - (yogaNode.getComputedBorder?.(3) ?? 0)
+      const padTop = borderTop + (yogaNode.getComputedPadding?.(1) ?? 0)
+      const padBottom = innerH - (yogaNode.getComputedPadding?.(3) ?? 0)
+      const scrollTop = parent.scrollTop ?? 0
+      const top = offset - scrollTop
+      const itemTop = offset - scrollTop
+      const itemBottom = itemTop + itemHeight
+      const outOfView = itemBottom <= padTop || itemTop >= padBottom
+      const first = Math.max(top, borderTop)
+      const last = Math.min(top + itemHeight, innerH)
+      if (outOfView || first >= last) return null as unknown as PaintedWindow
+      return { first: first - top, last: last - top - 1, of: itemHeight }
+    }
+    cur = parent
+  }
+}
+
+interface Yg {
+  getComputedTop(): number
+  getComputedHeight(): number
+  getDisplay?: () => number
+}
+interface DomNodeLike {
+  yogaNode?: Yg
+  parentNode?: DomNodeLike | null
+  style?: { overflowY?: string; overflow?: string }
+  scrollTop?: number
+  scrollTopRendered?: number
+  childNodes?: Array<{ yogaNode?: Yg }>
+}
+
 /**
- * 官方 Nvn：usePaintedRows(enabled, rows)——
- * 返回 [ref, rows, lastRows, contentRows]；enabled 时订阅帧同步，
- * rows 为可视窗口（滚动裁剪后），contentRows 为子节点总高。
+ * 官方 Nvn 原文：usePaintedRows(enabled, rows)——
+ * 返回 [ref, rows, lastRows, contentRows]；rows 为 Qe 滚动窗口，
+ * lastRows 为 ref 元素帧高，contentRows 为子节点总高。
  */
 export function usePaintedRows(
   enabled: boolean,
@@ -214,7 +273,7 @@ export function usePaintedRows(
   const { subscribeFrames } = useContext(AppContext as never) as {
     subscribeFrames?: (cb: () => void) => VoidFn
   }
-  const ref = useRef<unknown>(null)
+  const ref = useRef<DomNodeLike | null>(null)
   const stateRef = useRef<{
     rows: PaintedWindow | number | undefined
     lastRows: number | undefined
@@ -223,28 +282,35 @@ export function usePaintedRows(
 
   const subscribe = useCallback(
     (cb: () => void) =>
-      enabled && subscribeFrames ? subscribeFrames(cb) : noop,
+      enabled && subscribeFrames ? subscribeFrames(cb) : noopSubscribe,
     [enabled, subscribeFrames],
   )
   const getSnapshot = useCallback(() => {
     if (!enabled) return undefined
-    const el = ref.current as {
-      yogaNode?: { getComputedHeight(): number }
-      childNodes?: Array<{ yogaNode?: { getComputedHeight(): number } }>
-    } | null
+    const el = ref.current
     const frameHeight = el?.yogaNode?.getComputedHeight()
     const contentRows = el?.childNodes?.reduce(
       (sum, k) => sum + (k.yogaNode?.getComputedHeight() ?? 0),
       0,
     )
+    const win = paintedWindow(el)
     const y = stateRef.current
-    const rowsChanged = contentRows === undefined || contentRows === y.rows
-    const contentChanged = frameHeight === undefined ? undefined : contentRows
-    if (!(rowsChanged && contentChanged === y.contentRows)) {
+    const rowsChanged =
+      win === undefined ||
+      win === y.rows ||
+      (!!win &&
+        !!y.rows &&
+        typeof win !== 'number' &&
+        typeof y.rows !== 'number' &&
+        win.first === y.rows.first &&
+        win.last === y.rows.last &&
+        win.of === y.rows.of)
+    const content = frameHeight === undefined ? undefined : contentRows
+    if (!(rowsChanged && content === y.contentRows)) {
       stateRef.current = {
-        rows: rowsChanged ? y.rows : contentRows,
+        rows: rowsChanged ? y.rows : win,
         lastRows: frameHeight ?? y.lastRows,
-        contentRows: contentChanged,
+        contentRows: content,
       }
     } else if (frameHeight !== undefined) {
       y.lastRows = frameHeight
