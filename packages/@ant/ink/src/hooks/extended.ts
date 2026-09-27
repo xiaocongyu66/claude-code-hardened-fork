@@ -7,9 +7,8 @@ import {
   useRef,
   useState,
 } from 'react'
-import { AppContext } from '../components/AppContext.js'
+import AppContext from '../components/AppContext.js'
 import { ClockContext } from '../components/ClockContext.js'
-import { ClockSizeFallback } from './clock-fallback.js'
 
 /**
  * 官方 ink hooks 逆向还原（2.1.283 binary @152713000-152720000 区段提取，
@@ -64,7 +63,7 @@ export function useFocus(): FocusManagerApi {
     () => focusManager?.activeElement ?? null,
     [focusManager],
   )
-  const subscribe = focusManager?.subscribe ?? noop
+  const subscribe: (cb: () => void) => VoidFn = focusManager?.subscribe ?? noop
   const snap = useSyncExternalStoreShim(subscribe, activeElement)
   return useMemo(
     () => ({
@@ -96,7 +95,7 @@ export function useHasFocus(ref: { current: unknown }): boolean {
       subscribe: (cb: () => void) => VoidFn
     }
   }
-  const subscribe = focusManager?.subscribe ?? noop
+  const subscribe: (cb: () => void) => VoidFn = focusManager?.subscribe ?? noop
   const getSnapshot = useCallback(() => {
     const el = ref.current
     const active = focusManager?.activeElement
@@ -410,5 +409,3 @@ export function useIsScreenReaderEnabled(): boolean {
 function useMemoSafe<T>(): React.Context<T | undefined> {
   return require('react').createContext<T | undefined>(undefined)
 }
-
-void ClockSizeFallback

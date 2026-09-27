@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef } from 'react'
-import { AppContext } from '../components/AppContext.js'
+import AppContext from '../components/AppContext.js'
 import { ClockContext } from '../components/ClockContext.js'
 
 /**
