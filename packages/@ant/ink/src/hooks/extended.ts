@@ -297,7 +297,7 @@ export function usePaintedRows(
 
   const subscribe: (cb: () => void) => VoidFn = useCallback(
     (cb: () => void) =>
-      enabled && subscribeFrames ? subscribeFrames(cb) : noopSubscribe(),
+      enabled && subscribeFrames ? subscribeFrames(cb) : noopSubscribe(cb),
     [enabled, subscribeFrames],
   )
   const getSnapshot = useCallback(() => {
