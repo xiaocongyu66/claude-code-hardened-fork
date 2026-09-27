@@ -5248,15 +5248,32 @@ async function run(): Promise<CommanderCommand> {
       if (process.stdout.isTTY) {
         const { wrappedRender: render, ThemeProvider } = await import('@anthropic/ink');
         const { FleetView } = await import('./components/FleetView.js');
+        // logTail：active 会话读日志尾行（官方 Hi 的 logTail 列）
+        const withLogTail = async (fresh: Awaited<ReturnType<typeof bg.listLiveSessions>>) => {
+          const { readFile } = await import('fs/promises');
+          const rowsOut = toFleetRows(fresh);
+          await Promise.all(
+            rowsOut.map(async r => {
+              if (r.tempo !== 'running') return;
+              const entry = fresh.find(s => s.sessionId.slice(0, 8) === r.shortId);
+              if (!entry?.logPath) return;
+              try {
+                const raw = await readFile(entry.logPath, 'utf-8');
+                const lines = raw.trimEnd().split('\n');
+                r.logTail = (lines.at(-1) ?? '').slice(0, 80);
+              } catch {
+                // 日志不可读——留空
+              }
+            }),
+          );
+          return rowsOut;
+        };
         const instance = await render(
           // wrappedRender 不注入 theme——独立渲染必须显式包 ThemeProvider
           <ThemeProvider>
             <FleetView
               rows={rows}
-              loadRows={async () => {
-                const fresh = await bg.listLiveSessions();
-                return toFleetRows(fresh);
-              }}
+              loadRows={async () => withLogTail(await bg.listLiveSessions())}
               onAttach={row => {
                 void (async () => {
                   const handlers = await import('./cli/bg.js');
@@ -5267,6 +5284,19 @@ async function run(): Promise<CommanderCommand> {
                 void (async () => {
                   const handlers = await import('./cli/bg.js');
                   await handlers.killHandler(row.shortId);
+                })();
+              }}
+              onRename={(row, name) => {
+                void (async () => {
+                  if (!row.pid) return;
+                  const handlers = await import('./cli/bg.js');
+                  await handlers.renameSession(row.pid, name);
+                })();
+              }}
+              onDispatch={task => {
+                void (async () => {
+                  const bg2 = await import('./cli/bg.js');
+                  await bg2.handleBgStart([task]);
                 })();
               }}
             />

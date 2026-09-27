@@ -1,10 +1,10 @@
 import { t } from '../i18n/index.js'
-import { readdir, readFile, unlink } from 'fs/promises'
+import { readdir, readFile, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { isProcessRunning } from '../utils/genericProcessUtils.js'
-import { jsonParse } from '../utils/slowOperations.js'
+import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import { selectEngine } from './bg/engines/index.js'
 import type { SessionEntry } from './bg/engine.js'
 
@@ -56,6 +56,26 @@ export function findSession(
       s.pid === asNum ||
       (s.name && s.name === target),
   )
+}
+
+/**
+ * 重命名指定会话（fleet ctrl+r）。updateSessionName 只能改当前进程自己的
+ * pid 文件——跨进程改名直接读写目标 `<pid>.json`。
+ */
+export async function renameSession(
+  pid: number,
+  name: string,
+): Promise<boolean> {
+  const file = join(getSessionsDir(), `${pid}.json`)
+  try {
+    const raw = await readFile(file, 'utf-8')
+    const entry = jsonParse(raw) as SessionEntry
+    entry.name = name
+    await writeFile(file, jsonStringify(entry), 'utf-8')
+    return true
+  } catch {
+    return false
+  }
 }
 
 function formatTime(ts: number): string {
