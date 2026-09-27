@@ -152,7 +152,7 @@ export function useAnimationFrameEx(
     (cb: () => void) =>
       alive && clock?.subscribeKeepAlive
         ? clock.subscribeKeepAlive(cb)
-        : noopSubscribe,
+        : noopSubscribe(cb),
     [alive, clock],
   )
   const getSnapshot = useCallback(() => {
@@ -169,7 +169,7 @@ export function useAnimationFrameEx(
     isVisible: boolean,
     forceCheck: () => boolean,
     compute: () => boolean,
-  ] = [noop, true, noop, () => true]
+  ] = [noop, true, () => true, () => true]
   return [viewport ?? fallbackViewport, tick]
 }
 
@@ -203,26 +203,27 @@ export function useTimeout(
   const depsList = isFnForm
     ? (c as unknown[] | undefined)
     : (b as unknown[] | undefined)
-  const firedRef = useRef<VoidFn | null>(null)
+  // 官方 _r 原文 1:1：P(k)=(y.current=null, k(), R(()=>{ y.current=P;
+  //   d ? fnRef() : k() }, f))。单次超时——到期 fire（d=false 通知 store
+  //   → getSnapshot 翻 true；d=true 调 fn），到期后不重排。
+  const elapsedRef = useRef(false)
+  elapsedRef.current = false
 
   const subscribe: (cb: () => void) => VoidFn = useMemo(() => {
     if (delayValue === null) return noopSubscribe
     return (cb: () => void) => {
-      firedRef.current = () => {
-        firedRef.current = null
-        cb()
-        setTimeoutFn(() => {
-          if (isFnForm) fnRef.current?.()
-          else cb()
-        }, delayValue)
-      }
-      return firedRef.current
+      setTimeoutFn(() => {
+        elapsedRef.current = true
+        if (isFnForm) fnRef.current?.()
+        else cb()
+      }, delayValue)
+      return noop
     }
   }, [setTimeoutFn, delayValue, isFnForm, depsList])
 
   const getSnapshot = useCallback(
-    () => (delayValue === null ? null : firedRef.current === subscribe),
-    [delayValue, subscribe],
+    () => (delayValue === null ? false : elapsedRef.current),
+    [delayValue],
   )
   const expired = useSyncExternalStoreShim2(
     subscribe,
