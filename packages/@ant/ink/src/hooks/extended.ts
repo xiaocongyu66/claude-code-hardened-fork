@@ -228,7 +228,21 @@ function paintedWindow(node: DomNodeLike | null): PaintedWindow | undefined {
         yogaNode.getComputedHeight() - (yogaNode.getComputedBorder?.(3) ?? 0)
       const padTop = borderTop + (yogaNode.getComputedPadding?.(1) ?? 0)
       const padBottom = innerH - (yogaNode.getComputedPadding?.(3) ?? 0)
-      const scrollTop = parent.scrollTop ?? 0
+      // 官方 N7：滚动偏移钳制
+      const rawScroll = parent.scrollTop ?? 0
+      const scrollHeight = (parent as { scrollHeight?: number }).scrollHeight
+      const scrollTop =
+        scrollHeight === undefined
+          ? rawScroll
+          : Math.min(
+              rawScroll,
+              Math.max(
+                0,
+                scrollHeight -
+                  ((parent as { scrollViewportHeight?: number })
+                    .scrollViewportHeight ?? 0),
+              ),
+            )
       const top = offset - scrollTop
       const itemTop = offset - scrollTop
       const itemBottom = itemTop + itemHeight
@@ -387,14 +401,22 @@ export function useActiveThemeOverrides(): ThemeOverride[] {
   )
 }
 
-/** 官方 useCustomThemes：用户自定义主题表。 */
-export function useCustomThemes(): Record<string, ThemeOverride> {
-  const themes =
-    (useContext(ThemeOverridesContext) as Partial<ThemeContextContract>)
-      ?.customThemes ?? []
-  const out: Record<string, ThemeOverride> = {}
-  for (const t of themes) out[t.name] = t
-  return out
+/** 官方 noe：useCustomThemes()——返回对象契约
+ * {customThemes, activeCustomTheme, reloadCustomThemes, setPreviewOverrides}
+ * （noe 原文）。 */
+export function useCustomThemes(): {
+  customThemes: ThemeOverride[]
+  activeCustomTheme: ThemeOverride | undefined
+  reloadCustomThemes: () => Promise<void>
+  setPreviewOverrides: (o: ThemeOverride | null) => void
+} {
+  const ctx = useContext(ThemeOverridesContext) as Partial<ThemeContextContract>
+  return {
+    customThemes: ctx?.customThemes ?? [],
+    activeCustomTheme: ctx?.activeCustomTheme,
+    reloadCustomThemes: ctx?.reloadCustomThemes ?? (() => Promise.resolve()),
+    setPreviewOverrides: ctx?.setPreviewOverrides ?? noop,
+  }
 }
 
 /** 官方 fE：useResolvedTheme()——无参返回 resolvedTheme（fE 原文）。 */

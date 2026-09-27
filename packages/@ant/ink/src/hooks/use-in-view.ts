@@ -30,6 +30,21 @@ type DomNode = {
   scrollTopRendered?: number
 }
 
+/** 官方 N7：滚动偏移钳制（binary @149156502 原文）——scrollTop 不超过
+ * scrollHeight - scrollViewportHeight 的合法滚动范围。 */
+function clampedScrollOffset(node: {
+  scrollTop?: number
+  scrollHeight?: number
+  scrollViewportHeight?: number
+}): number {
+  const raw = node.scrollTop ?? 0
+  if (node.scrollHeight === undefined) return raw
+  return Math.min(
+    raw,
+    Math.max(0, node.scrollHeight - (node.scrollViewportHeight ?? 0)),
+  )
+}
+
 /** 官方 qe 等价：node 是否与 terminal viewport 相交（含滚动祖先修正）。 */
 function computeIsVisible(
   node: DomNode | null,
@@ -51,7 +66,8 @@ function computeIsVisible(
     }
     const oy = parent.style?.overflowY ?? parent.style?.overflow
     if (oy === 'scroll' && parent.scrollTopRendered === undefined) return null
-    if (parent.scrollTop) offset -= parent.scrollTop
+    const clamped = clampedScrollOffset(parent)
+    if (clamped) offset -= clamped
     parent = parent.parentNode ?? null
   }
   const rootHeight = rootYg?.getComputedHeight() ?? 0
