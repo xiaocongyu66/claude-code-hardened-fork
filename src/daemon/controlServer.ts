@@ -119,6 +119,8 @@ export interface ControlServerDeps {
   removeLease: (socket: Socket) => void
   log: (line: string) => void
   telemetry: (event: string, fields?: Record<string, unknown>) => void
+  /** 对端 uid 读取器（可注入——测试 fakeSocket 用；默认真实 getPeerUid） */
+  peerUidReader?: (s: Socket) => number | null
 }
 
 const IDLE_POLL_MS = 50
@@ -290,7 +292,7 @@ export async function handleControlRequest(
       code: 'ERATE',
     })
   }
-  const peerUid = getPeerUid(socket)
+  const peerUid = (deps.peerUidReader ?? getPeerUid)(socket)
   const daemonUid = process.getuid?.() ?? null
   const officialUsable = peerUid !== null && daemonUid !== null
   let authOk = false
