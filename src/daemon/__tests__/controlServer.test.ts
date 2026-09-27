@@ -35,6 +35,7 @@ function makeDeps(
     removeLease: () => {},
     log: () => {},
     telemetry: () => {},
+    peerUidReader: () => 0,
     ...overrides,
   }
 }
