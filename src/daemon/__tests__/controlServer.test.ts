@@ -35,7 +35,8 @@ function makeDeps(
     removeLease: () => {},
     log: () => {},
     telemetry: () => {},
-    peerUidReader: () => 0,
+    // 动态匹配 daemon uid（CI runner 非 root——写死 0 会走 mismatchError）
+    peerUidReader: () => process.getuid?.() ?? 0,
     ...overrides,
   }
 }
