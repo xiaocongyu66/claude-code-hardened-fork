@@ -63,7 +63,10 @@ export function useFocus(): FocusManagerApi {
     () => focusManager?.activeElement ?? null,
     [focusManager],
   )
-  const subscribe: (cb: () => void) => VoidFn = focusManager?.subscribe ?? noop
+  const focusSubscribe = focusManager?.subscribe as
+    | ((cb: () => void) => VoidFn)
+    | undefined
+  const subscribe: (cb: () => void) => VoidFn = focusSubscribe ?? noop
   const snap = useSyncExternalStoreShim(subscribe, activeElement)
   return useMemo(
     () => ({
@@ -95,7 +98,10 @@ export function useHasFocus(ref: { current: unknown }): boolean {
       subscribe: (cb: () => void) => VoidFn
     }
   }
-  const subscribe: (cb: () => void) => VoidFn = focusManager?.subscribe ?? noop
+  const focusSubscribe = focusManager?.subscribe as
+    | ((cb: () => void) => VoidFn)
+    | undefined
+  const subscribe: (cb: () => void) => VoidFn = focusSubscribe ?? noop
   const getSnapshot = useCallback(() => {
     const el = ref.current
     const active = focusManager?.activeElement
@@ -162,7 +168,8 @@ export function useMeasured<T>(getSnapshot: () => T): T {
   const { subscribeLayout } = useContext(AppContext as never) as {
     subscribeLayout?: (cb: () => void) => VoidFn
   }
-  const stored = useSyncExternalStoreShim(subscribeLayout ?? noop, getSnapshot)
+  const sub: (cb: () => void) => VoidFn = subscribeLayout ?? noop
+  const stored = useSyncExternalStoreShim(sub, getSnapshot)
   const [, force] = useReducer((n: number) => n + 1, 0)
   useEffect(() => {
     if (!Object.is(getSnapshot(), stored)) force()
@@ -307,12 +314,20 @@ export const ThemeOverridesProvider = ThemeOverridesContext.Provider
 
 /** 官方 useActiveThemeOverrides：session 级覆盖层。 */
 export function useActiveThemeOverrides(): ThemeOverride[] {
-  return useContext(ThemeOverridesContext)?.active ?? []
+  return (
+    (useContext(ThemeOverridesContext) as Partial<ThemeContextContract>)
+      ?.activeThemeOverrides ?? []
+  )
 }
 
 /** 官方 useCustomThemes：用户自定义主题表。 */
 export function useCustomThemes(): Record<string, ThemeOverride> {
-  return useContext(ThemeOverridesContext)?.custom ?? {}
+  const themes =
+    (useContext(ThemeOverridesContext) as Partial<ThemeContextContract>)
+      ?.customThemes ?? []
+  const out: Record<string, ThemeOverride> = {}
+  for (const t of themes) out[t.name] = t
+  return out
 }
 
 /** 官方 fE：useResolvedTheme()——无参返回 resolvedTheme（fE 原文）。 */
@@ -366,10 +381,10 @@ export function topWithin(
   root: unknown,
 ): number {
   let offset = 0
-  let cur = node
-  while (cur !== undefined && cur !== root) {
+  let cur: typeof node = node
+  while (cur != null && cur !== root) {
     offset += cur.yogaNode?.getComputedTop() ?? 0
-    cur = (cur as { parentNode?: unknown }).parentNode as typeof cur
+    cur = (cur as { parentNode?: unknown }).parentNode as typeof node
   }
   return cur === root ? offset : -1
 }
@@ -407,5 +422,8 @@ export function useIsScreenReaderEnabled(): boolean {
 }
 
 function useMemoSafe<T>(): React.Context<T | undefined> {
-  return require('react').createContext<T | undefined>(undefined)
+  const React = require('react') as {
+    createContext: <T2>(d: T2 | undefined) => React.Context<T2 | undefined>
+  }
+  return React.createContext<T | undefined>(undefined)
 }

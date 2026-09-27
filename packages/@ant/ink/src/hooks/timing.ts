@@ -129,7 +129,7 @@ export function useAnimationFrameEx(
   const [, isVisible, , compute] = inView ?? [noop, true, noop, () => true]
   const floor = fps === null ? null : Math.ceil(repaintFloor(fps))
 
-  const subscribe = useMemo(() => {
+  const subscribe: (cb: () => void) => VoidFn = useMemo(() => {
     if (!clock || floor === null) return noop
     return (cb: () => void) => clock.subscribeKeepAlive?.(cb) ?? noop
   }, [clock, floor])
