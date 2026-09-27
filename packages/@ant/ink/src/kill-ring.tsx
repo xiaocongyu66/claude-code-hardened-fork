@@ -1,30 +1,30 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
 
 /**
- * KillRing —— 官方 ink 的输入剪贴板环（binary @152674000-152679000 区段，
- * minified 原文反混淆）。
+ * KillRing —— 官方 ink 的输入剪贴板环（binary @152676333 区段，minified
+ * 原文反混淆 1:1 还原）。
  *
  * 官方错误契约（原文）：useKillRing cannot be called outside of a
  * <KillRingProvider /> (mounted around every Ink root by src/ink.ts)
  *
  * 模块结构（原文实证）：
- *   Wvn  createKillRingStore —— { get state, dispatch }（reducer 环状 yank）
+ *   Wvn  createKillRingStore —— { get state, dispatch }
  *   VJe  KillRingProvider    —— 外部 handle 注入优先，否则默认工厂
  *   __t  useKillRing         —— Context 必需
- *   pqt/fqt                   —— yank/yank-pop 类动作（action creator）
+ *   pqt  killRingTop         —— ring[0] ?? ''
+ *   fqt  yankPopResult       —— yanked && ring>1 → 环内下一项，否则 null
  *
- * state 形状（(mode.index+1)%ring.length 反推）：
- *   { ring: string[], mode: { index: number, start: number, length: number } }
+ * 官方语义（reducer h 原文）：
+ *   mode 是 discriminated union：'idle' | 'killing' | 'yanked'
+ *   ring 上限 y=10（binary var y=10 实证）
+ *   kill 连续（killing 态）合并到 ring[0]（prepend: text+head / append: head+text）
+ *   yank 归位 index=0；yankPop 环进；interrupt 归 idle
  */
 
-export interface KillRingMode {
-  /** 当前 yank 环位置。 */
-  index: number;
-  /** 插入起点（列）。 */
-  start: number;
-  /** 插入长度。 */
-  length: number;
-}
+export type KillRingMode =
+  | { type: 'idle' }
+  | { type: 'killing' }
+  | { type: 'yanked'; start: number; length: number; index: number };
 
 export interface KillRingState {
   ring: string[];
@@ -32,8 +32,9 @@ export interface KillRingState {
 }
 
 export interface KillRingAction {
-  type: 'push' | 'yank' | 'yankPop' | 'reset';
+  type: 'kill' | 'yank' | 'yankPop' | 'updateYankLength' | 'interrupt';
   text?: string;
+  direction?: 'prepend' | 'append';
   start?: number;
   length?: number;
 }
@@ -43,32 +44,52 @@ export interface KillRingStore {
   dispatch: (action: KillRingAction) => void;
 }
 
-/** 官方 h：reducer——环状 yank 语义。 */
+/** 官方 y=10：ring 上限（binary var y=10 实证）。 */
+const RING_LIMIT = 10;
+
+const INITIAL: KillRingState = { ring: [], mode: { type: 'idle' } };
+
+/** 官方 h：reducer——kill 合并 / yank 环状 yank 语义。 */
 function killRingReducer(state: KillRingState, action: KillRingAction): KillRingState {
   switch (action.type) {
-    case 'push': {
+    case 'kill': {
       const text = action.text ?? '';
-      if (!text || text === state.ring[0]) return state;
-      const ring = [text, ...state.ring].slice(0, 32);
-      return { ring, mode: { index: 0, start: action.start ?? 0, length: action.length ?? 0 } };
+      if (text.length === 0) {
+        return state.mode.type === 'idle' ? state : { ...state, mode: { type: 'idle' } };
+      }
+      const ring =
+        state.mode.type === 'killing' && state.ring.length > 0
+          ? [action.direction === 'prepend' ? text + state.ring[0] : state.ring[0] + text, ...state.ring.slice(1)]
+          : [text, ...state.ring].slice(0, RING_LIMIT);
+      return { ring, mode: { type: 'killing' } };
     }
-    case 'yank': {
-      return { ...state, mode: { index: 0, start: action.start ?? 0, length: action.length ?? 0 } };
-    }
+    case 'yank':
+      return {
+        ...state,
+        mode: {
+          type: 'yanked',
+          start: action.start ?? 0,
+          length: action.length ?? 0,
+          index: 0,
+        },
+      };
     case 'yankPop': {
-      // 官方原文：(mode.index+1)%ring.length
-      const index = state.ring.length > 0 ? (state.mode.index + 1) % state.ring.length : 0;
+      if (state.mode.type !== 'yanked' || state.ring.length <= 1) return state;
+      const index = (state.mode.index + 1) % state.ring.length;
       return { ...state, mode: { ...state.mode, index } };
     }
-    case 'reset':
+    case 'updateYankLength': {
+      if (state.mode.type !== 'yanked') return state;
+      return { ...state, mode: { ...state.mode, length: action.length ?? 0 } };
+    }
+    case 'interrupt':
     default:
-      return { ring: [], mode: { index: 0, start: 0, length: 0 } };
+      if (state.mode.type === 'idle') return state;
+      return { ...state, mode: { type: 'idle' } };
   }
 }
 
-const INITIAL: KillRingState = { ring: [], mode: { index: 0, start: 0, length: 0 } };
-
-/** 官方 Wvn：createKillRingStore。 */
+/** 官方 Wvn：createKillRingStore（初始态 a={ring:[],mode:{type:'idle'}}）。 */
 export function createKillRingStore(initialState: KillRingState = INITIAL): KillRingStore {
   let current = initialState;
   return {
@@ -81,10 +102,17 @@ export function createKillRingStore(initialState: KillRingState = INITIAL): Kill
   };
 }
 
-/** 官方 yank 结果：按 mode 取环内文本。 */
-export function yankResult(state: KillRingState): { text: string; start: number; length: number } {
-  const i = state.mode.index;
-  return { text: state.ring[i] ?? '', start: state.mode.start, length: state.mode.length };
+/** 官方 pqt：killRingTop——环顶文本（pqt 原文：n.ring[0] ?? ''）。 */
+export function killRingTop(state: KillRingState): string {
+  return state.ring[0] ?? '';
+}
+
+/** 官方 fqt：yankPopResult——仅 yanked 且 ring>1 返回环内下一项（fqt 原文）。 */
+export function yankPopResult(state: KillRingState): { text: string; start: number; length: number } | null {
+  if (state.mode.type !== 'yanked' || state.ring.length <= 1) return null;
+  const index = (state.mode.index + 1) % state.ring.length;
+  const { start, length } = state.mode;
+  return { text: state.ring[index] ?? '', start, length };
 }
 
 const KillRingContext = createContext<KillRingStore | undefined>(undefined);

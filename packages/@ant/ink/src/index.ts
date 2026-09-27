@@ -290,8 +290,10 @@ export {
   KillRingProvider,
   createKillRingStore,
   useKillRing,
-  yankResult,
+  killRingTop,
+  yankPopResult,
   type KillRingStore,
   type KillRingState,
   type KillRingMode,
+  type KillRingAction,
 } from './kill-ring.js'
