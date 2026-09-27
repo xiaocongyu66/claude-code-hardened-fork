@@ -2,6 +2,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -294,9 +295,9 @@ export function usePaintedRows(
     contentRows: number | undefined
   }>({ rows, lastRows: undefined, contentRows: undefined })
 
-  const subscribe = useCallback(
+  const subscribe: (cb: () => void) => VoidFn = useCallback(
     (cb: () => void) =>
-      enabled && subscribeFrames ? subscribeFrames(cb) : noopSubscribe,
+      enabled && subscribeFrames ? subscribeFrames(cb) : noopSubscribe(),
     [enabled, subscribeFrames],
   )
   const getSnapshot = useCallback(() => {

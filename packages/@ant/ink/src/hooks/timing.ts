@@ -152,7 +152,7 @@ export function useAnimationFrameEx(
     (cb: () => void) =>
       alive && clock?.subscribeKeepAlive
         ? clock.subscribeKeepAlive(cb)
-        : noopSubscribe(),
+        : noopSubscribe,
     [alive, clock],
   )
   const getSnapshot = useCallback(() => {
@@ -164,7 +164,13 @@ export function useAnimationFrameEx(
     alive ? subscribe : noopSubscribe,
     getSnapshot,
   )
-  return [viewport ?? [noop, true, noop, () => true], tick]
+  const fallbackViewport: [
+    setRef: (n: unknown) => void,
+    isVisible: boolean,
+    forceCheck: () => boolean,
+    compute: () => boolean,
+  ] = [noop, true, noop, () => true]
+  return [viewport ?? fallbackViewport, tick]
 }
 
 // ── 官方 _r：useTimeout（函数·数值双态重载）──
@@ -199,8 +205,8 @@ export function useTimeout(
     : (b as unknown[] | undefined)
   const firedRef = useRef<VoidFn | null>(null)
 
-  const subscribe = useMemo(() => {
-    if (delayValue === null) return noop
+  const subscribe: (cb: () => void) => VoidFn = useMemo(() => {
+    if (delayValue === null) return noopSubscribe
     return (cb: () => void) => {
       firedRef.current = () => {
         firedRef.current = null
