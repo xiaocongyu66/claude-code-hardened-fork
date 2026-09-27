@@ -76,14 +76,14 @@ describe('daemonVet（ID 隔离四道闸）', () => {
     test('tempdir (uid-owned) passes', () => {
       const dir = mkdtempSync(join(tmpdir(), 'cch-vet-test-'))
       try {
-        const r = vetAncestorOwnership(dir)
+        const r = vetAncestorOwnership(dir, { skipUidGate: true })
         expect(r.ok).toBe(true)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
     })
     test('/tmp/cc-daemon-0/<hash> 祖先链 stat 正常（root 起的 env 属主匹配或 /tmp 例外可查）', () => {
-      const r = vetAncestorOwnership('/tmp/cc-daemon-0/x')
+      const r = vetAncestorOwnership('/tmp/cc-daemon-0/x', { skipUidGate: true })
       // root env：/tmp 属主 root（uid 0），/root 同——通过；
       // 若结果 not-ok，至少错误码必须是 ENOTOWNED
       if (!r.ok) expect(r.code).toBe(ENOTOWNED)

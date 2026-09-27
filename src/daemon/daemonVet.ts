@@ -175,13 +175,17 @@ const PUBLIC_ANCESTOR_WHITELIST = new Set([
 ])
 
 /** 官方 T()：祖先链逐级 stat，属主非同 uid → ENOTOWNED；白名单目录跳过。 */
-export function vetAncestorOwnership(rootPath: string): {
+export function vetAncestorOwnership(
+  rootPath: string,
+  opts: { skipUidGate?: boolean } = {},
+): {
   ok: boolean
   code?: string
   message?: string
   entries: AncestorVetEntry[]
 } {
-  assertUidVetted()
+  if (!opts.skipUidGate) assertUidVetted()
+
   const uid = process.getuid?.()
   const entries: AncestorVetEntry[] = []
   let cursor = rootPath
