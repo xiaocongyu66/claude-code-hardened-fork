@@ -393,12 +393,11 @@ const ThemeOverridesContext = useMemoSafe<Partial<ThemeContextContract>>()
 
 export const ThemeOverridesProvider = ThemeOverridesContext.Provider
 
-/** 官方 useActiveThemeOverrides：session 级覆盖层。 */
-export function useActiveThemeOverrides(): ThemeOverride[] {
-  return (
-    (useContext(ThemeOverridesContext) as Partial<ThemeContextContract>)
-      ?.activeThemeOverrides ?? []
-  )
+/** 官方 uqt：useActiveThemeOverrides()——原样返回 activeThemeOverrides
+ * （Context 默认 void 0，无 fallback——uqt 原文）。 */
+export function useActiveThemeOverrides(): ThemeOverride[] | undefined {
+  return (useContext(ThemeOverridesContext) as Partial<ThemeContextContract>)
+    ?.activeThemeOverrides
 }
 
 /** 官方 noe：useCustomThemes()——返回对象契约

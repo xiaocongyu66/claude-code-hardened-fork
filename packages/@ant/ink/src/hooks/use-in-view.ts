@@ -1,5 +1,11 @@
-import { useCallback, useContext, useEffect, useRef, useState } from 'react'
-import AppContext from '../components/AppContext.js'
+import {
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
+import { TerminalSizeContext } from '../components/TerminalSizeContext.js'
 
 /**
  * 官方 D7：useInView()——元素是否落在终端可视窗口内。
@@ -85,7 +91,9 @@ export function useTerminalViewport(): [
   forceCheck: () => boolean,
   computeIsVisible: () => boolean,
 ] {
-  const terminal = useContext(AppContext as never) as unknown as SizeCtx
+  // 官方 D7 原文：o=Pe(Yw)=TerminalSizeContext（非 AppContext）
+  const terminal = useContext(TerminalSizeContext as never) as SizeCtx | null
+  const term = terminal ?? undefined
   const nodeRef = useRef<DomNode | null>(null)
   const [state, setState] = useState({ isVisible: true })
 
@@ -93,28 +101,32 @@ export function useTerminalViewport(): [
     nodeRef.current = node as DomNode | null
   }, [])
 
-  const compute = useCallback((): boolean => {
-    const result = computeIsVisible(nodeRef.current, terminal)
+  // 官方 d：计算 + setState（返回最新值；null 时保持现值）
+  const check = useCallback((): boolean => {
+    const result = computeIsVisible(nodeRef.current, term)
     if (result === null) return state.isVisible
     if (result !== state.isVisible) setState({ isVisible: result })
     return result
-  }, [terminal, state.isVisible])
+  }, [term, state.isVisible])
 
-  const forceCheck = useCallback((): boolean => compute(), [compute])
+  // 官方 f：forceCheck——调最新 d（有 setState）
+  const checkRef = useRef(check)
+  checkRef.current = check
+  const forceCheck = useCallback((): boolean => checkRef.current(), [])
 
-  useEffect(() => {
-    compute()
+  // 官方 h/b：纯计算（无 setState，用 terminal 的 ref 语境）
+  const termRef = useRef(term)
+  termRef.current = term
+  const computeIsVisible = useCallback(
+    (): boolean =>
+      computeIsVisible(nodeRef.current, termRef.current) ?? state.isVisible,
+    [state.isVisible],
+  )
+
+  // 官方 sn=useLayoutEffect
+  useLayoutEffect(() => {
+    check()
   })
 
-  return [
-    setRef,
-    state.isVisible,
-    forceCheck,
-    compute,
-  ] as unknown as UseInViewResult as [
-    setRef: (node: unknown) => void,
-    isVisible: boolean,
-    forceCheck: () => boolean,
-    computeIsVisible: () => boolean,
-  ]
+  return [setRef, state.isVisible, forceCheck, computeIsVisible]
 }
