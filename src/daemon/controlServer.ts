@@ -260,6 +260,11 @@ function getRateLimiter(): PeerRateLimiter {
   return rateLimiter
 }
 
+/** 测试用：重置全局限速单例（模块级累积失败会跨用例锁定）。 */
+export function resetRateLimiter(): void {
+  rateLimiter = null
+}
+
 /** 连接建立时下发 challenge（客户端据此算 HMAC）。 */
 export function issueChallenge(): string {
   return createChallenge()

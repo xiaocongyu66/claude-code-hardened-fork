@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import {
   handleControlRequest,
+  resetRateLimiter,
   type ControlServerDeps,
   type JobHandle,
 } from '../controlServer.js'
+import { afterEach } from 'bun:test'
 import type { Socket } from 'net'
 import type { ControlRequest, ControlResponse } from '../controlProtocol.js'
 
@@ -53,6 +55,10 @@ function makeJob(short: string, overrides: Partial<JobHandle> = {}): JobHandle {
 }
 
 describe('handleControlRequest (upstream yn)', () => {
+  afterEach(() => {
+    resetRateLimiter()
+  })
+
   test('bad json shape → EUNKNOWN', async () => {
     const socket = fakeSocket()
     await handleControlRequest(makeDeps(), socket, null as never)
