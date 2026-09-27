@@ -148,11 +148,11 @@ export function useAnimationFrameEx(
   const floor = fps === null ? null : alignFrameInterval(repaintFloor(fps))
   const alive = !!clock && isVisible && fps !== null
 
-  const subscribe = useCallback(
+  const subscribe: (cb: () => void) => VoidFn = useCallback(
     (cb: () => void) =>
       alive && clock?.subscribeKeepAlive
         ? clock.subscribeKeepAlive(cb)
-        : noopSubscribe,
+        : noopSubscribe(),
     [alive, clock],
   )
   const getSnapshot = useCallback(() => {
@@ -243,13 +243,15 @@ function useSyncExternalStoreShim2<T>(
     useSyncExternalStore?: (s: (cb: () => void) => VoidFn, g: () => T) => T
     useEffect: (f: () => void, d?: unknown[]) => void
     useState: (i: T) => [T, (v: T) => void]
-    useEffect: (f: () => VoidFn, d?: unknown[]) => void
     useReducer: (r: (n: number) => number, i: number) => [number, VoidFn]
   }
   if (React.useSyncExternalStore) {
     return React.useSyncExternalStore(subscribe, getSnapshot)
   }
   const [, force] = React.useReducer((n: number) => n + 1, 0)
-  React.useEffect(() => subscribe(), [subscribe])
+  React.useEffect(() => {
+    const un = subscribe(() => force())
+    return () => un()
+  }, [subscribe])
   return getSnapshot()
 }
