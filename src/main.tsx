@@ -5246,24 +5246,31 @@ async function run(): Promise<CommanderCommand> {
       const { toFleetRows } = await import('./components/FleetView.js');
       const rows = toFleetRows(sessions);
       if (process.stdout.isTTY) {
-        const { wrappedRender: render } = await import('@anthropic/ink');
+        const { wrappedRender: render, ThemeProvider } = await import('@anthropic/ink');
         const { FleetView } = await import('./components/FleetView.js');
         const instance = await render(
-          <FleetView
-            rows={rows}
-            onAttach={row => {
-              void (async () => {
-                const handlers = await import('./cli/bg.js');
-                await handlers.attachHandler(row.shortId);
-              })();
-            }}
-            onKill={row => {
-              void (async () => {
-                const handlers = await import('./cli/bg.js');
-                await handlers.killHandler(row.shortId);
-              })();
-            }}
-          />,
+          // wrappedRender 不注入 theme——独立渲染必须显式包 ThemeProvider
+          <ThemeProvider>
+            <FleetView
+              rows={rows}
+              loadRows={async () => {
+                const fresh = await bg.listLiveSessions();
+                return toFleetRows(fresh);
+              }}
+              onAttach={row => {
+                void (async () => {
+                  const handlers = await import('./cli/bg.js');
+                  await handlers.attachHandler(row.shortId);
+                })();
+              }}
+              onKill={row => {
+                void (async () => {
+                  const handlers = await import('./cli/bg.js');
+                  await handlers.killHandler(row.shortId);
+                })();
+              }}
+            />
+          </ThemeProvider>,
         );
         await instance.waitUntilExit();
         process.exit(0);
