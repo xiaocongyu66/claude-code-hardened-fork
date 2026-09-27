@@ -377,8 +377,9 @@ export interface ThemeContextContract {
   currentTheme: string
   /** overrides 折叠后的最终值。 */
   resolvedTheme: Record<string, string>
-  /** session 级覆盖层。 */
-  activeThemeOverrides: ThemeOverride[] | undefined
+  /** session 级覆盖值集（cqt 原文：et ?? d?.overrides——preview 值集或
+   * 自定义主题的 overrides；Record 形态非数组）。 */
+  activeThemeOverrides: Record<string, string> | undefined
   /** 用户自定义主题表（数组形态）。 */
   customThemes: ThemeOverride[]
   /** 激活的自定义主题。 */
@@ -394,8 +395,8 @@ const ThemeOverridesContext = useMemoSafe<Partial<ThemeContextContract>>()
 export const ThemeOverridesProvider = ThemeOverridesContext.Provider
 
 /** 官方 uqt：useActiveThemeOverrides()——原样返回 activeThemeOverrides
- * （Context 默认 void 0，无 fallback——uqt 原文）。 */
-export function useActiveThemeOverrides(): ThemeOverride[] | undefined {
+ * （cqt 原文：et ?? d?.overrides——override 值集 Record 或 undefined）。 */
+export function useActiveThemeOverrides(): Record<string, string> | undefined {
   return (useContext(ThemeOverridesContext) as Partial<ThemeContextContract>)
     ?.activeThemeOverrides
 }
