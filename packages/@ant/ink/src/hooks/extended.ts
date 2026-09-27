@@ -505,9 +505,7 @@ function useSyncExternalStoreShim<T>(
 
 /** 官方 useIsScreenReaderEnabled：STDIN 屏幕阅读器标记。 */
 export function useIsScreenReaderEnabled(): boolean {
-  const [enabled] = useState(
-    () => process.env['CLAUDE_CODE_SCREEN_READER'] === '1',
-  )
+  const [enabled] = useState(() => process.env['INK_SCREEN_READER'] === '1')
   return enabled
 }
 

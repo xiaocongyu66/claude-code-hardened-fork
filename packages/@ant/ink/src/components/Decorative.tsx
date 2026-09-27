@@ -17,7 +17,7 @@ export function Decorative({
   children: React.ReactNode;
   fallback?: React.ReactNode;
 }): React.ReactNode {
-  const screenReaderEnabled = process.env['CLAUDE_CODE_SCREEN_READER'] === '1';
+  const screenReaderEnabled = process.env['INK_SCREEN_READER'] === '1';
   if (screenReaderEnabled) {
     return fallback ?? null;
   }
