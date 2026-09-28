@@ -268,7 +268,7 @@ export function FleetView({
   // 启动、全部退订停止），subscribe 触发数据拉取。loadRows 作为变换端
   // （SessionEntry→FleetRow + logTail 增强）；待 listLiveSessions 完全
   // 迁移到 jobs 目录后，此处直接消费 roster 的 FleetJob 快照。
-  const rosterRef = useRef<ReturnType<typeof FleetRoster> | null>(null);
+  const rosterRef = useRef<InstanceType<typeof FleetRoster> | null>(null);
   useEffect(() => {
     if (!loadRows) return undefined;
     if (!rosterRef.current) rosterRef.current = new FleetRoster();
