@@ -100,19 +100,33 @@ function glyphColor(row: FleetRow): keyof Theme | undefined {
   }
 }
 
-/** 组间官方顺序（state 模式）。 */
-const GROUP_ORDER = ['running', 'blocked', 'idle', 'booked', 'done', 'failed', 'stopped'] as const;
+// ── 分组（官方 ao/en/ii @153017478：组序 review 最前，自然语言组名）──
 
+/** 官方 en：组序（cch 无 PR 数据源，review 组仅在有待评审输出时出现）。 */
+const GROUP_ORDER = ['review', 'blocked', 'working', 'done'] as const;
+
+/** 官方 ao：组名（自然语言，无大写无计数）。 */
 const GROUP_TITLE: Record<string, string> = {
-  running: 'WORKING',
-  blocked: 'BLOCKED — NEEDS YOUR INPUT',
-  idle: 'IDLE',
-  booked: 'SCHEDULED',
-  done: 'PAST',
-  failed: 'PAST',
-  stopped: 'PAST',
-  past: 'PAST',
+  review: 'Ready for review',
+  blocked: 'Needs input',
+  working: 'Working',
+  done: 'Completed',
 };
+
+/** 官方 zs：组副标题（组头下方 dim 行）。 */
+const GROUP_SUBTITLE: Record<string, string> = {
+  review: '',
+  blocked: 'Sessions that have a question or need your decision land here',
+  working: 'Sessions Claude is actively working on — they keep running even if you close the terminal',
+  done: 'Finished sessions wait here for you to review',
+};
+
+/** 官方 ii 分组映射（cch tempo → 官方组）：failure/stopped→done、兜底→working。 */
+function groupOf(row: FleetRow): 'review' | 'blocked' | 'working' | 'done' {
+  if (row.tempo === 'blocked') return 'blocked';
+  if (row.tempo === 'done' || row.tempo === 'failed' || row.tempo === 'stopped') return 'done';
+  return 'working'; // running/idle/booked 兜底（官方 ii 同款）
+}
 
 /** 每组折叠上限（官方 Rm=3 语义）。 */
 const FOLD_CAP = 3;
@@ -174,30 +188,69 @@ function Spinner({ active }: { active: boolean }): React.ReactNode {
 /** launcher cwd（模块级一次——渲染期禁系统调用副作用）。 */
 const LAUNCHER_CWD = process.cwd();
 
-/** 官方 Da：标题行 + counts 行 + cwd。 */
-function FleetHeader({ data }: { data: FleetRow[] }): React.ReactNode {
-  const blocked = data.filter(r => r.tempo === 'blocked').length;
-  const working = data.filter(r => r.tempo === 'running').length;
-  const completed = data.filter(r => r.tempo === 'done' || r.tempo === 'failed' || r.tempo === 'stopped').length;
-  const hasLive = data.some(r => r.tempo !== 'done' && r.tempo !== 'failed' && r.tempo !== 'stopped');
-  const cwd = truncateWidth(LAUNCHER_CWD, 44);
+// ── Logo（官方 Nre @152987900：clawd 吉祥物，default pose，原文逐字符）──
+
+const LOGO_R1L = ' ▐';
+const LOGO_R1E = '▛███▛█';
+const LOGO_R2L = '▝▜';
+const LOGO_R2R = '██▀';
+const LOGO_R3 = ' ▝▝   ▝▝ ';
+
+/** 官方 Nre：三行 clawd art（columns>=70 时由 header 控制渲染）。 */
+function Logo(): React.ReactNode {
   return (
-    <Box flexDirection="column">
-      <Box>
-        <Text bold>Claude Code</Text>
-        <Text dimColor>{` v${MACRO.VERSION}`}</Text>
-        <Text dimColor>{` · ${cwd}`}</Text>
-        {hasLive ? <Text dimColor> · live</Text> : null}
-      </Box>
-      <Text dimColor>
-        {data.length === 0
-          ? t('nothing running')
-          : t('{{blocked}} awaiting input · {{working}} working · {{completed}} completed', {
-              blocked,
-              working,
-              completed,
-            })}
+    <Box flexDirection="column" flexShrink={0}>
+      <Text>
+        <Text color="clawd_body">{LOGO_R1L}</Text>
+        <Text color="clawd_body" backgroundColor="clawd_background">
+          {LOGO_R1E}
+        </Text>
       </Text>
+      <Text>
+        <Text color="clawd_body">{LOGO_R2L}</Text>
+        <Text color="clawd_body" backgroundColor="clawd_background">
+          {'█████'}
+        </Text>
+        <Text color="clawd_body">{LOGO_R2R}</Text>
+      </Text>
+      <Text color="clawd_body">{LOGO_R3}</Text>
+    </Box>
+  );
+}
+
+/** 官方 Da（§8.2 原文）：[logo, 纵排[标题行, counts 行]] gap:2 横排 + marginBottom:1。 */
+function FleetHeader({ data, columns }: { data: FleetRow[]; columns: number }): React.ReactNode {
+  const blocked = data.filter(r => r.tempo === 'blocked').length;
+  const working = data.filter(r => groupOf(r) === 'working').length;
+  const completed = data.filter(r => groupOf(r) === 'done').length;
+  // model 显示名（cch：ANTHROPIC_MODEL 优先，缺省不显示 model 段）
+  const model = process.env.ANTHROPIC_MODEL ?? '';
+  // cwd 截断（官方 Obe：columns-11-model宽-3，最少 10）
+  const cwdW = Math.max(columns - 11 - (model ? stringWidth(model) + 3 : 0), 10);
+  const cwd = truncateWidth(LAUNCHER_CWD, cwdW);
+  const showLogo = columns >= 70;
+  return (
+    <Box gap={2} marginBottom={1}>
+      {showLogo ? <Logo /> : null}
+      <Box flexDirection="column">
+        <Text>
+          <Text bold>Claude Code</Text>
+          <Text> </Text>
+          <Text dimColor>
+            v{MACRO.VERSION}
+            {model ? ` · ${model} · ${cwd}` : ` · ${cwd}`}
+          </Text>
+        </Text>
+        <Text dimColor>
+          {data.length === 0
+            ? t('nothing running')
+            : t('{{blocked}} awaiting input · {{working}} working · {{completed}} completed', {
+                blocked,
+                working,
+                completed,
+              })}
+        </Text>
+      </Box>
     </Box>
   );
 }
@@ -217,6 +270,7 @@ function JobLine({
   renaming,
   labelCol,
   ageCol,
+  detailCol,
   registerRef,
 }: {
   row: FleetRow;
@@ -225,6 +279,7 @@ function JobLine({
   renaming: { draft: string } | undefined;
   labelCol: number;
   ageCol: number;
+  detailCol: number;
   registerRef: (id: string, el: DOMElement | null) => void;
 }): React.ReactNode {
   const st = statusWord(row);
@@ -276,7 +331,9 @@ function JobLine({
             <Text color={st.color} dimColor={st.dim}>
               {t(st.word)}
             </Text>
-            {detailText ? <Text dimColor> · {truncateWidth(detailText, 48)}</Text> : null}
+            {detailText ? (
+              <Text dimColor> · {truncateWidth(detailText, detailCol - stringWidth(t(st.word)) - 3)}</Text>
+            ) : null}
           </>
         )}
       </Box>
@@ -649,12 +706,19 @@ export function FleetView({
     );
   }
 
-  // 官方 cols.label = 指针+图标+2空格+名的整列宽（名字截断 24）
-  const labelCol = Math.max(...data.map(r => stringWidth(truncateWidth(r.name, 24))), 8) + 4;
-  const ageCol = Math.max(...data.map(r => stringWidth(r.ageLabel ?? '')), 4);
+  // 官方 Ic（§8.6）：label=min(max(40, columns/3), max(12, 内容宽))——40 列下限
+  const labelCol = Math.min(
+    Math.max(40, Math.floor(columns / 3)),
+    Math.max(12, ...data.map(r => stringWidth(truncateWidth(r.name, 64)))),
+  );
+  // age=max(4, 内容宽)
+  const ageCol = Math.max(4, ...data.map(r => stringWidth(r.ageLabel ?? '')));
+  // detail=max(8, columns-(label+2)-(age+2)-4)
+  const detailCol = Math.max(8, columns - (labelCol + 2) - (ageCol + 2) - 4);
   // footer 分档（官方 il 优先级链）
+  // 官方 il（§8.5）：exitPending 大写版 / renaming chords / armed / composer
   const footerText = exitPending
-    ? `${t('press ctrl+c or q again to exit')} · ${t('{{count}} agents will keep running', { count: data.filter(r => r.tempo === 'running' || r.tempo === 'blocked').length })}`
+    ? `${t('Press Ctrl-C again to exit')} · ${t('{{count}} agents will keep running', { count: data.filter(r => groupOf(r) === 'working' || groupOf(r) === 'blocked').length })}`
     : killArmed
       ? t('ctrl+x again to delete · esc to keep')
       : renaming
@@ -666,7 +730,7 @@ export function FleetView({
   return (
     <AlternateScreen>
       <Box flexDirection="column" paddingX={1} paddingY={1} flexGrow={1}>
-        <FleetHeader data={data} />
+        <FleetHeader data={data} columns={columns} />
 
         <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} flexShrink={1} marginTop={1}>
           {lines.map((line, idx) => {
@@ -686,12 +750,9 @@ export function FleetView({
             }
             if (line.kind === 'fold') {
               const sel = focusable.indexOf(line) === selected;
-              const isPast = line.group === 'past';
-              const failedHidden = isPast
-                ? data.filter(r => r.tempo === 'failed').length -
-                  Math.min(FOLD_CAP, data.filter(r => r.tempo === 'failed').length)
-                : 0;
-              const label = isPast
+              const isDone = line.group === 'done';
+              const failedHidden = isDone ? data.filter(r => r.tempo === 'failed').length : 0;
+              const label = isDone
                 ? `… ${t('show all ({{count}} more{{failed}})', { count: line.hidden ?? 0, failed: failedHidden > 0 ? ` · ${failedHidden} ${t('failed')}` : '' })}`
                 : t('… {{count}} more', { count: line.hidden ?? 0 });
               return (
@@ -722,6 +783,7 @@ export function FleetView({
                 renaming={renaming?.shortId === row.shortId ? { draft: renaming.draft } : undefined}
                 labelCol={labelCol}
                 ageCol={ageCol}
+                detailCol={detailCol}
                 registerRef={registerRef}
               />
             );
@@ -730,15 +792,7 @@ export function FleetView({
 
         {/* composer（官方 Cl：round 上下边框 + ❯ prefix + placeholder） */}
         {composerDraft !== null ? (
-          <Box
-            marginTop={1}
-            borderStyle="round"
-            borderLeft={false}
-            borderRight={false}
-            borderBottom={false}
-            borderColor="promptBorder"
-            paddingX={1}
-          >
+          <Box marginTop={1} borderStyle="round" borderLeft={false} borderRight={false} borderDimColor paddingX={1}>
             <Text color="suggestion">❯ </Text>
             {composerDraft ? (
               <Text>
@@ -762,7 +816,7 @@ export function FleetView({
         ) : null}
 
         {/* footer（官方 il 分档） */}
-        <Box marginTop={1}>
+        <Box marginTop={1} paddingLeft={2} height={1}>
           {hint ? <Text color="warning"> {hint}</Text> : null}
           {footerText ? (
             <Text dimColor> {footerText}</Text>
