@@ -314,6 +314,18 @@ export async function syncJobActivity(
   return updateJobState(shortId, patch)
 }
 
+/** resume 切换后同步 jobId 映射（官方 syncJobResumeSessionId——
+ *  --resume / /resume 换 sessionId 时 state.json 里的映射不能旧）。 */
+export async function syncJobResumeSessionId(
+  shortId: string,
+  newSessionId: string,
+): Promise<JobState | null> {
+  return updateJobState(shortId, {
+    sessionId: newSessionId,
+    shortId: newSessionId.slice(0, 8),
+  })
+}
+
 // ── 谓词（官方语义） ──
 
 /** isTerminal：终态。 */

@@ -74,27 +74,55 @@ export async function registerSession(): Promise<boolean> {
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 })
     await chmod(dir, 0o700)
-    await writeFile(
-      pidFile,
-      jsonStringify({
-        pid: process.pid,
-        sessionId: getSessionId(),
-        cwd: getOriginalCwd(),
-        startedAt: Date.now(),
-        kind,
-        entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT,
-        ...(feature('UDS_INBOX')
-          ? { messagingSocketPath: process.env.CLAUDE_CODE_MESSAGING_SOCKET }
-          : {}),
-        ...(feature('BG_SESSIONS')
-          ? {
-              name: process.env.CLAUDE_CODE_SESSION_NAME,
-              logPath: process.env.CLAUDE_CODE_SESSION_LOG,
-              agent: process.env.CLAUDE_CODE_AGENT,
-            }
-          : {}),
-      }),
-    )
+    const record = {
+      pid: process.pid,
+      sessionId: getSessionId(),
+      cwd: getOriginalCwd(),
+      startedAt: Date.now(),
+      kind,
+      entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT,
+      ...(feature('UDS_INBOX')
+        ? { messagingSocketPath: process.env.CLAUDE_CODE_MESSAGING_SOCKET }
+        : {}),
+      ...(feature('BG_SESSIONS')
+        ? {
+            name: process.env.CLAUDE_CODE_SESSION_NAME,
+            logPath: process.env.CLAUDE_CODE_SESSION_LOG,
+            agent: process.env.CLAUDE_CODE_AGENT,
+          }
+        : {}),
+    }
+    await writeFile(pidFile, jsonStringify(record))
+    // fleet 数据层（官方 job state 体系）：主写 jobs/<short>/state.json，
+    // 旧 pid.json 兼容读（listLiveSessions 探活扫描仍认识它）
+    if (feature('BG_SESSIONS')) {
+      try {
+        const { registerJob, makeInitialState } = await import(
+          '../cli/fleet/jobState.js'
+        )
+        const st = makeInitialState({
+          sessionId: getSessionId(),
+          pid: process.pid,
+          cwd: getOriginalCwd(),
+          kind,
+          name: process.env.CLAUDE_CODE_SESSION_NAME,
+          logPath: process.env.CLAUDE_CODE_SESSION_LOG,
+          agent: process.env.CLAUDE_CODE_AGENT,
+          entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT,
+          spawnOrigin: kind === 'bg' ? 'cli' : 'repl',
+        })
+        await registerJob(st)
+        onSessionSwitch(id => {
+          void import('../cli/fleet/jobState.js').then(m =>
+            m.syncJobResumeSessionId(st.shortId, id),
+          )
+        })
+      } catch (fleetErr) {
+        logForDebugging(
+          `[concurrentSessions] fleet register failed: ${errorMessage(fleetErr)}`,
+        )
+      }
+    }
     // --resume / /resume mutates getSessionId() via switchSession. Without
     // this, the PID file's sessionId goes stale and `claude ps` sparkline
     // reads the wrong transcript.

@@ -9,6 +9,7 @@ import {
   useApp,
 } from '@anthropic/ink';
 import { useEffect, useRef, useState } from 'react';
+import { FleetRoster } from '../cli/fleet/stores.js';
 import { t } from '../i18n/index.js';
 import { logEvent } from '../services/analytics/index.js';
 
@@ -263,21 +264,24 @@ export function FleetView({
   const [renameError, setRenameError] = useState<string | null>(null);
   const scrollRef = useRef<ScrollBoxHandle>(null);
 
+  // FleetRoster（官方 Gd）：attachView 引用计数驱动轮询节拍（首个订阅
+  // 启动、全部退订停止），subscribe 触发数据拉取。loadRows 作为变换端
+  // （SessionEntry→FleetRow + logTail 增强）；待 listLiveSessions 完全
+  // 迁移到 jobs 目录后，此处直接消费 roster 的 FleetJob 快照。
+  const rosterRef = useRef<ReturnType<typeof FleetRoster> | null>(null);
   useEffect(() => {
     if (!loadRows) return undefined;
-    let cancelled = false;
-    const poll = () => {
+    if (!rosterRef.current) rosterRef.current = new FleetRoster();
+    const roster = rosterRef.current;
+    const unsub = roster.subscribe(() => {
       loadRows()
-        .then(r => {
-          if (!cancelled) setLive(r);
-        })
+        .then(r => setLive(r))
         .catch(() => {});
-    };
-    const timer = setInterval(poll, 2000);
-    void poll();
+    });
+    const detach = roster.attachView(2000);
     return () => {
-      cancelled = true;
-      clearInterval(timer);
+      unsub();
+      detach();
     };
   }, [loadRows]);
 
