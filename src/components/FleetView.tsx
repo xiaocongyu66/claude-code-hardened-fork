@@ -215,7 +215,6 @@ function JobLine({
   selected,
   armed,
   renaming,
-  cwdWidth,
   labelCol,
   ageCol,
   registerRef,
@@ -224,19 +223,27 @@ function JobLine({
   selected: boolean;
   armed: boolean;
   renaming: { draft: string } | undefined;
-  cwdWidth: number;
   labelCol: number;
   ageCol: number;
   registerRef: (id: string, el: DOMElement | null) => void;
 }): React.ReactNode {
   const st = statusWord(row);
-  const detail = row.blockedNeeds ?? row.detail;
   const spinning = row.tempo === 'running';
   const glyph = row.tempo === 'running' ? null : GLYPH_TERMINAL;
   const gColor = glyphColor(row);
+  // 官方 Hi 的 ct detail 链：needs 优先 → blocked 无 needs 用 cwd →
+  // running 用 logTail → 否则 state.detail（cwd 不是常驻列）
+  const detailText =
+    row.tempo === 'blocked' && row.blockedNeeds
+      ? row.blockedNeeds
+      : row.tempo === 'blocked'
+        ? row.cwd
+        : row.logTail && row.tempo === 'running'
+          ? `$ ${row.logTail}`
+          : row.detail;
   return (
     <Box ref={el => registerRef(row.shortId, el)} paddingLeft={1}>
-      {/* icon 列：固定宽 label+2（官方 width=cols.label+2 flexShrink:0） */}
+      {/* icon+label 列（官方 [指针, 图标, 2空格, 名字]，width=cols.label+2） */}
       <Box width={labelCol + 2} flexShrink={0}>
         <Text color={selected ? 'suggestion' : undefined}>{selected ? '❯' : ' '}</Text>
         {spinning ? (
@@ -247,6 +254,16 @@ function JobLine({
           </Text>
         )}
         <Text> </Text>
+        {renaming ? (
+          <Text bold={selected}>
+            {renaming.draft}
+            <Text color="suggestion">|</Text>
+          </Text>
+        ) : (
+          <Text bold={selected} wrap="truncate">
+            {truncateWidth(row.name, labelCol - 4)}
+          </Text>
+        )}
       </Box>
       {/* detail 列：flexGrow:1 width:0 paddingLeft:2（官方弹性列） */}
       <Box flexGrow={1} width={0} paddingLeft={2} flexShrink={1}>
@@ -256,22 +273,10 @@ function JobLine({
           </Text>
         ) : (
           <>
-            {renaming ? (
-              <Text bold={selected}>
-                {renaming.draft}
-                <Text color="suggestion">|</Text>
-              </Text>
-            ) : (
-              <Text bold={selected} wrap="truncate">
-                {truncateWidth(row.name, labelCol)}
-              </Text>
-            )}
-            <Text> </Text>
             <Text color={st.color} dimColor={st.dim}>
               {t(st.word)}
             </Text>
-            {detail ? <Text dimColor> · {truncateWidth(detail, 40)}</Text> : null}
-            <Text dimColor> · {truncateWidth(row.cwd, cwdWidth)}</Text>
+            {detailText ? <Text dimColor> · {truncateWidth(detailText, 48)}</Text> : null}
           </>
         )}
       </Box>
@@ -644,12 +649,9 @@ export function FleetView({
     );
   }
 
-  // 官方 cols：label = max(名宽)、age = max(age 宽)（截断 24/8）
-  const labelCol = Math.max(...data.map(r => stringWidth(truncateWidth(r.name, 24))), 8);
+  // 官方 cols.label = 指针+图标+2空格+名的整列宽（名字截断 24）
+  const labelCol = Math.max(...data.map(r => stringWidth(truncateWidth(r.name, 24))), 8) + 4;
   const ageCol = Math.max(...data.map(r => stringWidth(r.ageLabel ?? '')), 4);
-  // detail 剩余宽（cwd 截断用）：columns - padding - icon 列 - age 列 - 状态词区
-  const cwdWidth = Math.max(columns - labelCol - ageCol - 24, 12);
-
   // footer 分档（官方 il 优先级链）
   const footerText = exitPending
     ? `${t('press ctrl+c or q again to exit')} · ${t('{{count}} agents will keep running', { count: data.filter(r => r.tempo === 'running' || r.tempo === 'blocked').length })}`
@@ -718,7 +720,6 @@ export function FleetView({
                 selected={sel}
                 armed={killArmed === row.shortId}
                 renaming={renaming?.shortId === row.shortId ? { draft: renaming.draft } : undefined}
-                cwdWidth={cwdWidth}
                 labelCol={labelCol}
                 ageCol={ageCol}
                 registerRef={registerRef}
