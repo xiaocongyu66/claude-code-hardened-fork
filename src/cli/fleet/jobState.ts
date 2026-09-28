@@ -218,7 +218,9 @@ export async function writeStateAtomic(
   return withOwnJobStateWrite(shortId, async () => {
     const dir = getJobDir(shortId)
     await mkdir(dir, { recursive: true })
-    const next: JobState = { ...state, updatedAt: Date.now() }
+    // 纯写（官方 ja 语义）：不自动盖时间——时间戳更新是 sync 层
+    // （updateJobState）的职责，raw 写保留调用方给的时间戳
+    const next: JobState = { ...state }
     const tmp = join(dir, `.state.${randomUUID().slice(0, 8)}.tmp`)
     const final = getStatePath(shortId)
     try {
@@ -239,7 +241,7 @@ export async function updateJobState(
 ): Promise<JobState | null> {
   const cur = await readJobState(shortId)
   if (!cur) return null
-  const next = { ...cur, ...patch }
+  const next: JobState = { ...cur, ...patch, updatedAt: Date.now() }
   await writeStateAtomic(shortId, next)
   return next
 }
