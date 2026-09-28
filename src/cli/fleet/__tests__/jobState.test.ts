@@ -38,7 +38,9 @@ afterEach(async () => {
   await rm(configDir, { recursive: true, force: true })
 })
 
-function makeJob(overrides: Partial<Parameters<typeof makeInitialState>[0]> = {}) {
+function makeJob(
+  overrides: Partial<Parameters<typeof makeInitialState>[0]> = {},
+) {
   return makeInitialState({
     sessionId: 'abcd1234-0000-0000-0000-000000000000',
     pid: process.pid,
@@ -51,7 +53,9 @@ function makeJob(overrides: Partial<Parameters<typeof makeInitialState>[0]> = {}
 describe('jobState 目录布局', () => {
   test('getJobsDir 在 CLAUDE_CONFIG_DIR 下的 sessions/jobs', () => {
     expect(getJobsDir()).toBe(join(configDir, 'sessions', 'jobs'))
-    expect(getJobDir('abcd1234')).toBe(join(configDir, 'sessions', 'jobs', 'abcd1234'))
+    expect(getJobDir('abcd1234')).toBe(
+      join(configDir, 'sessions', 'jobs', 'abcd1234'),
+    )
   })
 })
 
@@ -152,9 +156,15 @@ describe('adoptRosterOrphans', () => {
     const deadPid = 3_999_999_999
     const orphan = makeJob({ pid: deadPid })
     await registerJob(orphan)
-    const ancient = makeJob({ sessionId: 'ffff0000-0000-0000-0000-000000000000', pid: deadPid })
+    const ancient = makeJob({
+      sessionId: 'ffff0000-0000-0000-0000-000000000000',
+      pid: deadPid,
+    })
     // 手动把 updatedAt 推到 48h 以前
-    await writeStateAtomic(ancient.shortId, { ...ancient, updatedAt: Date.now() - ABANDONED_WORKER_MS - 1000 })
+    await writeStateAtomic(ancient.shortId, {
+      ...ancient,
+      updatedAt: Date.now() - ABANDONED_WORKER_MS - 1000,
+    })
     const jobs = await listJobs()
     const adopted = await adoptRosterOrphans(jobs)
     const byId = new Map(adopted.map(j => [j.id, j]))
@@ -168,9 +178,13 @@ describe('adoptRosterOrphans', () => {
 describe('countJobs', () => {
   test('按 tempo/status 分类', () => {
     const busy = { state: { ...makeJob(), status: 'busy' } } as never
-    const blocked = { state: { ...makeJob(), tempo: 'blocked', needs: 'x' } } as never
+    const blocked = {
+      state: { ...makeJob(), tempo: 'blocked', needs: 'x' },
+    } as never
     const idle = { state: { ...makeJob(), status: 'idle' } } as never
-    const stopped = { state: { ...makeJob(), terminalOutcome: 'stopped' } } as never
+    const stopped = {
+      state: { ...makeJob(), terminalOutcome: 'stopped' },
+    } as never
     const c = countJobs([busy, blocked, idle, stopped])
     expect(c).toEqual({ blocked: 1, working: 1, idle: 1, terminal: 1 })
   })
@@ -178,10 +192,16 @@ describe('countJobs', () => {
 
 describe('nameSource 防撞', () => {
   test('dedupeJobName 无冲突原样返回', async () => {
-    expect(await dedupeJobName('alpha', ['beta'])).toEqual({ name: 'alpha', collision: false })
+    expect(await dedupeJobName('alpha', ['beta'])).toEqual({
+      name: 'alpha',
+      collision: false,
+    })
   })
   test('冲突加 -2 后缀', async () => {
-    expect(await dedupeJobName('alpha', ['alpha', 'alpha-2'])).toEqual({ name: 'alpha-3', collision: true })
+    expect(await dedupeJobName('alpha', ['alpha', 'alpha-2'])).toEqual({
+      name: 'alpha-3',
+      collision: true,
+    })
   })
   test('保留组名判定', () => {
     expect(isReservedGroupName('Pinned')).toBe(true)
@@ -224,7 +244,13 @@ describe('FleetRoster（官方 Gd）', () => {
 
   test('自定义 client 注入（官方 listAliveDaemonJobs 双源形态）', async () => {
     const roster = new FleetRoster({
-      listJobs: async () => [{ id: 'aaaa1111', state: makeJob({ sessionId: 'aaaa1111-0000-0000-0000-000000000000' }), alive: true }],
+      listJobs: async () => [
+        {
+          id: 'aaaa1111',
+          state: makeJob({ sessionId: 'aaaa1111-0000-0000-0000-000000000000' }),
+          alive: true,
+        },
+      ],
     })
     await roster.load()
     expect(roster.getSnapshot().jobs[0]?.id).toBe('aaaa1111')
