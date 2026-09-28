@@ -66,16 +66,23 @@ export async function renameSession(
   pid: number,
   name: string,
 ): Promise<boolean> {
+  // 官方体系（syncJobName）：主写 jobs/<short>/state.json，旧 pid.json 兼容写
+  const sessions = await listLiveSessions()
+  const entry = sessions.find(s => s.pid === pid)
+  if (!entry) return false
+  const { syncJobName } = await import('./fleet/jobState.js')
+  const st = await syncJobName(entry.sessionId.slice(0, 8), name, 'user')
+  if (!st) return false
   const file = join(getSessionsDir(), `${pid}.json`)
   try {
     const raw = await readFile(file, 'utf-8')
-    const entry = jsonParse(raw) as SessionEntry
-    entry.name = name
-    await writeFile(file, jsonStringify(entry), 'utf-8')
-    return true
+    const legacy = jsonParse(raw) as SessionEntry
+    legacy.name = name
+    await writeFile(file, jsonStringify(legacy), 'utf-8')
   } catch {
-    return false
+    // 旧文件缺失不致命
   }
+  return true
 }
 
 function formatTime(ts: number): string {
@@ -283,7 +290,6 @@ export async function killHandler(target: string | undefined): Promise<void> {
     process.kill(session.pid, 'SIGTERM')
   } catch {
     console.log(t('Session already exited.'))
-    return
   }
 
   await new Promise(resolve => setTimeout(resolve, 2000))
@@ -299,8 +305,13 @@ export async function killHandler(target: string | undefined): Promise<void> {
     console.log(t('Session stopped.'))
   }
 
-  const pidFile = join(getSessionsDir(), `${session.pid}.json`)
-  void unlink(pidFile).catch(() => {})
+  // 官方语义（writeReapedTerminalState）：stop≠delete——落终态收割，
+  // 保留 job 目录供 fleet 显示 stopped；目录由 48h reaper 或 rm 清理。
+  const { writeReapedTerminalState, reapLegacySession } = await import(
+    './fleet/jobState.js'
+  )
+  await writeReapedTerminalState(session.sessionId.slice(0, 8), 'stopped')
+  await reapLegacySession(session.pid)
 }
 
 /**
