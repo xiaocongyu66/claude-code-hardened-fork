@@ -238,9 +238,15 @@ export async function printAgentsJson(
  * `cch agents` — list background sessions.
  */
 export async function psHandler(_args: string[]): Promise<void> {
-  const sessions = await listLiveSessions()
+  // 批次 E：融合 jobs 目录——终态 job 一并显示（已停止|已完成|已失败）
+  const [sessions, fleetJobs] = await Promise.all([
+    listLiveSessions(),
+    import('./fleet/jobState.js').then(m => m.listJobs()).catch(() => []),
+  ])
+  const liveShorts = new Set(sessions.map(s => s.sessionId.slice(0, 8)))
+  const pastJobs = fleetJobs.filter(j => !liveShorts.has(j.id))
 
-  if (sessions.length === 0) {
+  if (sessions.length === 0 && pastJobs.length === 0) {
     console.log('没有活跃会话。')
     return
   }
@@ -265,6 +271,23 @@ export async function psHandler(_args: string[]): Promise<void> {
     if (s.tmuxSessionName) parts.push(`  Tmux：${s.tmuxSessionName}`)
     if (s.logPath) parts.push(`  日志：${s.logPath}`)
 
+    console.log(parts.join('\n'))
+    console.log()
+  }
+
+  // 终态 job（PAST）：官方 earlier 行的文本形态
+  for (const job of pastJobs) {
+    const state = categorizeJobState(job.state, undefined)
+    const label =
+      state === 'done' ? '已完成' : state === 'failed' ? '已失败' : '已停止'
+    const parts = [
+      `  ID: ${job.id}`,
+      `  类型：${KIND_LABELS[job.state.kind] ?? job.state.kind}`,
+      `  会话：${job.state.sessionId}`,
+      `  CWD: ${job.state.cwd}`,
+      `  状态：${label}`,
+    ]
+    if (job.state.name) parts.push(`  名称：${job.state.name}`)
     console.log(parts.join('\n'))
     console.log()
   }

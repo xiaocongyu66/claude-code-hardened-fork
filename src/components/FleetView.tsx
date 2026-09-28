@@ -35,7 +35,7 @@ export interface FleetRow {
   name: string;
   kind: string;
   cwd: string;
-  tempo: 'running' | 'blocked' | 'idle' | 'booked';
+  tempo: 'running' | 'blocked' | 'idle' | 'booked' | 'done' | 'failed' | 'stopped';
   blockedNeeds?: string;
   /** 元数据（对齐 Hi 的 age/extra 列） */
   ageLabel?: string;
@@ -45,22 +45,29 @@ export interface FleetRow {
   pid?: number;
 }
 
-type TempoColor = 'success' | 'warning' | 'subtle';
+type TempoColor = 'success' | 'warning' | 'error' | 'subtle';
 
 const TEMPO_STYLE: Record<FleetRow['tempo'], { label: string; color: TempoColor }> = {
   running: { label: 'working', color: 'success' },
   blocked: { label: 'blocked', color: 'warning' },
   idle: { label: 'idle', color: 'subtle' },
   booked: { label: 'scheduled', color: 'subtle' },
+  done: { label: 'done', color: 'success' },
+  failed: { label: 'failed', color: 'error' },
+  stopped: { label: 'stopped', color: 'subtle' },
 };
 
 /** 组间官方顺序（state 模式）。 */
-const GROUP_ORDER = ['running', 'blocked', 'idle', 'booked'] as const;
+const GROUP_ORDER = ['running', 'blocked', 'idle', 'booked', 'done', 'failed', 'stopped'] as const;
 const GROUP_TITLE: Record<string, string> = {
   running: 'WORKING',
   blocked: 'BLOCKED — NEEDS YOUR INPUT',
   idle: 'IDLE',
   booked: 'SCHEDULED',
+  done: 'PAST',
+  failed: 'PAST',
+  stopped: 'PAST',
+  past: 'PAST',
 };
 
 /** 每组折叠上限（官方 Rm=3 语义：超出折叠为 `… N more`）。 */
@@ -107,6 +114,12 @@ function glyphFor(row: FleetRow, spinnerFrame: string): string {
       return '○';
     case 'booked':
       return '◔';
+    case 'done':
+      return '✓';
+    case 'failed':
+      return '✗';
+    case 'stopped':
+      return '⏹';
   }
 }
 
@@ -294,9 +307,12 @@ export function FleetView({
     return () => clearTimeout(timer);
   }, [killArmed]);
 
-  // 可聚焦序列（官方 Ve rows 语义：header 不可聚焦，job/fold/newsession 可聚焦）
+  // 可聚焦序列（官方 Ve rows 语义：header 不可聚焦，job/fold/newsession 可聚焦）。
+  // 三个终态（done/failed/stopped）合并进单一 PAST 组（官方 "Past" 组头）。
   const lines: FleetLine[] = [];
+  const PAST_TEMPOS = ['done', 'failed', 'stopped'] as const;
   for (const g of GROUP_ORDER) {
+    if ((PAST_TEMPOS as readonly string[]).includes(g)) continue;
     const items = data.filter(r => r.tempo === g);
     if (items.length === 0) continue;
     lines.push({ kind: 'header', group: g });
@@ -305,6 +321,16 @@ export function FleetView({
       lines.push({ kind: 'fold', group: g, hidden: items.length - FOLD_CAP });
     } else {
       for (const row of items) lines.push({ kind: 'job', row });
+    }
+  }
+  const pastItems = data.filter(r => (PAST_TEMPOS as readonly string[]).includes(r.tempo));
+  if (pastItems.length > 0) {
+    lines.push({ kind: 'header', group: 'past' });
+    if (pastItems.length > FOLD_CAP && !expanded.has('past')) {
+      for (const row of pastItems.slice(0, FOLD_CAP)) lines.push({ kind: 'job', row });
+      lines.push({ kind: 'fold', group: 'past', hidden: pastItems.length - FOLD_CAP });
+    } else {
+      for (const row of pastItems) lines.push({ kind: 'job', row });
     }
   }
   lines.push({ kind: 'newsession' });
@@ -509,7 +535,11 @@ export function FleetView({
                 <Box key={`h:${line.group}`} marginTop={idx === 0 ? 0 : 1}>
                   <Text bold color="subtle">
                     {' '}
-                    {t(GROUP_TITLE[line.group!])} ({data.filter(r => r.tempo === line.group).length})
+                    {t(GROUP_TITLE[line.group!])} (
+                    {line.group === 'past'
+                      ? data.filter(r => (['done', 'failed', 'stopped'] as string[]).includes(r.tempo)).length
+                      : data.filter(r => r.tempo === line.group).length}
+                    )
                   </Text>
                 </Box>
               );
@@ -601,14 +631,24 @@ export function toFleetRows(
     updatedAt?: number;
     logPath?: string;
     pid?: number;
+    /** 终态（jobs 目录体系） */
+    terminalOutcome?: string;
+    terminalAt?: number;
   }>,
 ): FleetRow[] {
   const now = Date.now();
   return sessions.map(s => {
     let tempo: FleetRow['tempo'] = 'running';
-    if (s.waitingFor) tempo = 'blocked';
+    if (s.terminalOutcome === 'completed') tempo = 'done';
+    else if (s.terminalOutcome === 'failed' || s.terminalOutcome === 'crashed') tempo = 'failed';
+    else if (s.terminalOutcome) tempo = 'stopped';
+    else if (s.waitingFor) tempo = 'blocked';
     else if (s.status === 'idle') tempo = 'idle';
-    const base = s.updatedAt ?? s.startedAt ?? now;
+    // 终态 job 的 age 从收割时刻起算（terminalAt ?? updatedAt）
+    const base =
+      (tempo === 'done' || tempo === 'failed' || tempo === 'stopped'
+        ? (s.terminalAt ?? s.updatedAt)
+        : (s.updatedAt ?? s.startedAt)) ?? now;
     return {
       shortId: s.sessionId.slice(0, 8),
       name: s.name ?? s.sessionId,
@@ -616,7 +656,12 @@ export function toFleetRows(
       cwd: s.cwd,
       tempo,
       blockedNeeds: s.waitingFor,
-      detail: s.status && s.status !== 'idle' ? s.status : undefined,
+      detail:
+        tempo === 'done' || tempo === 'failed' || tempo === 'stopped'
+          ? s.terminalOutcome
+          : s.status && s.status !== 'idle'
+            ? s.status
+            : undefined,
       ageLabel: relativeAge(now - base),
       pid: s.pid,
     };

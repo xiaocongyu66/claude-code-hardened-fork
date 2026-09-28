@@ -5255,10 +5255,37 @@ async function run(): Promise<CommanderCommand> {
       if (process.stdout.isTTY) {
         const { wrappedRender: render, ThemeProvider } = await import('@anthropic/ink');
         const { FleetView } = await import('./components/FleetView.js');
-        // logTail：active 会话读日志尾行（官方 Hi 的 logTail 列）
+        // logTail：active 会话读日志尾行（官方 Hi 的 logTail 列）；
+        // 融合 jobs 目录（批次 E）：终态 job 进 fleet 的 PAST 分组
         const withLogTail = async (fresh: Awaited<ReturnType<typeof bg.listLiveSessions>>) => {
           const { readFile } = await import('fs/promises');
-          const rowsOut = toFleetRows(fresh);
+          const { listJobs } = await import('./cli/fleet/jobState.js');
+          const [rowsOut, fleetJobs] = await Promise.all([
+            Promise.resolve(toFleetRows(fresh)),
+            listJobs().catch(() => []),
+          ]);
+          const liveShorts = new Set(rowsOut.map(r => r.shortId));
+          // 终态/孤儿 job → FleetRow 追加（live 已有的不重复）
+          for (const job of fleetJobs) {
+            if (liveShorts.has(job.id)) continue;
+            rowsOut.push(
+              ...toFleetRows([
+                {
+                  sessionId: job.state.sessionId,
+                  kind: job.state.kind,
+                  name: job.state.name,
+                  cwd: job.state.cwd,
+                  status: job.state.status,
+                  waitingFor: job.state.needs,
+                  startedAt: job.state.startedAt,
+                  updatedAt: job.state.updatedAt,
+                  pid: job.state.pid,
+                  terminalOutcome: job.state.terminalOutcome,
+                  terminalAt: job.state.terminalAt,
+                },
+              ]),
+            );
+          }
           await Promise.all(
             rowsOut.map(async r => {
               if (r.tempo !== 'running') return;
@@ -5289,6 +5316,12 @@ async function run(): Promise<CommanderCommand> {
               }}
               onKill={row => {
                 void (async () => {
+                  if (row.tempo === 'done' || row.tempo === 'failed' || row.tempo === 'stopped') {
+                    // 终态行：ctrl+x = 彻底删除（官方 rm 第二段）
+                    const { removeJobDir } = await import('./cli/fleet/jobState.js');
+                    await removeJobDir(row.shortId);
+                    return;
+                  }
                   const handlers = await import('./cli/bg.js');
                   await handlers.killHandler(row.shortId);
                 })();
