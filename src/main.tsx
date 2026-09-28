@@ -5305,7 +5305,7 @@ async function run(): Promise<CommanderCommand> {
         // B2：onAttach 只记录目标——组件内 exit 后统一执行（避免
         // process.exit 掐死进行中的 attachHandler）
         type PendingAttach = { type: 'attach'; shortId: string };
-        let pendingAction: PendingAttach | null = null;
+        const pendingBox: { action: PendingAttach | null } = { action: null };
         const instance = await render(
           // wrappedRender 不注入 theme——独立渲染必须显式包 ThemeProvider
           <ThemeProvider>
@@ -5313,7 +5313,7 @@ async function run(): Promise<CommanderCommand> {
               rows={rows}
               loadRows={async () => withLogTail(await bg.listLiveSessions())}
               onAttach={row => {
-                pendingAction = { type: 'attach', shortId: row.shortId };
+                pendingBox.action = { type: 'attach', shortId: row.shortId };
               }}
               onKill={row => {
                 void (async () => {
@@ -5344,7 +5344,7 @@ async function run(): Promise<CommanderCommand> {
           </ThemeProvider>,
         );
         await instance.waitUntilExit();
-        const act: PendingAttach | null = pendingAction;
+        const act = pendingBox.action;
         if (act?.type === 'attach') {
           const handlers = await import('./cli/bg.js');
           await handlers.attachHandler(act.shortId);

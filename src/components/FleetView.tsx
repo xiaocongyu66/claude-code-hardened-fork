@@ -87,7 +87,7 @@ function statusWord(row: FleetRow): StatusStyle {
 }
 
 /** 图标颜色（跟状态走；working 无色，终态 dim）。 */
-function glyphColor(row: FleetRow): string | undefined {
+function glyphColor(row: FleetRow): keyof Theme | undefined {
   switch (row.tempo) {
     case 'running':
       return 'success';
