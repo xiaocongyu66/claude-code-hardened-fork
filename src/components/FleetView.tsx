@@ -62,7 +62,6 @@ const GROUP_TITLE: Record<string, string> = {
   booked: 'SCHEDULED',
 };
 
-
 /** 每组折叠上限（官方 Rm=3 语义：超出折叠为 `… N more`）。 */
 const FOLD_CAP = 3;
 
