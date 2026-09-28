@@ -171,13 +171,16 @@ function Spinner({ active }: { active: boolean }): React.ReactNode {
   );
 }
 
+/** launcher cwd（模块级一次——渲染期禁系统调用副作用）。 */
+const LAUNCHER_CWD = process.cwd();
+
 /** 官方 Da：标题行 + counts 行 + cwd。 */
 function FleetHeader({ data }: { data: FleetRow[] }): React.ReactNode {
   const blocked = data.filter(r => r.tempo === 'blocked').length;
   const working = data.filter(r => r.tempo === 'running').length;
   const completed = data.filter(r => r.tempo === 'done' || r.tempo === 'failed' || r.tempo === 'stopped').length;
   const hasLive = data.some(r => r.tempo !== 'done' && r.tempo !== 'failed' && r.tempo !== 'stopped');
-  const cwd = truncateWidth(process.cwd(), 44);
+  const cwd = truncateWidth(LAUNCHER_CWD, 44);
   return (
     <Box flexDirection="column">
       <Box>
@@ -285,7 +288,7 @@ function FleetHelp(): React.ReactNode {
   const rows: Array<[string, string]> = [
     ['↑↓ / j k', t('move selection')],
     ['g / G', t('jump to top / bottom')],
-    ['1-9', t('open Nth session')],
+    ['alt+1-9', t('open Nth session')],
     ['↵', t('open session / expand fold')],
     ['n', t('focus dispatch input')],
     ['ctrl+r', t('rename session')],
@@ -398,6 +401,13 @@ export function FleetView({
     return () => clearTimeout(timer);
   }, [exitPending]);
 
+  // dispatching 提示的自动清除（卸载安全 + 重复提交重置）
+  useEffect(() => {
+    if (!dispatching) return undefined;
+    const timer = setTimeout(() => setDispatching(false), 3000);
+    return () => clearTimeout(timer);
+  }, [dispatching]);
+
   // 可聚焦序列（header 不可聚焦；终态合并 PAST 组）
   const lines: FleetLine[] = [];
   const PAST_TEMPOS = ['done', 'failed', 'stopped'] as const;
@@ -475,7 +485,6 @@ export function FleetView({
     setComposerDraft(null);
     onDispatch?.(task);
     logEvent('fleet_view_dispatch', {});
-    setTimeout(() => setDispatching(false), 3000);
   };
 
   useInput(
@@ -591,7 +600,9 @@ export function FleetView({
           setComposerDraft('');
         }
       } else if (key.escape || input === 'q') {
-        exit();
+        // 两段退出（footer 文案 press ... again to exit 的行为一致性）
+        if (exitPending) exit();
+        else setExitPending(true);
       }
     },
   );
@@ -680,7 +691,7 @@ export function FleetView({
                 : 0;
               const label = isPast
                 ? `… ${t('show all ({{count}} more{{failed}})', { count: line.hidden ?? 0, failed: failedHidden > 0 ? ` · ${failedHidden} ${t('failed')}` : '' })}`
-                : `… ${line.hidden ?? 0} ${t('more')}`;
+                : t('… {{count}} more', { count: line.hidden ?? 0 });
               return (
                 <Box key={`f:${line.group}`} paddingLeft={1}>
                   <Text color={sel ? 'suggestion' : 'subtle'}>{sel ? '❯ ' : '  '}</Text>
