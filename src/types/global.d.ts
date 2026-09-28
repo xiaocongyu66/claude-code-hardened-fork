@@ -65,7 +65,9 @@ declare function TungstenPill(props?: {
 // Build-time constants BUILD_TARGET/BUILD_ENV/INTERFACE_TYPE — removed (zero runtime usage)
 
 // ============================================================================
-// Ink custom JSX intrinsic elements — see src/types/ink-jsx.d.ts
+// Ink custom JSX intrinsic elements — declared in packages/@ant/ink/src/types/
+// (single source; the former src/types/ink-jsx.d.ts copy was removed to avoid
+// declaration drift — it had zero substantive diff beyond import form)
 
 // ============================================================================
 // Bun text/file loaders — allow importing non-TS assets as strings

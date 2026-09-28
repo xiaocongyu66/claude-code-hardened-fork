@@ -4,6 +4,7 @@ import {
   ScrollBox,
   type ScrollBoxHandle,
   Text,
+  stringWidth,
   useAnimationFrame,
   useInput,
   useApp,
@@ -93,8 +94,23 @@ export function relativeAge(ms: number): string {
   return `${Math.floor(d / 365)}y`;
 }
 
+/** 终端列宽感知的 padEnd（CJK/全角占 2 列，.length 会错位）。 */
 function padEnd(s: string, n: number): string {
-  return s.length >= n ? s : s + ' '.repeat(n - s.length);
+  const w = stringWidth(s);
+  return w >= n ? s : s + ' '.repeat(n - w);
+}
+
+/** 按终端列宽截断（slice(0,24) 对中文会切出 48 列宽）。 */
+function truncateWidth(s: string, maxCols: number): string {
+  let cols = 0;
+  let out = '';
+  for (const ch of s) {
+    const cw = stringWidth(ch);
+    if (cols + cw > maxCols) break;
+    out += ch;
+    cols += cw;
+  }
+  return out;
 }
 
 function colorFor(row: FleetRow): TempoColor {
@@ -201,15 +217,15 @@ function JobLine({
           <Text color="suggestion">|</Text>
         </Text>
       ) : (
-        <Text bold={selected}>{padEnd(row.name.slice(0, 24), nameWidth)}</Text>
+        <Text bold={selected}>{padEnd(truncateWidth(row.name, 24), nameWidth)}</Text>
       )}
       <Text> </Text>
       <Text color={ts.color} dimColor={row.tempo === 'idle'}>
         {ts.label}
       </Text>
-      {detail ? <Text dimColor>{` · ${detail}`.slice(0, detailWidth + 3)}</Text> : null}
+      {detail ? <Text dimColor>{` · ${truncateWidth(detail, detailWidth)}`}</Text> : null}
       {row.logTail && row.tempo === 'running' ? (
-        <Text dimColor>{`  $ ${row.logTail}`.slice(0, 60)}</Text>
+        <Text dimColor>{truncateWidth(`  $ ${row.logTail}`, 60)}</Text>
       ) : (
         <Text dimColor>{`  ${row.ageLabel ?? ''}`}</Text>
       )}
@@ -518,8 +534,8 @@ export function FleetView({
     );
   }
 
-  const nameWidth = Math.max(...data.map(r => r.name.slice(0, 24).length), 8);
-  const detailWidth = Math.max(...data.map(r => (r.blockedNeeds ?? r.detail ?? '').length), 12);
+  const nameWidth = Math.max(...data.map(r => stringWidth(truncateWidth(r.name, 24))), 8);
+  const detailWidth = Math.max(...data.map(r => stringWidth(r.blockedNeeds ?? r.detail ?? '')), 12);
   const spinnerActive = focusedRow?.tempo === 'running';
 
   return (
