@@ -3050,5 +3050,20 @@
   "Dispatching…": "派發中…",
   "… {{count}} more": "… 還有 {{count}} 個",
   " ↑↓ select · n dispatch · ctrl+x stop · ? help · esc quit": " ↑↓ 選擇 · n 派發 · ctrl+x 停止 · ? 說明 · esc 離開",
-  " ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit": " ↑↓ 選擇 · ↵ 開啟 · n 派發 · ctrl+r 重新命名 · ctrl+x 停止 · ? 說明 · esc 離開"
+  " ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit": " ↑↓ 選擇 · ↵ 開啟 · n 派發 · ctrl+r 重新命名 · ctrl+x 停止 · ? 說明 · esc 離開",
+  "nothing running": "沒有執行中的會話",
+  "{{blocked}} awaiting input · {{working}} working · {{completed}} completed": "{{blocked}} 個等待輸入 · {{working}} 個工作中 · {{completed}} 個已完成",
+  "show all ({{count}} more{{failed}})": "展開全部（還有 {{count}} 個{{failed}}）",
+  "more": "更多",
+  "press ctrl+c or q again to exit": "再按一次 ctrl+c 或 q 離開",
+  "{{count}} agents will keep running": "{{count}} 個會話將繼續執行",
+  "ctrl+x again to delete · esc to keep": "再按 ctrl+x 刪除 · esc 保留",
+  "enter save · escape cancel": "Enter 儲存 · esc 取消",
+  "jump to top / bottom": "跳到頂部 / 底部",
+  "open Nth session": "開啟第 N 個會話",
+  "scroll list": "捲動列表",
+  "describe a task for a new session": "描述要交給新會話的任務",
+  "Done": "完成",
+  "blocked": "等待輸入",
+  "Idle": "閒置"
 }

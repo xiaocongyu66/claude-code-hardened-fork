@@ -3050,5 +3050,20 @@
   "Dispatching…": "ディスパッチ中…",
   "… {{count}} more": "… 他 {{count}} 件",
   " ↑↓ select · n dispatch · ctrl+x stop · ? help · esc quit": " ↑↓ 選択 · n ディスパッチ · ctrl+x 停止 · ? ヘルプ · esc 終了",
-  " ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit": " ↑↓ 選択 · ↵ 開く · n ディスパッチ · ctrl+r 名前変更 · ctrl+x 停止 · ? ヘルプ · esc 終了"
+  " ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit": " ↑↓ 選択 · ↵ 開く · n ディスパッチ · ctrl+r 名前変更 · ctrl+x 停止 · ? ヘルプ · esc 終了",
+  "nothing running": "実行中のセッションはありません",
+  "{{blocked}} awaiting input · {{working}} working · {{completed}} completed": "入力待ち {{blocked}} 件 · 作業中 {{working}} 件 · 完了 {{completed}} 件",
+  "show all ({{count}} more{{failed}})": "すべて表示（他 {{count}} 件{{failed}}）",
+  "more": "件",
+  "press ctrl+c or q again to exit": "もう一度 ctrl+c または q で終了",
+  "{{count}} agents will keep running": "{{count}} 件のセッションは動き続けます",
+  "ctrl+x again to delete · esc to keep": "もう一度 ctrl+x で削除 · esc で保持",
+  "enter save · escape cancel": "Enter で保存 · esc でキャンセル",
+  "jump to top / bottom": "先頭 / 末尾へ移動",
+  "open Nth session": "N 番目のセッションを開く",
+  "scroll list": "リストをスクロール",
+  "describe a task for a new session": "新しいセッションに任せるタスクを入力",
+  "Done": "完了",
+  "blocked": "入力待ち",
+  "Idle": "アイドル"
 }

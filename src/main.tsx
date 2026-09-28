@@ -5302,6 +5302,9 @@ async function run(): Promise<CommanderCommand> {
           );
           return rowsOut;
         };
+        // B2：onAttach 只记录目标——组件内 exit 后统一执行（避免
+        // process.exit 掐死进行中的 attachHandler）
+        let pendingAction: { type: 'attach'; shortId: string } | null = null;
         const instance = await render(
           // wrappedRender 不注入 theme——独立渲染必须显式包 ThemeProvider
           <ThemeProvider>
@@ -5309,10 +5312,7 @@ async function run(): Promise<CommanderCommand> {
               rows={rows}
               loadRows={async () => withLogTail(await bg.listLiveSessions())}
               onAttach={row => {
-                void (async () => {
-                  const handlers = await import('./cli/bg.js');
-                  await handlers.attachHandler(row.shortId);
-                })();
+                pendingAction = { type: 'attach', shortId: row.shortId };
               }}
               onKill={row => {
                 void (async () => {
@@ -5343,6 +5343,10 @@ async function run(): Promise<CommanderCommand> {
           </ThemeProvider>,
         );
         await instance.waitUntilExit();
+        if (pendingAction?.type === 'attach') {
+          const handlers = await import('./cli/bg.js');
+          await handlers.attachHandler(pendingAction.shortId);
+        }
         process.exit(0);
       }
       if (rows.length > 0) {

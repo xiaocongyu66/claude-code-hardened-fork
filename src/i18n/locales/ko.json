@@ -3050,5 +3050,20 @@
   "Dispatching…": "디스패치 중…",
   "… {{count}} more": "… {{count}}개 더 보기",
   " ↑↓ select · n dispatch · ctrl+x stop · ? help · esc quit": " ↑↓ 선택 · n 디스패치 · ctrl+x 중지 · ? 도움말 · esc 종료",
-  " ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit": " ↑↓ 선택 · ↵ 열기 · n 디스패치 · ctrl+r 이름 바꾸기 · ctrl+x 중지 · ? 도움말 · esc 종료"
+  " ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit": " ↑↓ 선택 · ↵ 열기 · n 디스패치 · ctrl+r 이름 바꾸기 · ctrl+x 중지 · ? 도움말 · esc 종료",
+  "nothing running": "실행 중인 세션이 없습니다",
+  "{{blocked}} awaiting input · {{working}} working · {{completed}} completed": "입력 대기 {{blocked}}개 · 작업 중 {{working}}개 · 완료 {{completed}}개",
+  "show all ({{count}} more{{failed}})": "모두 표시 ({{count}}개 더{{failed}})",
+  "more": "더 보기",
+  "press ctrl+c or q again to exit": "ctrl+c 또는 q를 다시 눌러 종료",
+  "{{count}} agents will keep running": "{{count}}개 세션은 계속 실행됩니다",
+  "ctrl+x again to delete · esc to keep": "ctrl+x 다시 누르면 삭제 · esc 유지",
+  "enter save · escape cancel": "Enter 저장 · esc 취소",
+  "jump to top / bottom": "맨 위 / 맨 아래로",
+  "open Nth session": "N번째 세션 열기",
+  "scroll list": "목록 스크롤",
+  "describe a task for a new session": "새 세션에 맡길 작업 입력",
+  "Done": "완료",
+  "blocked": "입력 대기",
+  "Idle": "유휴"
 }
