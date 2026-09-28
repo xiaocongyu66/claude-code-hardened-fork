@@ -5237,11 +5237,18 @@ async function run(): Promise<CommanderCommand> {
     .command('agents')
     .description('List configured agents')
     .option('--setting-sources <sources>', 'Comma-separated list of setting sources to load (user, project, local).')
-    .action(async () => {
+    .option('--json', 'Print background sessions as JSON (official printAgentsJson contract)')
+    .option('--all', 'Include done/failed/stopped sessions (with --json)')
+    .action(async options => {
+      // 官方 `claude agents --json` = printAgentsJson（三源融合 pretty JSON）。
       // 官方 `claude agents` = FleetView TUI（FleetViewWithComposerBack 体系）。
       // 会话行来自 roster（tempo 推断），↑/↓ 选择 + enter attach；
       // 非 TTY（管道/headless）回退纯文本列表。
       const bg = await import('./cli/bg.js');
+      if (options.json) {
+        await bg.printAgentsJson(undefined, options.all === true);
+        process.exit(0);
+      }
       const sessions = await bg.listLiveSessions();
       const { toFleetRows } = await import('./components/FleetView.js');
       const rows = toFleetRows(sessions);

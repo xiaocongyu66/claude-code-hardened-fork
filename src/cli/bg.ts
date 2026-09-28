@@ -113,6 +113,127 @@ function resolveSessionEngine(session: SessionEntry): 'tmux' | 'detached' {
   return session.tmuxSessionName ? 'tmux' : 'detached'
 }
 
+// ── printAgentsJson（官方 printAgentsJson 1:1——`claude agents --json` 契约）──
+
+/** live session 的 status 归一（官方 p()）。 */
+function normalizeStatus(
+  status: string | undefined,
+): 'busy' | 'idle' | 'waiting' | undefined {
+  if (status === 'idle') return 'idle'
+  if (status === 'waiting') return 'waiting'
+  if (status) return 'busy'
+  return undefined
+}
+
+/** job state → 运行类别（官方 y()：working/blocked/done/failed/stopped）。 */
+function categorizeJobState(
+  state: { status?: string; tempo?: string; terminalOutcome?: string },
+  liveStatus: string | undefined,
+): 'working' | 'blocked' | 'done' | 'failed' | 'stopped' {
+  if (liveStatus === 'busy') return 'working'
+  if (state.terminalOutcome) {
+    if (state.terminalOutcome === 'completed') return 'done'
+    if (
+      state.terminalOutcome === 'failed' ||
+      state.terminalOutcome === 'crashed'
+    )
+      return 'failed'
+    return 'stopped'
+  }
+  if (state.tempo === 'blocked' || liveStatus === 'waiting') return 'blocked'
+  return 'working'
+}
+
+export interface AgentsJsonRow {
+  pid?: number
+  id?: string
+  cwd: string
+  kind: 'background' | 'interactive'
+  startedAt: number
+  sessionId?: string
+  name?: string
+  status?: 'busy' | 'idle' | 'waiting'
+  waitingFor?: string
+  state?: 'working' | 'blocked' | 'done' | 'failed' | 'stopped'
+}
+
+/**
+ * 官方 printAgentsJson 语义（binary 2.1.283 实证）：
+ *   三源融合（live sessions + jobs roster）→ pid 去重 → 默认只报
+ *   working/blocked 或有 live session 的 job（done/stopped 需 --all）→
+ *   startedAt 升序 → pretty JSON。
+ */
+export async function printAgentsJson(
+  cwd?: string,
+  all = false,
+): Promise<void> {
+  const rows: AgentsJsonRow[] = []
+  const emittedPids = new Set<number>()
+
+  // 源 1+2：live sessions（旧 pid.json）+ jobs roster（新 job 目录）
+  const [sessions, jobsResult] = await Promise.all([
+    listLiveSessions(),
+    import('./fleet/jobState.js').then(m => m.listJobs()).catch(() => []),
+  ])
+
+  // bg live sessions 按 shortId 索引（jobId → session）
+  const liveByShort = new Map<string, (typeof sessions)[number]>()
+  for (const s of sessions) {
+    if (s.kind === 'bg') liveByShort.set(s.sessionId.slice(0, 8), s)
+  }
+
+  // 第一遍：jobs（fleet roster）
+  for (const job of jobsResult) {
+    const live = liveByShort.get(job.id)
+    if (live) emittedPids.add(live.pid)
+    const liveStatus = live?.status
+    const state = categorizeJobState(job.state, liveStatus)
+    if (!all && !live && state !== 'working' && state !== 'blocked') continue
+    const name = live?.name ?? job.state.name
+    rows.push({
+      ...(live ? { pid: live.pid } : {}),
+      id: job.id,
+      cwd: live?.cwd ?? job.state.cwd,
+      kind: 'background',
+      startedAt: live?.startedAt ?? job.state.startedAt,
+      sessionId: live?.sessionId ?? job.state.sessionId,
+      ...(name ? { name } : {}),
+      ...(liveStatus ? { status: normalizeStatus(liveStatus) } : {}),
+      ...(liveStatus === 'waiting' && live?.waitingFor
+        ? { waitingFor: live.waitingFor }
+        : {}),
+      state,
+    })
+  }
+
+  // 第二遍：未入 roster 的 live sessions（interactive + 孤儿 bg）
+  for (const s of sessions) {
+    if (emittedPids.has(s.pid)) continue
+    if (
+      s.kind === 'bg' &&
+      liveByShort.has(s.sessionId.slice(0, 8)) &&
+      jobsResult.some(j => j.id === s.sessionId.slice(0, 8))
+    )
+      continue
+    const name = s.name
+    rows.push({
+      pid: s.pid,
+      cwd: s.cwd,
+      kind: s.kind === 'bg' ? 'background' : 'interactive',
+      startedAt: s.startedAt,
+      ...(s.sessionId ? { sessionId: s.sessionId } : {}),
+      ...(name ? { name } : {}),
+      ...(s.status ? { status: normalizeStatus(s.status) } : {}),
+      ...(s.status === 'waiting' && s.waitingFor
+        ? { waitingFor: s.waitingFor }
+        : {}),
+    })
+  }
+
+  rows.sort((a, b) => a.startedAt - b.startedAt)
+  console.log(JSON.stringify(rows, null, 2))
+}
+
 /**
  * `cch agents` — list background sessions.
  */
