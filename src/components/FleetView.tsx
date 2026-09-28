@@ -55,6 +55,13 @@ const TEMPO_STYLE: Record<FleetRow['tempo'], { label: string; color: TempoColor 
 
 /** 组间官方顺序（state 模式）。 */
 const GROUP_ORDER = ['running', 'blocked', 'idle', 'booked'] as const;
+const GROUP_TITLE: Record<string, string> = {
+  running: 'WORKING',
+  blocked: 'BLOCKED — NEEDS YOUR INPUT',
+  idle: 'IDLE',
+  booked: 'SCHEDULED',
+};
+
 
 /** 每组折叠上限（官方 Rm=3 语义：超出折叠为 `… N more`）。 */
 const FOLD_CAP = 3;

@@ -1,3 +1,4 @@
+import { watch } from 'fs'
 import {
   mkdir,
   open,
@@ -7,7 +8,6 @@ import {
   rm,
   stat,
   unlink,
-  watch,
   writeFile,
 } from 'fs/promises'
 import { join } from 'path'
@@ -459,7 +459,7 @@ export function watchJobDirOnce(
   onChange: () => void,
 ): () => void {
   let closed = false
-  let watcher: ReturnType<typeof watch> | undefined
+  let watcher: import('fs').FSWatcher | undefined
   try {
     watcher = watch(getJobDir(shortId), (_event, filename) => {
       if (closed) return

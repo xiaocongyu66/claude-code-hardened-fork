@@ -79,6 +79,9 @@ export interface DeletePending {
 }
 
 export class DeleteConfirmStore extends Subscribable<DeletePending | null> {
+  constructor() {
+    super(null)
+  }
   arm(id: string, justKilled = false): void {
     this.emit({ id, justKilled })
   }
@@ -102,6 +105,16 @@ export interface ViewSnapshot {
 }
 
 export class ViewStore extends Subscribable<ViewSnapshot> {
+  constructor() {
+    super({
+      groupMode: 'state',
+      activeTab: 'local',
+      renaming: null,
+      helpOpen: false,
+      debugOpen: false,
+      groupEdit: null,
+    })
+  }
   setGroupMode(mode: GroupMode): void {
     this.emit({ ...this.getSnapshot(), groupMode: mode })
   }
@@ -185,6 +198,9 @@ export interface EditorSnapshot {
 }
 
 export class EditorStore extends Subscribable<EditorSnapshot> {
+  constructor() {
+    super({ query: '', mode: 'default', hint: null, error: null })
+  }
   setQuery(query: string): void {
     this.emit({ ...this.getSnapshot(), query })
   }
