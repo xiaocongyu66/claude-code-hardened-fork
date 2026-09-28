@@ -11,6 +11,7 @@ import {
   useTerminalSize,
 } from '@anthropic/ink';
 import { useEffect, useRef, useState } from 'react';
+import type { Theme, DOMElement } from '@anthropic/ink';
 import { FleetRoster } from '../cli/fleet/stores.js';
 import { t } from '../i18n/index.js';
 import { logEvent } from '../services/analytics/index.js';
@@ -66,7 +67,7 @@ const GLYPH_SPECIAL = '✢';
 const GLYPH_TERMINAL = '∙';
 
 /** 状态词映射（官方 rn @153064840 语义）。 */
-type StatusStyle = { word: string; color: string | undefined; dim: boolean };
+type StatusStyle = { word: string; color: keyof Theme | undefined; dim: boolean };
 
 function statusWord(row: FleetRow): StatusStyle {
   switch (row.tempo) {
@@ -223,7 +224,7 @@ function JobLine({
   cwdWidth: number;
   labelCol: number;
   ageCol: number;
-  registerRef: (id: string, el: unknown) => void;
+  registerRef: (id: string, el: DOMElement | null) => void;
 }): React.ReactNode {
   const st = statusWord(row);
   const detail = row.blockedNeeds ?? row.detail;
@@ -362,7 +363,7 @@ export function FleetView({
   const [renameError, setRenameError] = useState<string | null>(null);
   const [exitPending, setExitPending] = useState(false);
   const scrollRef = useRef<ScrollBoxHandle>(null);
-  const rowRefs = useRef(new Map<string, unknown>());
+  const rowRefs = useRef(new Map<string, DOMElement>());
 
   // FleetRoster（官方 Gd）：attachView 引用计数驱动轮询节拍
   const rosterRef = useRef<InstanceType<typeof FleetRoster> | null>(null);
@@ -441,7 +442,7 @@ export function FleetView({
     if (el) scrollRef.current?.scrollToElement(el, 0);
   }, [selected, focusedRow?.shortId]);
 
-  const registerRef = (id: string, el: unknown) => {
+  const registerRef = (id: string, el: DOMElement | null) => {
     if (el) rowRefs.current.set(id, el);
     else rowRefs.current.delete(id);
   };

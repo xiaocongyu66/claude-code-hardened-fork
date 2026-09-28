@@ -5304,7 +5304,8 @@ async function run(): Promise<CommanderCommand> {
         };
         // B2：onAttach 只记录目标——组件内 exit 后统一执行（避免
         // process.exit 掐死进行中的 attachHandler）
-        let pendingAction: { type: 'attach'; shortId: string } | null = null;
+        type PendingAttach = { type: 'attach'; shortId: string };
+        let pendingAction: PendingAttach | null = null;
         const instance = await render(
           // wrappedRender 不注入 theme——独立渲染必须显式包 ThemeProvider
           <ThemeProvider>
@@ -5343,9 +5344,10 @@ async function run(): Promise<CommanderCommand> {
           </ThemeProvider>,
         );
         await instance.waitUntilExit();
-        if (pendingAction?.type === 'attach') {
+        const act: PendingAttach | null = pendingAction;
+        if (act?.type === 'attach') {
           const handlers = await import('./cli/bg.js');
-          await handlers.attachHandler(pendingAction.shortId);
+          await handlers.attachHandler(act.shortId);
         }
         process.exit(0);
       }
