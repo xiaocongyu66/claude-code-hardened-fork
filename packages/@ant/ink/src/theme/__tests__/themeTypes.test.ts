@@ -39,10 +39,9 @@ describe('getTheme', () => {
 })
 
 describe('themeColorToAnsi', () => {
-  test('rgb color produces an ANSI sequence (chalk-version tolerant)', () => {
-    // chalk 5/6 的 rgb 输出格式有差异——只断言产出了转义序列且非 magenta 兜底
+  test('rgb color produces a 24-bit escape prefix', () => {
     const seq = themeColorToAnsi('rgb(78, 186, 101)')
-    expect(seq).not.toBe('')
+    expect(seq).toBe('\x1b[38;2;78;186;101m')
   })
 
   test('unparseable color falls back to magenta', () => {

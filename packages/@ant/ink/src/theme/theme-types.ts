@@ -621,7 +621,8 @@ const chalkForChart =
 
 /**
  * Converts a theme color to an ANSI escape sequence for use with asciichart.
- * Uses chalk to generate the escape codes, with 256-color mode for Apple Terminal.
+ * Constructs the sequence directly — the previous chalk marker trick
+ * (`rgb(...)('X').slice(0, indexOf('X'))`) returned '' on chalk 6.
  */
 export function themeColorToAnsi(themeColor: string): string {
   const rgbMatch = themeColor.match(/rgb\(\s?(\d+),\s?(\d+),\s?(\d+)\s?\)/)
@@ -629,10 +630,14 @@ export function themeColorToAnsi(themeColor: string): string {
     const r = parseInt(rgbMatch[1]!, 10)
     const g = parseInt(rgbMatch[2]!, 10)
     const b = parseInt(rgbMatch[3]!, 10)
-    // Use chalk.rgb which auto-converts to 256 colors when level is 2
-    // Extract just the opening escape sequence by using a marker
-    const colored = chalkForChart.rgb(r, g, b)('X')
-    return colored.slice(0, colored.indexOf('X'))
+    // Apple Terminal doesn't handle 24-bit color escape sequences well —
+    // approximate to the 6x6x6 cube in 256-color mode
+    if (process.env.TERM_PROGRAM === 'Apple_Terminal') {
+      const q = (v: number) => Math.round((v / 255) * 5)
+      const idx = 16 + 36 * q(r) + 6 * q(g) + q(b)
+      return `\x1b[38;5;${idx}m`
+    }
+    return `\x1b[38;2;${r};${g};${b}m`
   }
   // Fallback to magenta if parsing fails
   return '\x1b[35m'
