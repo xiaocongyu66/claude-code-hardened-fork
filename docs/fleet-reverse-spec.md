@@ -255,3 +255,51 @@ q 的 minified 定义跨 chunk 未溯源（渲染语义由截图实证）。
 
 全量导出工具：`scripts/dump-binary-strings.py` → `docs/reverse/`（2138 chunk、
 JS 源区 234MB、字符串池 68,211 条——后续逆向先查导出，不再直接读 binary）。
+
+---
+
+## 9. ink 渲染核心对照（284 chunk-6epjwwt0，2026-09-29）
+
+### 9.1 DEC 终端模式层 ✅ 已对齐（b17c0f3c）
+
+官方 `var Cm={...}`（_ALL.js @12417954，362KB ink 核心 chunk-6epjwwt0）：
+`CURSOR_VISIBLE:25, ALT_SCREEN:47, ALT_SCREEN_CLEAR:1049, MOUSE_NORMAL:1000,
+MOUSE_BUTTON:1002, MOUSE_ANY:1003, MOUSE_SGR:1006, MOUSE_SGR_PIXELS:1016,
+FOCUS_EVENTS:1004, BRACKETED_PASTE:2004, THEME_NOTIFY:2031,
+SYNCHRONIZED_UPDATE:2026, WIN32_INPUT_MODE:9001`。
+cch `termio/dec.ts` 已补 1016/2031/9001 + `mouseTrackingSeq()` 三档（官方
+`ZVt(E)`：full→1000+1002+1003+1006、scroll→1000+1006、off→''）；AlternateScreen
+接入三档 prop + 2031 主题通知（14f05763）。
+
+### 9.2 渲染器：官方为池化双缓冲代际——cch 是行级 diff ❌ 结构性差异
+
+官方证据（handleResume 切片，_ALL.js @13461xxx 区）：
+
+```
+this.frontFrame = ho(height, width, this.stylePool, this.charPool, this.hyperlinkPool)
+this.backFrame  = ho(...)
+this.log.reset(); this.prevFrameContaminated=!0; this.imagesStale=!0;
+this.displayCursor=null; this.nativeCursorVisible=this.accessibilityMode;
+this.resetScreenReaderDiffState(); this.scheduleRender()
+```
+
+- **双缓冲帧**（frontFrame/backFrame）+ 三对象池（stylePool/charPool/hyperlinkPool）
+  ——帧差分在 cell 网格层做，cch log-update 是行字符串 diff
+- **StylePool 类**（@13359262）：`{ids:Map, styles:[], transitionCache:Map,
+  atlasRecorder, needsCompaction()}`——样式去重 + 转移缓存 + 容量压实
+- **终端能力探测状态机**（@13099953）：
+  `{extendedKeys, synchronizedOutput, kittyKeyboard, kittyGraphics, mousePixels}`
+  五项 DECRQM 异步探测（readings Map，settled/pending 两态）——cch
+  terminal-querier.ts 只查 2026 一项
+- **Kitty 图形协议**（kittyGraphics 开关 + imagesStale 图片层）——cch 无
+- **屏幕阅读器 diff**（resetScreenReaderDiffState）——cch 无
+
+### 9.3 结论与决策点
+
+- 渲染器重写（行 diff → 池化双缓冲 + 能力探测五项 + kitty/图片层）等效重写
+  ink 渲染核心（log-update/renderer/reconciler 三层），改动面大——**未实施**，
+  待用户决策
+- 像素鼠标 1016（mousePixels）接入依赖官方 handoff 流程（mouseOnSeq reassert），
+  序列常量已备（dec.ts），状态机待 renderer 对照后接
+- 能力探测扩展（extendedKeys/kittyKeyboard/mousePixels 三项加入 querier）是
+  低风险增量——可先行
