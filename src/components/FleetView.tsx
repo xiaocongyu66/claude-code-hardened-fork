@@ -711,7 +711,7 @@ export function FleetView({
   // ── 空态 ──
   if (rowCount === 0 && composerDraft === null && !dispatching) {
     return (
-      <AlternateScreen>
+      <AlternateScreen mouseTracking="scroll">
         <Box flexDirection="column" paddingX={1} paddingY={1}>
           <Box>
             <Text bold>Claude Code</Text>

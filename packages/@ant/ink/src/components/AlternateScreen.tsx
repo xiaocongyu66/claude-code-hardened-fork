@@ -2,18 +2,33 @@ import React, { type PropsWithChildren, useContext, useInsertionEffect } from 'r
 import instances from '../core/instances.js';
 import {
   DISABLE_MOUSE_TRACKING,
-  ENABLE_MOUSE_TRACKING,
+  DISABLE_THEME_NOTIFY,
+  ENABLE_THEME_NOTIFY,
   ENTER_ALT_SCREEN,
   EXIT_ALT_SCREEN,
+  mouseTrackingSeq,
 } from '../core/termio/dec.js';
 import { TerminalWriteContext } from '../hooks/useTerminalNotification.js';
 import Box from './Box.js';
 import { TerminalSizeContext } from './TerminalSizeContext.js';
 
+type MouseTrackingMode = boolean | 'full' | 'scroll';
+
 type Props = PropsWithChildren<{
-  /** Enable SGR mouse tracking (wheel + click/drag). Default true. */
-  mouseTracking?: boolean;
+  /**
+   * Mouse tracking mode. `true` = 'full' (wheel + drag + hover + SGR),
+   * `false` = off. Official ZVt(E) also offers 'scroll' (wheel + SGR click
+   * only, no drag/hover event stream — the list-view default).
+   * Default true.
+   */
+  mouseTracking?: MouseTrackingMode;
 }>;
+
+function normalizeMouseMode(mode: MouseTrackingMode): 'full' | 'scroll' | 'off' {
+  if (mode === 'scroll') return 'scroll';
+  if (mode === false) return 'off';
+  return 'full';
+}
 
 /**
  * Run children in the terminal's alternate screen buffer, constrained to
@@ -38,6 +53,7 @@ type Props = PropsWithChildren<{
 export function AlternateScreen({ children, mouseTracking = true }: Props): React.ReactNode {
   const size = useContext(TerminalSizeContext);
   const writeRaw = useContext(TerminalWriteContext);
+  const mode = normalizeMouseMode(mouseTracking);
 
   // useInsertionEffect (not useLayoutEffect): react-reconciler calls
   // resetAfterCommit between the mutation and layout commit phases, and
@@ -53,15 +69,16 @@ export function AlternateScreen({ children, mouseTracking = true }: Props): Reac
     const ink = instances.get(process.stdout);
     if (!writeRaw) return;
 
-    writeRaw(ENTER_ALT_SCREEN + '\x1b[2J\x1b[H' + (mouseTracking ? ENABLE_MOUSE_TRACKING : ''));
-    ink?.setAltScreenActive(true, mouseTracking);
+    // 官方进 alt screen 时启用 DEC 2031（终端主题变化通知——深浅色跟随）
+    writeRaw(ENTER_ALT_SCREEN + '\x1b[2J\x1b[H' + mouseTrackingSeq(mode) + ENABLE_THEME_NOTIFY);
+    ink?.setAltScreenActive(true, mode !== 'off');
 
     return () => {
       ink?.setAltScreenActive(false);
       ink?.clearTextSelection();
-      writeRaw((mouseTracking ? DISABLE_MOUSE_TRACKING : '') + EXIT_ALT_SCREEN);
+      writeRaw(DISABLE_THEME_NOTIFY + (mode === 'off' ? '' : DISABLE_MOUSE_TRACKING) + EXIT_ALT_SCREEN);
     };
-  }, [writeRaw, mouseTracking]);
+  }, [writeRaw, mode]);
 
   return (
     <Box flexDirection="column" height={size?.rows ?? 24} width="100%" flexShrink={0}>
