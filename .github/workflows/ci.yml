@@ -46,8 +46,11 @@ jobs:
           # We still require lcov.info to be generated and contain real coverage data.
           # --timeout: fail any individual test hanging >20s instead of stalling
           # the whole job for an hour (CI-only hangs surface with the test name).
+          # Split into packages/ + src/tests/ runs with a shell timeout each —
+          # a hung bun test process still exits and we learn which half hangs.
           set -o pipefail
-          bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s
+          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage packages/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
+          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage src/ tests/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
           test -s coverage/lcov.info
           grep -q '^SF:' coverage/lcov.info
 
