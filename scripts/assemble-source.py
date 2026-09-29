@@ -16,8 +16,8 @@ import os
 import re
 import sys
 
-BIN = '/root/.local/share/claude/versions/2.1.283'
-OUT = '/root/xiaocongyu66-claude-code/docs/reverse'
+BIN = os.environ.get('CC_BIN', '/root/.local/share/claude/versions/2.1.283')
+OUT = os.environ.get('CC_OUT', '/root/xiaocongyu66-claude-code/docs/reverse')
 FS = f'{OUT}/full-source'
 
 CHUNK_MARK = b'// (c) Anthropic PBC. All rights reserved.'
