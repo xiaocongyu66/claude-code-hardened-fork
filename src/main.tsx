@@ -1121,6 +1121,11 @@ async function run(): Promise<CommanderCommand> {
     initSinks();
     profileCheckpoint('preAction_after_sinks');
 
+    // Periodic RSS sampling + threshold snapshots (tengu_memory_threshold).
+    // Idempotent; samples every 30s and pauses while the session is idle.
+    const { startMemoryTracker } = await import('./utils/memoryTracker.js');
+    startMemoryTracker();
+
     // gh-33508: --plugin-dir is a top-level program option. The default
     // action reads it from its own options destructure, but subcommands
     // (plugin list, plugin install, mcp *) have their own actions and
