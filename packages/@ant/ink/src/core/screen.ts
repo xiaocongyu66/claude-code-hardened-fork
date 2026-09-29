@@ -114,12 +114,89 @@ export class StylePool {
   private styles: AnsiCode[][] = []
   private transitionCache = new Map<number, string>()
   readonly none: number
+  /**
+   * Sticky overflow flag (official: `overflowWarned=!1`). Set by the pool
+   * owner once a style-overflow condition has been observed; once set,
+   * needsCompaction() reports true regardless of pool size until compact()
+   * runs. Not auto-cleared by compact() — the underlying condition (too many
+   * live styles) is only fixed by a real prune, which the conservative
+   * compact() deliberately does not perform.
+   */
+  overflowWarned = false
+  /** Bumped by compact() so observers can detect a compaction pass. */
+  generationCount = 0
 
   constructor() {
     this.none = this.intern([])
   }
 
   private static readonly CACHE_MAX = 1000
+
+  /**
+   * Compaction floor (official minified constant `ZE` in
+   * `needsCompaction(n)`: `styles.length > Math.max(ZE, 2*n)`). The literal
+   * value of ZE was not recoverable from the binary — 4096 is an inferred
+   * default (order of magnitude of distinct styles on a large terminal
+   * frame). Recalibrate if official evidence surfaces.
+   */
+  private static readonly COMPACTION_FLOOR = 4096
+
+  /** Number of distinct interned style entries (official: `get size()`). */
+  get size(): number {
+    return this.styles.length
+  }
+
+  /** True once the pool has flagged an overflow condition. */
+  get overflowed(): boolean {
+    return this.overflowWarned
+  }
+
+  /**
+   * Conservative capacity heuristic (official: `get isNearCapacity()`).
+   * Threshold derived from COMPACTION_FLOOR — inferred, same caveat as ZE.
+   */
+  get isNearCapacity(): boolean {
+    return this.styles.length >= (StylePool.COMPACTION_FLOOR * 3) / 4
+  }
+
+  /**
+   * Whether the style pool should be compacted for the given frame.
+   * Mirrors the official pool: compact when a previous overflow was flagged,
+   * or when the pool holds more styles than max(floor, 2× the current
+   * frame's cell count) — a frame can only plausibly need one style per
+   * cell, so growth far beyond that is dead weight.
+   */
+  needsCompaction(frameCellCount: number): boolean {
+    return (
+      this.overflowWarned ||
+      this.styles.length >
+        Math.max(StylePool.COMPACTION_FLOOR, 2 * frameCellCount)
+    )
+  }
+
+  /**
+   * Conservative compaction: rebuild the `ids` dedup index from the current
+   * `styles` array. Deliberately does NOT prune entries or remap IDs:
+   * outstanding styleIds are embedded in packed screen cells (word1) and
+   * cached by consumers, so dropping a style or shifting indices would
+   * corrupt rendering. Because IDs stay stable, the derivative caches
+   * (transition/inverse/currentMatch/selectionBg) remain valid and are not
+   * cleared — clearing them would only waste warm entries. The rebuild
+   * guarantees key→id consistency (first occurrence wins, same rule as
+   * intern) and drops any stale keys. Bumps generationCount.
+   */
+  compact(): void {
+    const ids = new Map<string, number>()
+    for (let raw = 0; raw < this.styles.length; raw++) {
+      const styles = this.styles[raw]!
+      const key = styles.length === 0 ? '' : styles.map(s => s.code).join('\0')
+      if (!ids.has(key)) {
+        ids.set(key, (raw << 1) | (hasVisibleSpaceEffect(styles) ? 1 : 0))
+      }
+    }
+    this.ids = ids
+    this.generationCount++
+  }
 
   /**
    * Evict oldest entries from derivative caches when they exceed the limit.
