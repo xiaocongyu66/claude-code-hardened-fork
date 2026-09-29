@@ -24,7 +24,7 @@ describe('time-based MC constants (binary 2.1.283 parity)', () => {
     // binary @150882400: g="<persisted-output>". Assert against the real
     // export (toolResultStorage) — the cleared replacement string and the
     // idempotence check in microCompact both key on this exact tag.
-    const storage = await import('../../utils/toolResultStorage.js')
+    const storage = await import('../../../utils/toolResultStorage.js')
     expect(storage.PERSISTED_OUTPUT_TAG).toBe('<persisted-output>')
   })
 })
