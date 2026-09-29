@@ -49,8 +49,9 @@ jobs:
           # Split into packages/ + src/tests/ runs with a shell timeout each —
           # a hung bun test process still exits and we learn which half hangs.
           set -o pipefail
-          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage packages/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
-          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage src/ tests/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
+          # 二分法定位挂点：先跑单元测试（src+packages，排除 tests/），再跑集成测试
+          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage packages/ src/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
+          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage tests/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
           test -s coverage/lcov.info
           grep -q '^SF:' coverage/lcov.info
 
