@@ -233,14 +233,13 @@ function FleetHeader({ data, columns }: { data: FleetRow[]; columns: number }): 
     <Box gap={2} marginBottom={1}>
       {showLogo ? <Logo /> : null}
       <Box flexDirection="column">
+        {/* 官方 de=q(标题, model·cwd) 纵排两行（截图三行结构 + Pe=column[de,me]） */}
         <Text>
           <Text bold>Claude Code</Text>
           <Text> </Text>
-          <Text dimColor>
-            v{MACRO.VERSION}
-            {model ? ` · ${model} · ${cwd}` : ` · ${cwd}`}
-          </Text>
+          <Text dimColor>v{MACRO.VERSION}</Text>
         </Text>
+        <Text dimColor>{[model, cwd].filter(Boolean).join(' · ')}</Text>
         <Text dimColor>
           {data.length === 0
             ? t('nothing running')
