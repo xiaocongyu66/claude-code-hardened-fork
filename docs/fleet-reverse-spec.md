@@ -303,3 +303,201 @@ this.resetScreenReaderDiffState(); this.scheduleRender()
   序列常量已备（dec.ts），状态机待 renderer 对照后接
 - 能力探测扩展（extendedKeys/kittyKeyboard/mousePixels 三项加入 querier）是
   低风险增量——可先行
+
+---
+
+## 10. 像素鼠标（1016）接入设计（只读调研，2026-09-29）
+
+证据全部来自 `docs/reverse-284/full-source/_ALL.js`（40,446,725 bytes；偏移为该文件
+字节偏移，`@N` 即 `seek(N)`）。ink 核心为 chunk-6epjwwt0（@13.2M-13.56M 区）、
+modes 状态机 chunk-8m1123rr（@13.164M 区）、fleet 插件宿主 chunk-6s4zx6py（@24.7M 区）。
+
+### 10.1 序列常量与 modes 登记（@12480515 / @13164000）
+
+```
+Cm.MOUSE_SGR_PIXELS:1016
+sQr = TN(1016)               // CSI ? 1016 h   开像素
+iQr = pW(1016)+TN(1006)      // CSI ? 1016 l + CSI ? 1006 h   关像素、回落 cell SGR
+S   = TN(1000)+TN(1002)+TN(1003)+TN(1006)   // ZVt("full")
+_   = TN(1000)+TN(1006)                     // ZVt("scroll")
+Qoe = pW(1006)+pW(1003)+pW(1002)+pW(1000)   // 鼠标全关
+```
+
+modes 优先级表：`{bracketedPaste:0,themeReports:0,extendedKeys:0,altScreen:1,
+altScreenKeys:2,mouse:2,mousePixels:2,surface:3,focusEvents:4}`。
+`w("mousePixels")={on:sQr,off:iQr}`；`entry("mouse",n)` → `{on:ZVt(o),off:o==="off"?"":Qoe}`。
+set 幂等、reset 返回 off、reassert 输出该 entry 的 on、reassertFrom 按优先级 ≥r 重放、
+suspend（保留 kept 项）逆序关其余、resume 重放全部 on。
+
+### 10.2 能力探测（DECRQM 1016 + XTWINOPS 16t）
+
+初值（@13163983 `y(e)`）：bgWorker→`{settled:!1}`；tmux/screen（multiplexed）→
+`{settled:!1}`；否则 `{likely:!1, source:"env: terminal=…, not asked yet"}`——默认按
+"不支持"兜底，等 DECRPM 回答。
+
+探测（@13448300 `tg()`）：
+
+```
+D = !b || TERM_PROGRAM==="Apple_Terminal"        // b=XTVERSION 有应答
+H = !D && readings.get("mousePixels").state==="pending"
+U = H ? send(Aor()) : …   // Aor()={request:Oa("16t"), match:e=>e.type==="cellSize"}
+V = H ? send(Cor(Cm.MOUSE_SGR_PIXELS)) : …
+  // Cor(e)={request:Oa(`?${e}$p`), match:n=>n.type==="decrpm"&&n.mode===e}
+if(U) ig(U)               // ig(n){ if(n.width>0&&n.height>0) CE().cellPixels={width,height} }
+if(V) answer("mousePixels", V.status===1||V.status===2||V.status===3,
+             `probe: DECRPM 1016 status=${V.status}, cell ${og()}`)
+clearTimeout(F); u.deadline()   // pending 项按 likely 兜底 settle
+```
+
+要点：Apple_Terminal 或 XTVERSION 无应答→根本不探测（保持 likely:false）；DECRPM
+status 0（不认识该模式）→false，status 1/2/3（set/reset/permanently-set）→true；
+cell 像素尺寸与 1016 探测同批发出（16t 应答 type=cellSize），`og()` 读到
+"size unknown" 也照样 answer。`Ux(n)` 为重探：`send(16t)+flush` → ig → 日志
+"Cell size asked again: {w}x{h}px"。`kM()=CE().capabilities`（per-host store），
+`now(name)` 返回 settled 值否则默认表值。
+
+### 10.3 syncMousePixels——唯一开关状态机（@13552859）
+
+```js
+pixelReportsLive = !1;
+mouseReportsInPixels = () => this.pixelReportsLive;
+syncMousePixels = () => {
+  if (this.isUnmounted) return;
+  let n = this.finePointerHolds > 0 && this.altScreenActive
+       && this.altScreenMouseTracking === "full"
+       && kM().now("mousePixels") && CE().cellPixels !== void 0;
+  if (n === this.modes.isSet("mousePixels")) return;
+  let u = n ? this.modes.set("mousePixels") : this.modes.reset("mousePixels");
+  let f = u !== "" && !this.isHandedOff;
+  if (f) this.writeAfterKept(u);
+  let m = this.appRef.current?.querier;
+  if (f && m && this.holdsRawMode) m.flush().then(() => { this.pixelReportsLive = n });
+  else this.pixelReportsLive = n;
+  t(`Mouse reports in ${n ? "pixels" : "cells"}`);
+};
+```
+
+开启必须五条件全真：有 finePointer hold + alt 屏活跃 + 鼠标档位 full + 能力探测
+settled-true + cellPixels 已知。live 标志只在序列真正写出且 querier flush 完成后才
+翻转（防 backpressure 丢序列导致解析错位）；isHandedOff 时不写不翻。
+`modes.isSet` 作真值源，live 只是"下行解析口径"标志。
+
+引用计数 hold（@13522104）：
+
+```js
+finePointerHolds = 0;
+retainFinePointer = () => {
+  this.finePointerHolds++;
+  this.cancelFinePointerSettle ??= kM().onSettle("mousePixels", () => this.syncMousePixels());
+  this.syncMousePixels();
+  return () => { /* n 守卫 */ this.finePointerHolds--; this.syncMousePixels(); };
+};
+```
+
+第一个 hold 注册 onSettle 监听——探测晚于 UI 挂载时 settle 自动重 sync。
+React hook `CEn(o)`（@17237470 区）：`const{retainFinePointer}=use(InternalAppContext);
+useEffect(()=>o?retain():void 0,[o,r])`，组件挂载即 hold、卸载释放。
+
+### 10.4 mouseOnSeq 与 alt-screen handoff 全流程（@13528519 区）
+
+- `mouseOnSeq(){ return ZVt(this.altScreenMouseTracking) + this.modes.reassert("mousePixels") }`
+  ——cell 跟踪序列后追加 1016 reassert（未 set 时 reassert 返回 ""）。
+- **alt 进入**：AlternateScreen effect（@17196882 区）写
+  `modes.set("altScreen")+modes.set("mouse",档位)+nativeCursorSeq`；此时 1016 尚未
+  开——等 UI 调 retainFinePointer → syncMousePixels 补写。
+- **winch/resize**：`syncTerminalSize()` 在 `altScreenActive&&!isHandedOff&&tracking!=="off"`
+  时 `write(mouseOnSeq())`（重放 cell+pixel，因为终端 resize 可能重置 DEC 私有模式）；
+  `handleWinch=()=>appRef.current?.reprobeCellPixels()`（handleResize 同），重探 16t
+  后 `onCellPixels:this.syncMousePixels` 回调重算（cell 尺寸变了，五条件可能翻转）。
+- **reprobeCellPixels**（@13451378）：门=`querier!=null&&rawModeEnabledCount>0
+  &&!hasReleasedTerminal&&kM().now("mousePixels")`；`cellReprobe` 三态
+  `idle/asking/again`，runCellReprobe 完成后若 again 则续跑（合并连发 winch）。
+- **SIGCONT**（handleResume @13526966）：modes.isSuspended 时只重置帧；否则
+  `reenterAltScreen()` → `modes.reassertFrom("altScreen")`（按优先级重放 alt+mouse+
+  mousePixels）。
+- **交出终端（编辑器挂起 `$Q` @17495600）**：
+  `prepareTerminalForHandoff(){ pause(); write((tracking!=="off"?Qoe:"")+CQe);
+  flush; suspendStdin() }`——鼠标全关+焦点关；
+  `restoreTerminalAfterHandoff(){ resumeStdin(); write(mouseOnSeq()+XVt); resume() }`
+  ——mouseOnSeq 恢复 cell+像素。pause() 即 `isPaused=!0` → `isHandedOff` getter
+  （`isPaused||modes.isSuspended||ownTree!==void 0&&Ms().has(stdout)`）为真。
+- **daemon/gateway 交接 `handoffAltScreen()`（@13553543 定义 / @17700849 调用）**：
+  `isPaused=!0; altScreenActive=!1; endPointerCapture(); tellClickedNowhere();
+  modes.reset("altScreen"); modes.reset("surface")`——状态直改+指针捕获清空+
+  click 监听者收 (null,null)；随后外层 unmount。序列由 cleanupTerminalModes
+  （@17215989）兜底：`write(reset("mousePixels")+Qoe)` 再 `reset("mouse")`——先关
+  1016 再关 cell 跟踪，顺序不可反（否则残留 1016 下发 cell 坐标）。
+- **backpressure 恢复**（reassertTerminalModes @13553374 区，drain 且丢字节时）：
+  `write(DXn + reassert("bracketedPaste")+reassert("extendedKeys")
+  +reassert("mouse")+reassert("mousePixels"))`——四连 reassert，含 1016。
+
+### 10.5 解析层：SGR 统一解析 + App 层 px→cell 换算
+
+解析不区分 cell/pixel（@13395565 / @13403400 / @13406910）：
+
+```
+cd = /^\x1b\[<(\d+);(-?\d+);(-?\d+)([Mm])$/        // 允许负数（像素 0 基边缘）
+rd(n): (f&64)!==0 → null（滚轮让路）；否则 {kind:"mouse",button,action,col,row}
+jy(n,u,f,m): (u&67)===64|65 → {kind:"key",name:"wheelup"/"wheeldown",col,row}
+```
+
+换算发生在 App 消费层（@13443260 / @13459690）：
+
+```js
+Sx = n => ({col:Math.max(1,Math.floor(n.col)+1), row:Math.max(1,Math.floor(n.row)+1), fine:n});
+Pd = (n,u,f) => Sx({col:n/f.width, row:u/f.height});      // px → (cell, fine=浮点 cell)
+Kx(n,u)  // press/release/.motion：!props.mouseReportsInPixels?.()||cellPixels===void 0 → 原样
+         // 否则 {...u, ...Pd(u.col,u.row,CE().cellPixels)}
+Yx(n,u)  // wheel 同上
+```
+
+即 wire 上 col/row 字段就是原始 px；`mouseReportsInPixels()` 真时除以 cellPixels，
+整数部分作 col/row，原始浮点作 `fine`（亚 cell 精度）。dispatch（@13458400）：
+`kind==="mouse"` → scroll 档过滤 `(button&3)===0` → `Wx(n, Kx(n,A))`；wheel →
+`dispatchWheelEvent(Yx(n,A))`。
+
+fine 传播（@13470091 `Wl` / @13560000）：元素级 onPointer 收
+`{localCol,localRow, fine:{col:u.fine.col-floor(x), row:u.fine.row-floor(y)}}`
+——fine 是相对元素的浮点 cell 坐标；pointerCapture（down/move/up）与 hover
+（门控 altScreenActive）都透传。
+
+### 10.6 消费方（含 fleet）
+
+- **fleet 插件 pane（chunk-6s4zx6py @24721650 区）——确有消费**：
+  `F=R&&x.acceptsPointer(); CEn(F)`（pane 接受指针即 hold fine pointer），事件转发
+  `x.pointer({type, x:localCol, y:localRow, ...fine&&{fine:{x:fine.col,y:fine.row}}, ...mods})`
+  ——外部插件收到 `fine:{x,y}` 浮点 cell 坐标 + onMouseEnter/Leave。
+- **面板分隔条拖拽**（@28857150 区 `dx`）：只用整数 col/row（axis/cells/onResize），
+  不消费 fine。
+- **选择/点击/超链接**（Wx @13459860 区）：用换算后 col/row；`u.fine` 透传给
+  onPointerPress/Drag/Release/Hover props（App 级 pointer API）。
+
+### 10.7 cch 接入设计草案
+
+现状：`packages/@ant/ink/src/core/termio/dec.ts` 已备
+`DEC.MOUSE_SGR_PIXELS:1016`、`ENABLE/DISABLE/EXIT_MOUSE_PIXELS`（EXIT=iQr 语义）；
+`packages/@ant/ink/src/core/terminal-capabilities.ts` 已落 DECRQM 探测（decrpmStatusSupported）。
+App.tsx 已有 cell 档鼠标（selection/wheel），无 onPointer/fine 设施。
+
+1. **能力层**（terminal-capabilities.ts）：DECRQM 判定对齐官方只认 status 1|2|3
+   （cch 现为 1..4，status 4=permanently reset 官方不启用）；同批复用 querier 发
+   `CSI 16 t`（cellSize），存 `{width,height}`；探测门补 Apple_Terminal/XTVERSION
+   无应答跳过 + tmux/screen 置 pending-not-asked。结果接入 §9.3 的五项 readings。
+2. **新增状态**（ink 实例层）：`pixelReportsLive:boolean`（默认 false）+
+   `finePointerHolds:number` + `retainFinePointer():()=>void`。真值源用 modes 登记
+   （mousePixels entry，优先级 2），live 仅为解析口径。
+3. **切换时机**（syncMousePixels 移植）：开=holds>0 && altScreenActive &&
+   tracking==="full" && capability && cellPixels 已知；关序列必须用 EXIT_MOUSE_PIXELS
+   （1016l+1006h）；序列写出后等 querier flush 再翻 live；handoff/paused 期间不写。
+   触发点：retain/release、能力 settle、alt 进出、resize 重探（cellReprobe
+   idle/asking/again 三态）后、SIGCONT reassert、backpressure drain 四连 reassert、
+   cleanup 先 1016l 后 Qoe。
+4. **解析层**：parse-keypress 无需改（cd 正则已同构，含负数）；在 App.tsx mouse
+   分支加 Kx/Yx 等价换算（`Pd(px,py,{width,height})` → col/row+fine），由
+   `mouseReportsInPixels()` 门控。
+5. **消费方建议**：先落 App 级 `onPointer{Press,Drag,Release,Hover}` + Box
+   `onPointer` 元素事件（localCol/localRow/fine），hover 门控 altScreenActive；
+   fleet 侧对齐官方 pane 语义——acceptsPointer() 时 hook 持 hold 并把
+   `fine:{x,y}` 透传插件；分隔条等 cell 级交互不必迁 fine。低风险起步顺序：
+   能力探测（先行）→ 状态机+解析 → onPointer 事件 → fleet pane 透传。
+
