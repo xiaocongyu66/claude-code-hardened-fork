@@ -67,3 +67,4 @@ vendor/transcript-parser/**/*.node
 vendor/color-diff/**/*.node
 vendor/file-index/**/*.node
 docs/reverse/
+docs/reverse-284/

@@ -29,7 +29,13 @@ function frameWithText(
   height: number,
   lines: string[],
 ): Frame {
-  const screen = createScreen(width, height, pools.styles, pools.chars, pools.links)
+  const screen = createScreen(
+    width,
+    height,
+    pools.styles,
+    pools.chars,
+    pools.links,
+  )
   for (let y = 0; y < lines.length && y < height; y++) {
     const line = lines[y]
     for (let x = 0; x < line.length && x < width; x++) {
@@ -61,7 +67,11 @@ describe('LogUpdate 黄金帧', () => {
     const diff = log.render(prev, next)
     const stdout = diff.find(p => p.type === 'stdout')
     expect(stdout).toBeDefined()
-    expect(stdout && stdout.type === 'stdout' && stdout.content.includes('hello world')).toBe(true)
+    expect(
+      stdout &&
+        stdout.type === 'stdout' &&
+        stdout.content.includes('hello world'),
+    ).toBe(true)
   })
 
   test('增量帧：同尺寸仅一行变化 = patch 不含未变行文本', () => {
@@ -79,7 +89,9 @@ describe('LogUpdate 黄金帧', () => {
     ])
     const diff = log.render(prev, next)
     const stdoutPatches = diff.filter(p => p.type === 'stdout')
-    const all = stdoutPatches.map(p => (p.type === 'stdout' ? p.content : '')).join('\n')
+    const all = stdoutPatches
+      .map(p => (p.type === 'stdout' ? p.content : ''))
+      .join('\n')
     expect(all.includes('CHANGED')).toBe(true)
     // 未变行不应重复输出（增量性质）
     expect(all.includes('alpha line')).toBe(false)
@@ -132,6 +144,8 @@ describe('LogUpdate 黄金帧', () => {
     const prev = emptyFrame(3, 20, pools.styles, pools.chars, pools.links)
     const diff = log.render(prev, next)
     const stdout = diff.find(p => p.type === 'stdout')
-    expect(stdout && stdout.type === 'stdout' && stdout.content.includes('你好')).toBe(true)
+    expect(
+      stdout && stdout.type === 'stdout' && stdout.content.includes('你好'),
+    ).toBe(true)
   })
 })
