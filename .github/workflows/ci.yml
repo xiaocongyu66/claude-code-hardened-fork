@@ -49,8 +49,8 @@ jobs:
           set -o pipefail
           STATUS=0
           while IFS= read -r f; do
-            timeout 15 bun test --timeout 10000 "$f" >/dev/null 2>&1
-            rc=$?
+            rc=0
+            timeout 15 bun test --timeout 10000 "$f" >/dev/null 2>&1 || rc=$?
             if [ $rc -eq 124 ]; then
               echo "HANG: $f"
               STATUS=1
