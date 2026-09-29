@@ -52,6 +52,23 @@ export async function handleConnect(ws: WSContext): Promise<void> {
   try {
     logAgent.info({ command: AGENT_COMMAND, args: AGENT_ARGS }, 'spawning')
 
+    // Config guard: AGENT_COMMAND is only set via setServerConfig() at server
+    // startup. Without it, spawn() throws "The \"file\" argument must be of
+    // type string" on every connect attempt — which test harnesses and
+    // frontend clients treat as retryable, looping forever. Fail fast with a
+    // definitive JSON-RPC error instead.
+    if (!AGENT_COMMAND) {
+      logAgent.error('connect failed: agent command not configured')
+      sendJsonRpcError(
+        ws,
+        state,
+        null,
+        JSONRPC_INTERNAL_ERROR,
+        'Agent command not configured — call setServerConfig() before accepting connections',
+      )
+      return
+    }
+
     const agentProcess = spawn(AGENT_COMMAND, AGENT_ARGS, {
       cwd: AGENT_CWD,
       stdio: ['pipe', 'pipe', 'inherit'],
