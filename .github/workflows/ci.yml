@@ -40,16 +40,21 @@ jobs:
         run: bun run typecheck
 
       - name: Test with Coverage
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
-          # Run bun test WITHOUT coverage first — coverage instrumentation on
-          # 3700+ files is what actually stalls this step for 15+ minutes,
-          # not the tests themselves.  Coverage is best-effort only.
+          # PER-FILE LOCATOR: a test hangs in the full run (bun test's parallel
+          # workers make the last printed group useless for attribution), so
+          # run each file in its own process with a hard timeout. The hanging
+          # file is killed at 15s and HANG_OR_FAIL names it directly.
           set -o pipefail
-          timeout 600 bun test --timeout 20000 packages/ src/ tests/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
-          timeout 600 bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage packages/ src/ tests/ 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s || true
-          test -s coverage/lcov.info || true
-          grep -q '^SF:' coverage/lcov.info || true
+          STATUS=0
+          while IFS= read -r f; do
+            if ! timeout 15 bun test --timeout 10000 "$f" >/dev/null 2>&1; then
+              echo "HANG_OR_FAIL: $f"
+              STATUS=1
+            fi
+          done < <(find packages src tests -name '*.test.ts' -o -name '*.test.tsx' | sort)
+          exit $STATUS
 
   # ── Rust native：5 平台矩阵（产物供 package 打包内嵌）──
   native:
