@@ -40,11 +40,14 @@ jobs:
         run: bun run typecheck
 
       - name: Test with Coverage
+        timeout-minutes: 15
         run: |
           # Tolerate pre-existing flaky tests (Bun mock pollution / order-dependent state).
           # We still require lcov.info to be generated and contain real coverage data.
+          # --timeout: fail any individual test hanging >20s instead of stalling
+          # the whole job for an hour (CI-only hangs surface with the test name).
           set -o pipefail
-          bun test --coverage --coverage-reporter lcov --coverage-dir coverage 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s
+          bun test --timeout 20000 --coverage --coverage-reporter lcov --coverage-dir coverage 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s
           test -s coverage/lcov.info
           grep -q '^SF:' coverage/lcov.info
 
