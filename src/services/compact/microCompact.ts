@@ -274,7 +274,7 @@ export async function microcompactMessages(
   // tool results now, before the request, to shrink what gets rewritten.
   // Cached MC (cache-editing) is skipped when this fires: editing assumes a
   // warm cache, and we just established it's cold.
-  const timeBasedResult = maybeTimeBasedMicrocompact(messages, querySource)
+  const timeBasedResult = await maybeTimeBasedMicrocompact(messages, querySource)
   if (timeBasedResult) {
     return timeBasedResult
   }
