@@ -91,6 +91,11 @@ export type { FlickerReason, FrameEvent } from './core/frame.js'
 export type { MatchPosition } from './core/render-to-screen.js'
 export type { SelectionState, FocusMove } from './core/selection.js'
 export type { Progress } from './core/terminal.js'
+export {
+  TerminalCapabilities,
+  decrpmStatusSupported,
+} from './core/terminal-capabilities.js'
+export type { CapabilityName } from './core/terminal-capabilities.js'
 
 // ============================================================
 // Core modules
