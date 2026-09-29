@@ -49,8 +49,13 @@ jobs:
           set -o pipefail
           STATUS=0
           while IFS= read -r f; do
-            if ! timeout 15 bun test --timeout 10000 "$f" >/dev/null 2>&1; then
-              echo "HANG_OR_FAIL: $f"
+            timeout 15 bun test --timeout 10000 "$f" >/dev/null 2>&1
+            rc=$?
+            if [ $rc -eq 124 ]; then
+              echo "HANG: $f"
+              STATUS=1
+            elif [ $rc -ne 0 ]; then
+              echo "FAIL($rc): $f"
               STATUS=1
             fi
           done < <(find packages src tests -name '*.test.ts' -o -name '*.test.tsx' | sort)
