@@ -66,3 +66,4 @@ vendor/token-counter/**/*.node
 vendor/transcript-parser/**/*.node
 vendor/color-diff/**/*.node
 vendor/file-index/**/*.node
+docs/reverse/
