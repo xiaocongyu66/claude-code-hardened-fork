@@ -552,41 +552,46 @@ async function maybeTimeBasedMicrocompact(
   // may hold images/documents that persistToolResult refuses (non-text), and
   // the per-block persist is async — cannot await inside .map().
   const replacements = new Map<number, Map<number, string>>()
-  if (storage) {
-    for (let mi = 0; mi < messages.length; mi++) {
-      const message = messages[mi]!
-      if (message.type !== 'user' || !Array.isArray(message.message!.content)) {
+  // Official lto semantics (@150884560, `u.set(id, m ?? f)`): EVERY clearSet
+  // candidate gets cleared — persist only decides the replacement shape
+  // (pointer string on success, bare placeholder on failure / no persist).
+  // Skipping the replacement on persist error would leave the content in the
+  // context while tokensSaved already counted it.
+  for (let mi = 0; mi < messages.length; mi++) {
+    const message = messages[mi]!
+    if (message.type !== 'user' || !Array.isArray(message.message!.content)) {
+      continue
+    }
+    for (let bi = 0; bi < message.message!.content.length; bi++) {
+      const block = message.message!.content[bi]!
+      if (
+        block.type !== 'tool_result' ||
+        !clearSet.has(block.tool_use_id) ||
+        isAlreadyClearedContent(block.content) ||
+        block.content === undefined
+      ) {
         continue
       }
-      for (let bi = 0; bi < message.message!.content.length; bi++) {
-        const block = message.message!.content[bi]!
-        if (
-          block.type !== 'tool_result' ||
-          !clearSet.has(block.tool_use_id) ||
-          isAlreadyClearedContent(block.content) ||
-          block.content === undefined
-        ) {
-          continue
-        }
+      let replacement = TIME_BASED_MC_CLEARED_MESSAGE
+      if (storage) {
         const persisted = await storage.persistToolResult(
           block.content,
           block.tool_use_id,
         )
-        if ('error' in persisted) {
-          continue // fall back to the bare placeholder below
+        if (!('error' in persisted)) {
+          // Official H wording: saved-to pointer + "Use Read to view"
+          replacement = `${storage.PERSISTED_OUTPUT_TAG}\nTool result saved to: ${persisted.filepath}\n\nUse ${FILE_READ_TOOL_NAME} to view`
+          if (contentHasWatermark(block.content)) {
+            replacement = `${ARTIFACT_WATERMARK}\n${replacement}`
+          }
         }
-        // Official H wording: saved-to pointer + "Use Read to view"
-        let replacement = `${storage.PERSISTED_OUTPUT_TAG}\nTool result saved to: ${persisted.filepath}\n\nUse ${FILE_READ_TOOL_NAME} to view`
-        if (contentHasWatermark(block.content)) {
-          replacement = `${ARTIFACT_WATERMARK}\n${replacement}`
-        }
-        let perMessage = replacements.get(mi)
-        if (!perMessage) {
-          perMessage = new Map()
-          replacements.set(mi, perMessage)
-        }
-        perMessage.set(bi, replacement)
       }
+      let perMessage = replacements.get(mi)
+      if (!perMessage) {
+        perMessage = new Map()
+        replacements.set(mi, perMessage)
+      }
+      perMessage.set(bi, replacement)
     }
   }
 
