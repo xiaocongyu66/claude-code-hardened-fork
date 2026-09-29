@@ -5,6 +5,26 @@
 >
 > **2026-09-13 逐项复核**：本报告部分条目已修复或经实测定案，详见各条目行内【标注】。未标注的条目仍是有效待办。复核时注意行号可能已漂移。
 
+## JSC rope 复核（O(n²) 拼接条目，2026-09-29）
+
+> 背景：Bun 运行于 JSC，`+=` 拼接生成 rope（cons string）节点，单次 O(1)；仅当字符串被"读"（charAt/slice/indexOf/比较/传入原生 API）或超大时才 flatten。因此 `+=` 循环只有**纯写**时整体 O(n)，**写-读交错**才是真 O(n²)。逐条以该语义复核原 O(n²) 拼接条目：
+
+| 条目 | 判定 | 依据 | 修复 |
+|------|------|------|------|
+| 已修复表 R1：`claude.ts:1834,2271` 流式 text 拼接 | 已修（维持） | 现为 textDeltas 数组 push + 单次 join（`claude.ts:2223,2291-2294`）；且原版 `+=` 纯写下 rope 亦为 O(n)，修复收益主要是消除数千 rope 节点的 GC 压力 | 无需再动 |
+| P1#7 text_delta 3 处 | 已修（验证一致） | `gemini/index.ts:153,177`、`grok/index.ts:180,200`、`openai/index.ts:463,480` 均数组累积 | — |
+| P1#7 input/thinking 6 处（`openai/index.ts:465,468`、`gemini/index.ts:155,158`、`grok/index.ts:182,185`、`claude.ts:2178,2209,2258` 同型） | **误报**（rope O(n)） | delta 循环内纯写无读：无 slice/indexOf/charAt/字符串比较/原生 API 传入；唯一 flatten 在 `content_block_stop` → `normalizeContentFromAPI` → `safeParseJSON` 单次 O(n)（`utils/messages.ts:2566`）；`((block.input as string\|undefined) \|\| '')` 真值检查仅读 rope 长度 O(1) | 维持"保持原版"裁定 |
+| P1#8 `messages.ts:3252,3268`（漂移至 `:3656,3676`） | 误报（维持剔除） | todo/task 提示消息各一次性 `+=`，无循环，n=1 | — |
+| 交叉条目 `mcp-rust-rewrite-assessment.md:18`：stderrOutput += 未落地 | 过时（assessment 说法失效） | `captureStderr` 已是 chunks 数组 + 8MB cap + join（`packages/mcp-client/src/connection.ts:125-159`），调用方 `src/services/mcp/client.ts:1103,1174` 走 `getOutput()` | 已在 assessment 行内补【过时】标注 |
+
+小结：复核 4 组条目、16 个代码位点——真 O(n²) 高危 0，修复 0，误报/已修 15，范围外新发现 1（下条）。
+
+**范围外同类观察（本次不动）**：
+- SSE 帧缓冲 `gemini/client.ts:66,82`、`openai/responsesAdapter.ts:209`、`dumpPrompts.ts:192`：`buffer += chunk` 后立即 indexOf/解析并 drain（`buffer = remaining`），n 上限 = 单 SSE 帧大小（KB 级）而非整条流 → 低危。
+- `ripgrep.ts:219`：cap 截断守卫，`.length` 在 rope 上 O(1)，触发 cap 时单次 flatten → 低危。
+- `voice.ts:94`：arecord 探针 150ms 生命周期 → 低危。
+- **新发现（中低危，建议后续处理）**：`hooks.ts:1301` 的 `stderr/output += data` 配合 `hookEvents.ts:136` 进度轮询每秒 `output === lastEmittedOutput` 比较——输出持续变化时每 tick 触发 rope flatten（O(n_t)，Σ=O(n·ticks)），属真·写-读交错二次方模式；但 hook 输出通常 KB-MB 级、tick 间隔 1s，实际峰值有限。建议后续以变更计数器替代字符串比较。
+
 ## 已修复（10 项）
 
 | 问题 | 原峰值 | 修复 | 位置 |
@@ -35,8 +55,8 @@
 
 | # | 问题 | 峰值 | 位置 | 建议 |
 |---|------|------|------|------|
-| 7 | OpenAI/Gemini/Grok 兼容层 O(n²) 拼接 | 25-75 MB | 3 文件 9 处（`openai/index.ts:386`, `gemini/index.ts:148`, `grok/index.ts:163`） | 改数组累积（同 claude.ts 模式） 【text_delta 3 处已修 2026-09-13 `perf/p1-quickwins`；input/thinking 经裁定保持原版（对齐 claude.ts 的 += 样板）】 |
-| 8 | messages.ts O(n²) 拼接 | 10-25 MB | `messages.ts:3252,3268` | 改数组累积 【误判 2026-09-13 复核：:3654/:3674 为 todo 提示消息的一次性追加，非流式热路径，剔除】 |
+| 7 | OpenAI/Gemini/Grok 兼容层 O(n²) 拼接 | 25-75 MB | 3 文件 9 处（`openai/index.ts:386`, `gemini/index.ts:148`, `grok/index.ts:163`） | 改数组累积（同 claude.ts 模式） 【text_delta 3 处已修 2026-09-13 `perf/p1-quickwins`；input/thinking 经裁定保持原版（对齐 claude.ts 的 += 样板）】【JSC rope 复核 2026-09-29：input/thinking 误报——纯写循环单次终读，rope 下 O(n)，见"JSC rope 复核"节】 |
+| 8 | messages.ts O(n²) 拼接 | 10-25 MB | `messages.ts:3252,3268` | 改数组累积 【误判 2026-09-13 复核：:3654/:3674 为 todo 提示消息的一次性追加，非流式热路径，剔除；2026-09-29 rope 复核维持，行号现漂移至 :3656/:3676】 |
 | 9 | highlight.js 全量 192 语言（仅需 26 种） | 8-12 MB | `color-diff-napi/index.ts:21` | 自定义构建 |
 | 10 | hlLineCache 模块级单例 2048 条目 | ~4 MB | `color-diff-napi/index.ts:508` | 改 LRU + size 上限 【已修：现 `index.ts:924` 已有 2048 上限淘汰，~4MB 收益过小，剔除】 |
 | 11 | colorFileCache 3x 代码存储 | 2-5 MB | `HighlightedCode.tsx:14` | 移除 value 中 code 字段 【裁定不改 2026-09-13：code 字段是缓存键校验（`:48 cached.code === code`），非冗余；优化需重设计 key，不值】 |

@@ -15,7 +15,7 @@
 ## 二、热点与收益预估
 
 - **内存大头是 schema 对象驻留，不是字节流**：P2 #22 属实——`manager.ts:73` toolsCache 与 `AppStateStore.ts:180` mcp.tools 双容器引用同一批 CoreTool；10 server 场景 ≈30–60MB（与文档 ~40MB 吻合）。**数据最终要回 JS 给 Tool registry/API 用，Rust 化不省这部分内存**。
-- **新发现偏差**：`client.ts:996` stderr 上限实际仍是 **64MB/server**，且 `stderrOutput +=` 为 O(n²) 拼接——memory-peak 文档"已修 8MB"未落地（又一处报告过时）。
+- **新发现偏差**：`client.ts:996` stderr 上限实际仍是 **64MB/server**，且 `stderrOutput +=` 为 O(n²) 拼接——memory-peak 文档"已修 8MB"未落地（又一处报告过时）。【过时 2026-09-29 复核：`captureStderr` 已落地 chunks 数组累积 + 8MB cap + join（`packages/mcp-client/src/connection.ts:125-159`），调用方 `src/services/mcp/client.ts:1103,1174` 走 `getOutput()`；本条偏差不复存在，详见 memory-peak "JSC rope 复核"节】
 - CPU：SDK ReadBuffer 每消息 Buffer.concat + JSON.parse + **Zod schema 双解析**；`recursivelySanitizeUnicode` 全 schema 递归 NFC。均发生在连接建立/toolsChanged 时，非稳态高频，收益低。
 
 ## 三、边界税评估
