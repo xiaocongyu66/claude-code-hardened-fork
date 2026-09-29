@@ -35,6 +35,12 @@ import {
 // Drift is caught by a test asserting equality with the source-of-truth.
 export const TIME_BASED_MC_CLEARED_MESSAGE = '[Old tool result content cleared]'
 
+// Official dh/c1t (binary @136015452): artifact "authored by others" watermark.
+// Results containing it are skipped when idempotent and keep the watermark
+// prefix on their cleared replacement (official Gwt T/d semantics).
+// Exported for test constant-parity with the binary.
+export const ARTIFACT_WATERMARK = '<artifact-content-authored-by-others/>'
+
 const IMAGE_MAX_TOKEN_SIZE = 2000
 
 // Only compact these tools
@@ -449,10 +455,43 @@ export function evaluateTimeBasedTrigger(
   return { gapMinutes, config }
 }
 
-function maybeTimeBasedMicrocompact(
+/**
+ * Idempotence check (official k(content) @150883200): a result whose content
+ * is already the cleared placeholder or a persisted-output pointer is skipped
+ * so we neither double-count nor re-clear it.
+ */
+function isAlreadyClearedContent(
+  content: ToolResultBlockParam['content'],
+): boolean {
+  if (typeof content === 'string') {
+    return (
+      content === TIME_BASED_MC_CLEARED_MESSAGE ||
+      content.startsWith('<persisted-output>')
+    )
+  }
+  return false
+}
+
+/**
+ * Watermark check (official T(content) @150882900): artifact "authored by
+ * others" content keeps its watermark on the cleared replacement.
+ */
+function contentHasWatermark(
+  content: ToolResultBlockParam['content'],
+): boolean {
+  if (typeof content === 'string') {
+    return content.includes(ARTIFACT_WATERMARK)
+  }
+  return (
+    Array.isArray(content) &&
+    content.some(b => b.type === 'text' && b.text.includes(ARTIFACT_WATERMARK))
+  )
+}
+
+async function maybeTimeBasedMicrocompact(
   messages: Message[],
   querySource: QuerySource | undefined,
-): MicrocompactResult | null {
+): Promise<MicrocompactResult | null> {
   const trigger = evaluateTimeBasedTrigger(messages, querySource)
   if (!trigger) {
     return null
@@ -472,34 +511,102 @@ function maybeTimeBasedMicrocompact(
     return null
   }
 
+  // Official lto gate (@150884560): estimate the savings read-only first and
+  // abandon the whole clear when they fall below minTokensSaved (xar=20000) —
+  // the savings don't justify the persist IO and reference-breaking cost.
   let tokensSaved = 0
-  const result: Message[] = messages.map(message => {
+  for (const message of messages) {
     if (message.type !== 'user' || !Array.isArray(message.message!.content)) {
-      return message
+      continue
     }
-    let touched = false
-    const newContent = message.message!.content.map(block => {
+    for (const block of message.message!.content) {
       if (
         block.type === 'tool_result' &&
         clearSet.has(block.tool_use_id) &&
-        block.content !== TIME_BASED_MC_CLEARED_MESSAGE
+        !isAlreadyClearedContent(block.content)
       ) {
         tokensSaved += calculateToolResultTokens(block)
-        touched = true
-        return { ...block, content: TIME_BASED_MC_CLEARED_MESSAGE }
+      }
+    }
+  }
+  if (tokensSaved < config.minTokensSaved) {
+    return null
+  }
+
+  // Official persist chain (JW @142844321 + caller H @157027253): old output
+  // is written to disk and the context keeps only a pointer string. Dynamic
+  // import — a static one would close the circular-deps loop documented at
+  // TIME_BASED_MC_CLEARED_MESSAGE. persist failure falls back to the bare
+  // placeholder (official `m ?? f`).
+  let storage: typeof import('../../utils/toolResultStorage.js') | null = null
+  try {
+    storage = await import('../../utils/toolResultStorage.js')
+  } catch {
+    storage = null
+  }
+
+  // Collect (message index → block index → replacement) first: block.content
+  // may hold images/documents that persistToolResult refuses (non-text), and
+  // the per-block persist is async — cannot await inside .map().
+  const replacements = new Map<number, Map<number, string>>()
+  if (storage) {
+    for (let mi = 0; mi < messages.length; mi++) {
+      const message = messages[mi]!
+      if (message.type !== 'user' || !Array.isArray(message.message!.content)) {
+        continue
+      }
+      for (let bi = 0; bi < message.message!.content.length; bi++) {
+        const block = message.message!.content[bi]!
+        if (
+          block.type !== 'tool_result' ||
+          !clearSet.has(block.tool_use_id) ||
+          isAlreadyClearedContent(block.content) ||
+          block.content === undefined
+        ) {
+          continue
+        }
+        const persisted = await storage.persistToolResult(
+          block.content,
+          block.tool_use_id,
+        )
+        if ('error' in persisted) {
+          continue // fall back to the bare placeholder below
+        }
+        // Official H wording: saved-to pointer + "Use Read to view"
+        let replacement = `${storage.PERSISTED_OUTPUT_TAG}\nTool result saved to: ${persisted.filepath}\n\nUse ${FILE_READ_TOOL_NAME} to view`
+        if (contentHasWatermark(block.content)) {
+          replacement = `${ARTIFACT_WATERMARK}\n${replacement}`
+        }
+        let perMessage = replacements.get(mi)
+        if (!perMessage) {
+          perMessage = new Map()
+          replacements.set(mi, perMessage)
+        }
+        perMessage.set(bi, replacement)
+      }
+    }
+  }
+
+  const result: Message[] = messages.map((message, mi) => {
+    if (message.type !== 'user' || !Array.isArray(message.message!.content)) {
+      return message
+    }
+    const perMessage = replacements.get(mi)
+    if (!perMessage) {
+      return message
+    }
+    const newContent = message.message!.content.map((block, bi) => {
+      const replacement = perMessage.get(bi)
+      if (block.type === 'tool_result' && replacement !== undefined) {
+        return { ...block, content: replacement }
       }
       return block
     })
-    if (!touched) return message
     return {
       ...message,
       message: { ...message.message, content: newContent },
     }
   })
-
-  if (tokensSaved === 0) {
-    return null
-  }
 
   logEvent('tengu_time_based_microcompact', {
     gapMinutes: Math.round(gapMinutes),

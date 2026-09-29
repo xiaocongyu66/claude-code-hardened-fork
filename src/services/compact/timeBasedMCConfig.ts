@@ -25,12 +25,17 @@ export type TimeBasedMCConfig = {
   /** Keep this many most-recent compactable tool results.
    *  When set, takes priority over any default; older results are cleared. */
   keepRecent: number
+  /** Official xar=20000 (binary @150882690): abandon the entire clear when the
+   *  estimated token savings fall below this gate — the savings don't justify
+   *  the persist IO and reference-breaking cost. */
+  minTokensSaved: number
 }
 
 const TIME_BASED_MC_CONFIG_DEFAULTS: TimeBasedMCConfig = {
   enabled: false,
   gapThresholdMinutes: 60,
   keepRecent: 5,
+  minTokensSaved: 20000,
 }
 
 export function getTimeBasedMCConfig(): TimeBasedMCConfig {
