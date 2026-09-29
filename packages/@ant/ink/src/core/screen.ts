@@ -9,6 +9,7 @@ import {
   type Size,
   unionRect,
 } from './layout/geometry.js'
+import { stringWidth } from './stringWidth.js'
 import { BEL, ESC, SEP } from './termio/ansi.js'
 import * as warn from './warn.js'
 
@@ -920,6 +921,63 @@ export function setCellAt(
       const d = screen.damage
       if (d && spacerX >= d.x + d.width) {
         d.width = spacerX - d.x + 1
+      }
+    }
+  }
+}
+
+// Placeholder written into the head cell when a wide grapheme cluster
+// cannot fit before the end of its row. The official ink fork interns a
+// constant ($We) whose literal value was not recovered from the 284
+// binary decompile — '?' is the closest visual stand-in.
+const WIDE_OVERFLOW_PLACEHOLDER = '?'
+
+/**
+ * Replace wide grapheme clusters that cannot fit before the end of their
+ * row with a placeholder + space padding. 1:1 port of the official ink
+ * fork's S0() (decompiled _ALL.js @13361xxx):
+ *
+ *   - No damage → nothing to fix.
+ *   - Scan only the damage bounding box, with the scan start capped at
+ *     width-2 (a Wide cell always claims a second column, so the scan
+ *     never starts on the last column).
+ *   - Only Wide cells (width bits === 1) are considered.
+ *   - Only multi-codepoint grapheme clusters (official Nd(): char.length
+ *     > 2 — combining marks, ZWJ sequences) are considered. Terminals may
+ *     render these wider than the 2 cells Ink reserved, desyncing the
+ *     cursor model.
+ *   - T = max(2, wcwidth(char)); when the cluster's extent ends before
+ *     the row's last column (b + T < width) the cell is left alone.
+ *   - Otherwise the head cell becomes the placeholder and the rest of the
+ *     row is padded with spaces — all width Narrow (official width: 0),
+ *     keeping the cluster's styleId/hyperlink — so the terminal never
+ *     renders the cluster across the right edge.
+ */
+export function fixWideCharOverflow(screen: Screen): void {
+  const damage = screen.damage
+  if (!damage) return
+  const maxScanX = Math.min(screen.width - 2, damage.x + damage.width - 1)
+  const maxY = Math.min(damage.y + damage.height, screen.height)
+  for (let y = damage.y; y < maxY; y++) {
+    for (let x = damage.x; x <= maxScanX; x++) {
+      const ci = (y * screen.width + x) << 1
+      // Official: (cells[(g*width+b<<1)+1] & xn) !== 1 → not a Wide cell
+      if ((screen.cells[ci + 1]! & WIDTH_MASK) !== CellWidth.Wide) continue
+      const cell = cellAt(screen, x, y)
+      // Official Nd(): only grapheme clusters longer than 2 UTF-16 units
+      if (!cell || cell.char.length <= 2) continue
+      const clusterWidth = Math.max(2, stringWidth(cell.char))
+      // Cluster ends before the row's last column → nothing to fix
+      if (x + clusterWidth < screen.width) continue
+      // Official: head cell becomes the placeholder, the rest of the row
+      // is padded with spaces (width 0 = Narrow, style/hyperlink kept)
+      for (let a = x; a < screen.width; a++) {
+        setCellAt(screen, a, y, {
+          char: a === x ? WIDE_OVERFLOW_PLACEHOLDER : ' ',
+          styleId: cell.styleId,
+          width: CellWidth.Narrow,
+          hyperlink: cell.hyperlink,
+        })
       }
     }
   }

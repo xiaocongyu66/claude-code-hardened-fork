@@ -11,7 +11,7 @@ import renderNodeToOutput, {
   resetScrollDrainNode,
   resetScrollHint,
 } from './render-node-to-output.js'
-import { createScreen, type StylePool } from './screen.js'
+import { createScreen, fixWideCharOverflow, type StylePool } from './screen.js'
 
 export type RenderOptions = {
   frontFrame: Frame
@@ -136,6 +136,14 @@ export default function createRenderer(
     })
 
     const renderedScreen = output.get()
+
+    // Official ink fork parity: S0() runs right after the frame is fully
+    // painted (all renderNodeToOutput / blit work done) and before the
+    // frame reaches the diff stage (log.render in the onRender loop).
+    // Wide grapheme clusters stuck at the row end are swapped for a
+    // placeholder + space padding so the terminal never renders them
+    // across the right edge and desyncs the cursor model.
+    fixWideCharOverflow(renderedScreen)
 
     // Drain continuation: render cleared scrollbox.dirty, so next frame's
     // root blit would skip the subtree. markDirty walks ancestors so the
