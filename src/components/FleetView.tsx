@@ -125,7 +125,12 @@ const GROUP_SUBTITLE: Record<string, string> = {
 function groupOf(row: FleetRow): 'review' | 'blocked' | 'working' | 'done' {
   if (row.tempo === 'blocked') return 'blocked';
   if (row.tempo === 'done' || row.tempo === 'failed' || row.tempo === 'stopped') return 'done';
-  return 'working'; // running/idle/booked 兜底（官方 ii 同款）
+  return 'working';
+}
+
+/** alt+N 的组定位：聚焦行所在分组（官方 focusedOrigin 语义的 cch 映射）。 */
+function groupOfRow(row: FleetRow): 'review' | 'blocked' | 'working' | 'done' {
+  return groupOf(row); // running/idle/booked 兜底（官方 ii 同款）
 }
 
 /** 每组折叠上限（官方 Rm=3 语义）。 */
@@ -562,6 +567,10 @@ export function FleetView({
         delete?: boolean;
         wheelUp?: boolean;
         wheelDown?: boolean;
+        home?: boolean;
+        end?: boolean;
+        pageUp?: boolean;
+        pageDown?: boolean;
       },
     ) => {
       // ── 帮助面板 ──
@@ -611,7 +620,18 @@ export function FleetView({
         else setExitPending(true);
         return;
       }
+      // ── 翻页/跳转（官方 home/end/pageup/pagedown：位移 max(1, termRows-6)）──
+      if (key.home || key.end || key.pageUp || key.pageDown) {
+        setKillArmed(null);
+        const jump = Math.max(1, 6);
+        if (key.home) setSelected(0);
+        else if (key.end) setSelected(focusCount - 1);
+        else if (key.pageUp) setSelected(s => Math.max(0, s - jump));
+        else setSelected(s => Math.min(focusCount - 1, s + jump));
+        return;
+      }
       // ── 列表导航 ──
+      // j/k/g/G 为 cch 增强（官方 Tp 只有方向键与 ctrl+n/p）
       if (input === 'j' || key.downArrow) {
         setKillArmed(null);
         setSelected(s => Math.min(focusCount - 1, s + 1));
@@ -623,8 +643,14 @@ export function FleetView({
       } else if (input === 'G') {
         setSelected(focusCount - 1);
       } else if (key.alt && /^[1-9]$/.test(input)) {
-        // 官方 alt+1-N：直接打开第 N 个可聚焦 job
-        const jobs = focusable.filter(l => l.kind === 'job');
+        // 官方 meta+N：当前聚焦 origin 组内第 N 个 job → 打开
+        // （cch 无 origin 体系——映射为聚焦行所在分组的第 N 个）
+        const focusGroup = focusedLine?.group ?? (focusedLine?.row ? groupOfRow(focusedLine.row) : undefined);
+        const jobs = (
+          focusGroup
+            ? focusable.filter(l => l.kind === 'job' && l.row && groupOfRow(l.row) === focusGroup)
+            : focusable.filter(l => l.kind === 'job')
+        ) as Array<{ kind: 'job'; row: FleetRow }>;
         const target = jobs[Number(input) - 1];
         if (target?.row && onAttach) {
           onAttach(target.row);
@@ -647,9 +673,12 @@ export function FleetView({
       } else if (input === 'n') {
         setComposerDraft('');
       } else if (key.return && focusedLine) {
-        if (focusedLine.kind === 'job' && focusedLine.row && onAttach) {
-          onAttach(focusedLine.row);
-          exit();
+        // 官方 enter=submit 路径（pc）——job 行聚焦 composer 描述任务；
+        // 打开会话的主键是 right（openOrRespawn）与 space（preview toggle）
+        if (focusedLine.kind === 'newsession') {
+          setComposerDraft('');
+        } else if (focusedLine.kind === 'job') {
+          setComposerDraft('');
         } else if (focusedLine.kind === 'fold' && focusedLine.group) {
           setExpanded(prev => {
             const next = new Set(prev);
@@ -657,6 +686,17 @@ export function FleetView({
             return next;
           });
           logEvent('fleet_view_fold_expand', { hidden: focusedLine.hidden ?? 0 });
+        }
+      } else if (input === ' ' && focusedLine?.kind === 'job' && focusedLine.row && onAttach) {
+        // 官方 space（空 query）→ preview toggle；cch 无 preview 体系——映射为打开
+        onAttach(focusedLine.row);
+        exit();
+      } else if ((key as { rightArrow?: boolean }).rightArrow && focusedLine && onAttach) {
+        // 官方 right（非 shift、query 空、prompt）：earlier→openEarlier、
+        // newsession→openNewSessionRow、job→openOrRespawn——打开会话的主键
+        if (focusedLine.kind === 'job' && focusedLine.row) {
+          onAttach(focusedLine.row);
+          exit();
         } else if (focusedLine.kind === 'newsession') {
           setComposerDraft('');
         }

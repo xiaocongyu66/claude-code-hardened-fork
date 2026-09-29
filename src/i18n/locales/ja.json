@@ -3065,5 +3065,7 @@
   "describe a task for a new session": "新しいセッションに任せるタスクを入力",
   "Done": "完了",
   "blocked": "入力待ち",
-  "Idle": "アイドル"
+  "Idle": "アイドル",
+  "open session": "セッションを開く",
+  "jump / page": "ジャンプ / ページ"
 }

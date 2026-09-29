@@ -3065,5 +3065,7 @@
   "describe a task for a new session": "描述一个要交给新会话的任务",
   "Done": "完成",
   "blocked": "等待输入",
-  "Idle": "空闲"
+  "Idle": "空闲",
+  "open session": "打开会话",
+  "jump / page": "跳转 / 翻页"
 }

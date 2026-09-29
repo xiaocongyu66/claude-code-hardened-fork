@@ -3065,5 +3065,7 @@
   "describe a task for a new session": "새 세션에 맡길 작업 입력",
   "Done": "완료",
   "blocked": "입력 대기",
-  "Idle": "유휴"
+  "Idle": "유휴",
+  "open session": "세션 열기",
+  "jump / page": "이동 / 페이지"
 }
