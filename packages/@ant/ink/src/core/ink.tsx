@@ -44,6 +44,7 @@ import {
   migrateScreenPools,
   StylePool,
 } from './screen.js';
+import { ScreenReaderDiff } from './screen-reader-diff.js';
 import { applySearchHighlight } from './searchHighlight.js';
 import {
   applySelectionOverlay,
@@ -134,6 +135,13 @@ export type Options = {
   onBeforeRender?: () => void;
   /** Injected logger. Replaces logForDebugging / logError imports. */
   logger?: Logger;
+  /**
+   * Screen reader diff layer (accessibility mode only): each frame, the
+   * newline-joined summary of new/changed text lines is delivered here
+   * instead of being written to stdout. No-op unless
+   * CLAUDE_CODE_ACCESSIBILITY is set.
+   */
+  onScreenReaderDiff?: (summary: string) => void;
 };
 
 /** No-op logger used when no logger is injected. */
@@ -232,6 +240,17 @@ export default class Ink {
   // for log-update's relative-move invariants). Alt-screen doesn't need
   // this — every frame begins with CSI H. null = no move emitted last frame.
   private displayCursor: { x: number; y: number } | null = null;
+  // Screen reader mode (mirrors App.tsx's CLAUDE_CODE_ACCESSIBILITY check):
+  // gates the frame-to-frame text diff layer below — in this mode the native
+  // cursor stays visible and each frame's changed text lines are summarized
+  // for assistive output via options.onScreenReaderDiff.
+  private readonly accessibilityMode =
+    process.env.CLAUDE_CODE_ACCESSIBILITY === '1' || process.env.CLAUDE_CODE_ACCESSIBILITY === 'true';
+  // Frame-to-frame text diff for accessibility output. reset() runs wherever
+  // frame state resets (resetFramesForAltScreen, handleResume) so the next
+  // capture re-reports the full frame, matching the official fork's
+  // resetScreenReaderDiffState() lifecycle.
+  private readonly screenReaderDiff = new ScreenReaderDiff();
   private readonly logger: Logger;
 
   constructor(private readonly options: Options) {
@@ -388,6 +407,9 @@ export default class Ink {
     // suspend. Clear displayCursor so the next frame's cursor preamble
     // doesn't emit a relative move from a stale park position.
     this.displayCursor = null;
+    // Matches the official fork's handleResume: resetScreenReaderDiffState()
+    // runs alongside the frame reset so the next frame re-reports in full.
+    this.screenReaderDiff.reset();
   };
 
   // NOT debounced. A debounce opens a window where stdout.columns is NEW
@@ -836,6 +858,16 @@ export default class Ink {
     // are only ever true in alt-screen; in main-screen this is false→false.
     this.prevFrameContaminated = selActive || hlActive;
 
+    // Screen reader diff layer: in accessibility mode, capture this frame's
+    // visible text and hand new/changed lines to the a11y callback. Pure
+    // read over the screen buffer — stdout writes are untouched.
+    if (this.accessibilityMode) {
+      const summary = this.screenReaderDiff.capture(frame);
+      if (summary !== null) {
+        this.options.onScreenReaderDiff?.(summary);
+      }
+    }
+
     // A ScrollBox has pendingScrollDelta left to drain — schedule the next
     // frame. MUST NOT call this.scheduleRender() here: we're inside a
     // trailing-edge throttle invocation, timerId is undefined, and lodash's
@@ -1104,6 +1136,9 @@ export default class Ink {
     this.frontFrame = blank();
     this.backFrame = blank();
     this.log.reset();
+    // Frame state is gone — the screen reader diff cache must follow, or the
+    // next capture would diff against text that no longer exists.
+    this.screenReaderDiff.reset();
     // Defense-in-depth: alt-screen skips the cursor preamble anyway (CSI H
     // resets), but a stale displayCursor would be misleading if we later
     // exit to main-screen without an intervening render.
