@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { AnsiCode } from '../screen.js'
+import type { AnsiCode } from '@alcalzone/ansi-tokenize'
 import { StylePool } from '../screen.js'
 
 function sgr(code: string, endCode: string): AnsiCode {
