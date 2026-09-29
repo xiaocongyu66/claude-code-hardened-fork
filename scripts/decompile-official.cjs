@@ -39,21 +39,40 @@ function main() {
 
   const index = ['# 官方 binary 反编译索引（ruDevolution）', '', '| chunk | 大小 | 模块数 | 状态 |', '|---|---|---|---|']
   let done = 0
+  // 段头 4KB 的 chunk 引用会重名（几百个段引用同一 chunk）——序号前缀保证唯一，
+  // 否则同名段 rmSync+重写互相覆盖，大段产物被后跑的小段抹掉（fleet 185K→64K 的根因）
+  let seq = 0
   for (const seg of work) {
+    const uniq = `${String(seq++).padStart(4, '0')}-${seg.name}`
     const body = data.slice(data.indexOf('\n', seg.start) + 1, seg.end)
-    const tmpFile = path.join('/tmp', `decomp-${seg.name}.js`)
-    const outDir = path.join(OUT, seg.name)
+    const tmpFile = path.join('/tmp', `decomp-${uniq}.js`)
+    const outDir = path.join(OUT, uniq)
     try {
+      // 守恒兜底：切段与声明大小差 >20%（_ALL.js 段边界解析歧义）时，
+      // 不反编译——原样落盘原始段文本，保证零丢失
+      if (Math.abs(body.length - seg.size) > seg.size * 0.2) {
+        fs.mkdirSync(outDir, { recursive: true })
+        fs.writeFileSync(path.join(outDir, 'raw-passthrough.js'), body)
+        index.push(`| ${uniq} | ${seg.size} | - | passthrough (${body.length}B) |`)
+        done++
+        continue
+      }
       fs.writeFileSync(tmpFile, body)
-      const r = decompileFile(tmpFile, {})
+      const r = decompileFile(tmpFile, { useRust: false })
       const mods = (r.modules || []).length
+      let outSum = 0
+      for (const mod of r.modules) outSum += mod.content.length
       if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true })
       writeOutput(r, outDir, 'modules')
-      index.push(`| ${seg.name} | ${seg.size} | ${mods} | ok |`)
+      // 切分输出 <80% 源时附加原始段（ruDevolution 对超大语句丢内容）
+      if (outSum < body.length * 0.8) {
+        fs.writeFileSync(path.join(outDir, 'raw-passthrough.js'), body)
+      }
+      index.push(`| ${uniq} | ${seg.size} | ${mods} | ok |`)
       done++
       if (done % 50 === 0) console.log(`progress: ${done}/${work.length}`)
     } catch (e) {
-      index.push(`| ${seg.name} | ${seg.size} | - | FAIL: ${String(e.message).slice(0, 80)} |`)
+      index.push(`| ${uniq} | ${seg.size} | - | FAIL: ${String(e.message).slice(0, 80)} |`)
     } finally {
       try { fs.unlinkSync(tmpFile) } catch {}
     }
