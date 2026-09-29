@@ -11,21 +11,34 @@
 'use strict'
 const fs = require('fs')
 const path = require('path')
-const { decompileFile, writeOutput } = require('/tmp/rudevolution/npm/src/decompiler')
+const {
+  decompileFile,
+  writeOutput,
+} = require('/tmp/rudevolution/npm/src/decompiler')
 
-const ALL = process.env.CC_ALL || '/root/xiaocongyu66-claude-code/docs/reverse/full-source/_ALL.js'
-const OUT = process.env.CC_DECOMP || '/root/xiaocongyu66-claude-code/docs/reverse/decompiled'
+const ALL =
+  process.env.CC_ALL ||
+  '/root/xiaocongyu66-claude-code/docs/reverse/full-source/_ALL.js'
+const OUT =
+  process.env.CC_DECOMP ||
+  '/root/xiaocongyu66-claude-code/docs/reverse/decompiled'
 const MIN_BYTES = Number(process.env.MIN_CHUNK_BYTES || 8_000)
 
 function main() {
   fs.mkdirSync(OUT, { recursive: true })
   const data = fs.readFileSync(ALL, 'utf-8')
   // 段边界：// ── <name> @ <offset> (N bytes) ──
-  const headRe = /^\/\/ ── (chunk-[0-9a-z]{8}|seg\d+) @ ([\d,]+) \(([\d,]+) bytes\) ──$/gm
+  const headRe =
+    /^\/\/ ── (chunk-[0-9a-z]{8}|seg\d+) @ ([\d,]+) \(([\d,]+) bytes\) ──$/gm
   const segs = []
   let m
   while ((m = headRe.exec(data)) !== null) {
-    segs.push({ name: m[1], offset: Number(m[2].replace(/,/g, '')), size: Number(m[3].replace(/,/g, '')), start: m.index })
+    segs.push({
+      name: m[1],
+      offset: Number(m[2].replace(/,/g, '')),
+      size: Number(m[3].replace(/,/g, '')),
+      start: m.index,
+    })
   }
   for (let i = 0; i < segs.length; i++) {
     segs[i].end = i + 1 < segs.length ? segs[i + 1].start : data.length
@@ -34,10 +47,20 @@ function main() {
   const work = segs
     .filter(s => s.name !== 'seg000' && s.size >= MIN_BYTES)
     .sort((a, b) => b.size - a.size)
-  console.log(`segments: ${segs.length} total, ${work.length} to decompile (>=${MIN_BYTES}B)`)
-  fs.writeFileSync(path.join(OUT, '_worklist.json'), JSON.stringify(work.map(s => s.name)))
+  console.log(
+    `segments: ${segs.length} total, ${work.length} to decompile (>=${MIN_BYTES}B)`,
+  )
+  fs.writeFileSync(
+    path.join(OUT, '_worklist.json'),
+    JSON.stringify(work.map(s => s.name)),
+  )
 
-  const index = ['# 官方 binary 反编译索引（ruDevolution）', '', '| chunk | 大小 | 模块数 | 状态 |', '|---|---|---|---|']
+  const index = [
+    '# 官方 binary 反编译索引（ruDevolution）',
+    '',
+    '| chunk | 大小 | 模块数 | 状态 |',
+    '|---|---|---|---|',
+  ]
   let done = 0
   // 段头 4KB 的 chunk 引用会重名（几百个段引用同一 chunk）——序号前缀保证唯一，
   // 否则同名段 rmSync+重写互相覆盖，大段产物被后跑的小段抹掉（fleet 185K→64K 的根因）
@@ -53,7 +76,9 @@ function main() {
       if (Math.abs(body.length - seg.size) > seg.size * 0.2) {
         fs.mkdirSync(outDir, { recursive: true })
         fs.writeFileSync(path.join(outDir, 'raw-passthrough.js'), body)
-        index.push(`| ${uniq} | ${seg.size} | - | passthrough (${body.length}B) |`)
+        index.push(
+          `| ${uniq} | ${seg.size} | - | passthrough (${body.length}B) |`,
+        )
         done++
         continue
       }
@@ -72,9 +97,13 @@ function main() {
       done++
       if (done % 50 === 0) console.log(`progress: ${done}/${work.length}`)
     } catch (e) {
-      index.push(`| ${uniq} | ${seg.size} | - | FAIL: ${String(e.message).slice(0, 80)} |`)
+      index.push(
+        `| ${uniq} | ${seg.size} | - | FAIL: ${String(e.message).slice(0, 80)} |`,
+      )
     } finally {
-      try { fs.unlinkSync(tmpFile) } catch {}
+      try {
+        fs.unlinkSync(tmpFile)
+      } catch {}
     }
   }
   fs.writeFileSync(path.join(OUT, '_index.md'), index.join('\n') + '\n')
