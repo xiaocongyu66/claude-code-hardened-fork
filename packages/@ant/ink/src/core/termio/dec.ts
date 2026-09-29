@@ -97,4 +97,4 @@ export function mouseTrackingSeq(mode: 'full' | 'scroll' | 'off'): string {
 export const DISABLE_MOUSE_TRACKING_FULL = DISABLE_MOUSE_TRACKING
 /** 官方 iQr：pixel 模式关闭 = 1016l + 1006h（回到 cell SGR 报告）。 */
 export const EXIT_MOUSE_PIXELS =
-  decreset(MOUSE_SGR_PIXELS) + decset(DEC.MOUSE_SGR)
+  decreset(DEC.MOUSE_SGR_PIXELS) + decset(DEC.MOUSE_SGR)
