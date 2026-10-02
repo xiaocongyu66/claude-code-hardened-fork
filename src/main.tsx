@@ -5256,7 +5256,20 @@ async function run(): Promise<CommanderCommand> {
       }
       const sessions = await bg.listLiveSessions();
       const { toFleetRows } = await import('./components/FleetView.js');
-      const rows = toFleetRows(sessions);
+      // Keep identity on the row object, not its ambiguous eight-character label.
+      // The snapshot survives refreshes and also covers jobs without a live PID.
+      const identities = new WeakMap<ReturnType<typeof toFleetRows>[number], { sessionId: string; jobId?: string }>();
+      const mapRows = (entries: Parameters<typeof toFleetRows>[0], jobId?: string) => {
+        const mapped = toFleetRows(entries);
+        mapped.forEach((row, index) => identities.set(row, { sessionId: entries[index]!.sessionId, jobId }));
+        return mapped;
+      };
+      const identityOf = (row: ReturnType<typeof toFleetRows>[number]) => {
+        const identity = identities.get(row);
+        if (!identity) throw new Error('Fleet session identity is unavailable; refresh the session list.');
+        return identity;
+      };
+      const rows = mapRows(sessions);
       if (process.stdout.isTTY) {
         const { wrappedRender: render, ThemeProvider } = await import('@anthropic/ink');
         const { FleetView } = await import('./components/FleetView.js');
@@ -5265,36 +5278,36 @@ async function run(): Promise<CommanderCommand> {
         const withLogTail = async (fresh: Awaited<ReturnType<typeof bg.listLiveSessions>>) => {
           const { readFile } = await import('fs/promises');
           const { listJobs } = await import('./cli/fleet/jobState.js');
-          const [rowsOut, fleetJobs] = await Promise.all([
-            Promise.resolve(toFleetRows(fresh)),
-            listJobs().catch(() => []),
-          ]);
-          const liveShorts = new Set(rowsOut.map(r => r.shortId));
+          const [rowsOut, fleetJobs] = await Promise.all([Promise.resolve(mapRows(fresh)), listJobs().catch(() => [])]);
+          const liveIds = new Set(fresh.map(s => s.sessionId));
           // 终态/孤儿 job → FleetRow 追加（live 已有的不重复）
           for (const job of fleetJobs) {
-            if (liveShorts.has(job.id)) continue;
+            if (liveIds.has(job.state.sessionId)) continue;
             rowsOut.push(
-              ...toFleetRows([
-                {
-                  sessionId: job.state.sessionId,
-                  kind: job.state.kind,
-                  name: job.state.name,
-                  cwd: job.state.cwd,
-                  status: job.state.status,
-                  waitingFor: job.state.needs,
-                  startedAt: job.state.startedAt,
-                  updatedAt: job.state.updatedAt,
-                  pid: job.state.pid,
-                  terminalOutcome: job.state.terminalOutcome,
-                  terminalAt: job.state.terminalAt,
-                },
-              ]),
+              ...mapRows(
+                [
+                  {
+                    sessionId: job.state.sessionId,
+                    kind: job.state.kind,
+                    name: job.state.name,
+                    cwd: job.state.cwd,
+                    status: job.state.status,
+                    waitingFor: job.state.needs,
+                    startedAt: job.state.startedAt,
+                    updatedAt: job.state.updatedAt,
+                    pid: job.state.pid,
+                    terminalOutcome: job.state.terminalOutcome,
+                    terminalAt: job.state.terminalAt,
+                  },
+                ],
+                job.id,
+              ),
             );
           }
           await Promise.all(
             rowsOut.map(async r => {
               if (r.tempo !== 'running') return;
-              const entry = fresh.find(s => s.sessionId.slice(0, 8) === r.shortId);
+              const entry = fresh.find(s => s.sessionId === identityOf(r).sessionId);
               if (!entry?.logPath) return;
               try {
                 const raw = await readFile(entry.logPath, 'utf-8');
@@ -5309,8 +5322,18 @@ async function run(): Promise<CommanderCommand> {
         };
         // B2：onAttach 只记录目标——组件内 exit 后统一执行（避免
         // process.exit 掐死进行中的 attachHandler）
-        type PendingAttach = { type: 'attach'; shortId: string };
+        type PendingAttach = { type: 'attach'; sessionId: string };
         const pendingBox: { action: PendingAttach | null } = { action: null };
+        const reportFleetError = (error: unknown) => {
+          console.error(error instanceof Error ? error.message : String(error));
+          process.exitCode = 1;
+        };
+        const pendingActions = new Set<Promise<void>>();
+        const runFleetAction = (action: () => Promise<void>) => {
+          const pending = action().catch(reportFleetError);
+          pendingActions.add(pending);
+          void pending.finally(() => pendingActions.delete(pending));
+        };
         const instance = await render(
           // wrappedRender 不注入 theme——独立渲染必须显式包 ThemeProvider
           <ThemeProvider>
@@ -5318,43 +5341,58 @@ async function run(): Promise<CommanderCommand> {
               rows={rows}
               loadRows={async () => withLogTail(await bg.listLiveSessions())}
               onAttach={row => {
-                pendingBox.action = { type: 'attach', shortId: row.shortId };
+                try {
+                  pendingBox.action = { type: 'attach', sessionId: identityOf(row).sessionId };
+                } catch (error) {
+                  reportFleetError(error);
+                }
               }}
               onKill={row => {
-                void (async () => {
+                runFleetAction(async () => {
+                  const identity = identityOf(row);
                   if (row.tempo === 'done' || row.tempo === 'failed' || row.tempo === 'stopped') {
-                    // 终态行：ctrl+x = 彻底删除（官方 rm 第二段）
-                    const { removeJobDir } = await import('./cli/fleet/jobState.js');
-                    await removeJobDir(row.shortId);
+                    // 终态行：ctrl+x = 彻底删除（官方 rm 第二段）；不要将旧 PID 用作身份。
+                    const { readJobState, removeJobDir, isTerminal } = await import('./cli/fleet/jobState.js');
+                    if (!identity.jobId) throw new Error('Fleet job identity is unavailable.');
+                    const state = await readJobState(identity.jobId);
+                    if (!state || state.sessionId !== identity.sessionId || !isTerminal(state)) {
+                      throw new Error('Fleet job changed; refresh the session list before deleting.');
+                    }
+                    await removeJobDir(identity.jobId);
                     return;
                   }
-                  const handlers = await import('./cli/bg.js');
-                  await handlers.killHandler(row.shortId);
-                })();
+                  await bg.killHandler(identity.sessionId, { sessionIdOnly: true });
+                });
               }}
               onRename={(row, name) => {
-                void (async () => {
-                  if (!row.pid) return;
-                  const handlers = await import('./cli/bg.js');
-                  await handlers.renameSession(row.pid, name);
-                })();
+                runFleetAction(async () => {
+                  const identity = identityOf(row);
+                  const live = bg.findSession(await bg.listLiveSessions(), identity.sessionId, { sessionIdOnly: true });
+                  if (!live || !(await bg.renameSession(live.pid, name))) {
+                    throw new Error('Fleet session could not be renamed; refresh the session list.');
+                  }
+                });
               }}
               onDispatch={task => {
-                void (async () => {
-                  const bg2 = await import('./cli/bg.js');
-                  await bg2.handleBgStart([task]);
-                })();
+                runFleetAction(async () => {
+                  await bg.handleBgStart([task]);
+                });
               }}
             />
           </ThemeProvider>,
+          { exitOnCtrlC: false },
         );
         await instance.waitUntilExit();
+        await Promise.all(pendingActions);
         const act = pendingBox.action;
         if (act?.type === 'attach') {
-          const handlers = await import('./cli/bg.js');
-          await handlers.attachHandler(act.shortId);
+          try {
+            await bg.attachHandler(act.sessionId, { sessionIdOnly: true });
+          } catch (error) {
+            reportFleetError(error);
+          }
         }
-        process.exit(0);
+        process.exit(process.exitCode ?? 0);
       }
       if (rows.length > 0) {
         console.log(`Background sessions (${rows.length}):`);

@@ -113,9 +113,13 @@ export async function registerSession(): Promise<boolean> {
         })
         await registerJob(st)
         onSessionSwitch(id => {
-          void import('../cli/fleet/jobState.js').then(m =>
-            m.syncJobResumeSessionId(st.shortId, id),
-          )
+          void import('../cli/fleet/jobState.js')
+            .then(m => m.syncJobResumeSessionId(st.shortId, id))
+            .catch(error => {
+              logForDebugging(
+                `[concurrentSessions] fleet resume sync failed: ${errorMessage(error)}`,
+              )
+            })
         })
       } catch (fleetErr) {
         logForDebugging(

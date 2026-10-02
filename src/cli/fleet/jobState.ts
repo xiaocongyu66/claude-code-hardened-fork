@@ -215,6 +215,16 @@ export async function writeStateAtomic(
   shortId: string,
   state: JobState,
 ): Promise<void> {
+  return withJobDirLock(shortId, 'state', () =>
+    writeStateAtomicUnlocked(shortId, state),
+  )
+}
+
+/** Caller must hold the state lock across ownership checks and replacement. */
+async function writeStateAtomicUnlocked(
+  shortId: string,
+  state: JobState,
+): Promise<void> {
   return withOwnJobStateWrite(shortId, async () => {
     const dir = getJobDir(shortId)
     await mkdir(dir, { recursive: true })
@@ -238,12 +248,21 @@ export async function writeStateAtomic(
 export async function updateJobState(
   shortId: string,
   patch: Partial<JobState>,
+  expectedSessionId?: string,
 ): Promise<JobState | null> {
-  const cur = await readJobState(shortId)
-  if (!cur) return null
-  const next: JobState = { ...cur, ...patch, updatedAt: Date.now() }
-  await writeStateAtomic(shortId, next)
-  return next
+  return withJobDirLock(shortId, 'state', async () => {
+    const cur = await readJobState(shortId)
+    if (!cur) return null
+    if (
+      expectedSessionId !== undefined &&
+      cur.sessionId !== expectedSessionId
+    ) {
+      throw new Error(`Fleet job ${shortId} belongs to a different session`)
+    }
+    const next: JobState = { ...cur, ...patch, updatedAt: Date.now() }
+    await writeStateAtomicUnlocked(shortId, next)
+    return next
+  })
 }
 
 // ── 终态收割（官方 BDe writeReapedTerminalState / CKe markCrashed） ──
@@ -254,11 +273,16 @@ export async function updateJobState(
 export async function writeReapedTerminalState(
   shortId: string,
   outcome: Exclude<JobState['terminalOutcome'], undefined>,
+  expectedSessionId?: string,
 ): Promise<JobState | null> {
-  return updateJobState(shortId, {
-    terminalAt: Date.now(),
-    terminalOutcome: outcome,
-  })
+  return updateJobState(
+    shortId,
+    {
+      terminalAt: Date.now(),
+      terminalOutcome: outcome,
+    },
+    expectedSessionId,
+  )
 }
 
 /** markCrashed：进程消失但未走正常停止路径（官方 CKe）。 */
@@ -277,8 +301,13 @@ export async function syncJobName(
   shortId: string,
   name: string,
   source: JobState['nameSource'] = 'user',
+  expectedSessionId?: string,
 ): Promise<JobState | null> {
-  return updateJobState(shortId, { name, nameSource: source })
+  return updateJobState(
+    shortId,
+    { name, nameSource: source },
+    expectedSessionId,
+  )
 }
 
 export async function writeJobPinned(
@@ -546,9 +575,12 @@ export async function withJobDirLock<T>(
   try {
     await mkdir(getJobDir(shortId), { recursive: true })
     fh = await open(lockPath, 'wx')
-  } catch {
-    // 锁被占——直接跑（cch 单机低并发场景可接受）
-    return fn()
+  } catch (error) {
+    // Never run unlocked: a contending writer may be replacing session identity.
+    // Fail closed rather than silently corrupting another session's state.
+    throw new Error(`Unable to lock Fleet job ${shortId} (${key})`, {
+      cause: error,
+    })
   }
   try {
     return await fn()

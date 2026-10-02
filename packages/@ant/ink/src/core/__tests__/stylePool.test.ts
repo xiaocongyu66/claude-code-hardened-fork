@@ -48,8 +48,8 @@ describe('StylePool.needsCompaction', () => {
   test('threshold boundary: max(4096, 2n) — floor dominates for small frames', () => {
     const pool = new StylePool()
     // Fill up to exactly 4096 entries (incl. `none`) — at the floor, not above.
-    for (let i = 1; pool.size < 4096; i++) {
-      pool.intern([sgr(`\x1b[${30 + (i % 8)}m`, '\x1b[39m')])
+    for (let i = 1; i < 4096; i++) {
+      pool.intern([sgr(`\x1b[38;2;${i >> 8};${i & 255};0m`, '\x1b[39m')])
     }
     expect(pool.size).toBe(4096)
     expect(pool.needsCompaction(0)).toBe(false)
@@ -85,8 +85,8 @@ describe('StylePool.needsCompaction', () => {
   test('isNearCapacity tracks 75% of the inferred 4096 floor', () => {
     const pool = new StylePool()
     expect(pool.isNearCapacity).toBe(false)
-    for (let i = 0; pool.size < 3072; i++) {
-      pool.intern([sgr(`\x1b[${90 + (i % 8)}m`, '\x1b[39m')])
+    for (let i = 1; i < 3072; i++) {
+      pool.intern([sgr(`\x1b[38;2;${i >> 8};${i & 255};0m`, '\x1b[39m')])
     }
     expect(pool.size).toBe(3072)
     expect(pool.isNearCapacity).toBe(true)

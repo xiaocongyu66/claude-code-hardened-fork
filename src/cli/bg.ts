@@ -48,14 +48,22 @@ export async function listLiveSessions(): Promise<SessionEntry[]> {
 export function findSession(
   sessions: SessionEntry[],
   target: string,
+  options: { sessionIdOnly?: boolean } = {},
 ): SessionEntry | undefined {
-  const asNum = parseInt(target, 10)
-  return sessions.find(
+  // A full session ID is authoritative; never reinterpret its numeric prefix
+  // as a PID. Do not add prefix matching to this shared CLI resolver.
+  const byId = sessions.filter(s => s.sessionId === target)
+  if (byId.length > 0) return byId.length === 1 ? byId[0] : undefined
+  if (options.sessionIdOnly) return undefined
+
+  const asNum = /^[1-9]\d*$/.test(target) ? Number(target) : NaN
+  const matches = sessions.filter(
     s =>
-      s.sessionId === target ||
-      s.pid === asNum ||
-      (s.name && s.name === target),
+      (Number.isSafeInteger(asNum) && s.pid === asNum) ||
+      (s.name !== undefined && s.name === target),
   )
+  // Duplicate names and PID/name collisions must not depend on roster order.
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 /**
@@ -71,7 +79,12 @@ export async function renameSession(
   const entry = sessions.find(s => s.pid === pid)
   if (!entry) return false
   const { syncJobName } = await import('./fleet/jobState.js')
-  const st = await syncJobName(entry.sessionId.slice(0, 8), name, 'user')
+  const st = await syncJobName(
+    entry.sessionId.slice(0, 8),
+    name,
+    'user',
+    entry.sessionId,
+  )
   if (!st) return false
   const file = join(getSessionsDir(), `${pid}.json`)
   try {
@@ -343,7 +356,10 @@ export async function logsHandler(target: string | undefined): Promise<void> {
  *
  * Engine-aware: tmux sessions use tmux attach, detached sessions use log tail.
  */
-export async function attachHandler(target: string | undefined): Promise<void> {
+export async function attachHandler(
+  target: string | undefined,
+  options: { sessionIdOnly?: boolean } = {},
+): Promise<void> {
   const sessions = await listLiveSessions()
 
   if (!target) {
@@ -370,9 +386,9 @@ export async function attachHandler(target: string | undefined): Promise<void> {
     }
   }
 
-  const session = findSession(sessions, target)
+  const session = findSession(sessions, target, options)
   if (!session) {
-    console.error(`Session not found: ${target}`)
+    console.error(`Session not found or ambiguous: ${target}`)
     process.exitCode = 1
     return
   }
@@ -405,7 +421,10 @@ export async function attachHandler(target: string | undefined): Promise<void> {
 /**
  * `cch bg kill <target>` — kill a session.
  */
-export async function killHandler(target: string | undefined): Promise<void> {
+export async function killHandler(
+  target: string | undefined,
+  options: { sessionIdOnly?: boolean } = {},
+): Promise<void> {
   const sessions = await listLiveSessions()
 
   if (!target) {
@@ -421,9 +440,9 @@ export async function killHandler(target: string | undefined): Promise<void> {
     return
   }
 
-  const session = findSession(sessions, target)
+  const session = findSession(sessions, target, options)
   if (!session) {
-    console.error(`Session not found: ${target}`)
+    console.error(`Session not found or ambiguous: ${target}`)
     process.exitCode = 1
     return
   }
@@ -454,8 +473,15 @@ export async function killHandler(target: string | undefined): Promise<void> {
   const { writeReapedTerminalState, reapLegacySession } = await import(
     './fleet/jobState.js'
   )
-  await writeReapedTerminalState(session.sessionId.slice(0, 8), 'stopped')
-  await reapLegacySession(session.pid)
+  try {
+    await writeReapedTerminalState(
+      session.sessionId.slice(0, 8),
+      'stopped',
+      session.sessionId,
+    )
+  } finally {
+    await reapLegacySession(session.pid)
+  }
 }
 
 /**

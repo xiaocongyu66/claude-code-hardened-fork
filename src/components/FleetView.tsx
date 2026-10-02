@@ -15,6 +15,7 @@ import type { Theme, DOMElement } from '@anthropic/ink';
 import { FleetRoster } from '../cli/fleet/stores.js';
 import { t } from '../i18n/index.js';
 import { logEvent } from '../services/analytics/index.js';
+import { getGraphemeSegmenter, lastGrapheme } from '../utils/intl.js';
 
 /**
  * FleetView —— `cch agents` 的会话列表视图。
@@ -40,6 +41,8 @@ import { logEvent } from '../services/analytics/index.js';
  */
 
 export interface FleetRow {
+  /** Full identity for callbacks and row keys; legacy callers may omit it. */
+  sessionId?: string;
   shortId: string;
   name: string;
   kind: string;
@@ -52,6 +55,20 @@ export interface FleetRow {
   /** 日志尾行（active 会话，对齐 Hi 的 logTail） */
   logTail?: string;
   pid?: number;
+}
+
+function isTextInput(input: string): boolean {
+  return (
+    input.length > 0 &&
+    [...input].every(ch => {
+      const code = ch.codePointAt(0)!;
+      return (code >= 32 && code !== 127) || ch === '\n' || ch === '\r' || ch === '\t';
+    })
+  );
+}
+
+function rowIdentity(row: FleetRow): string {
+  return row.sessionId ?? row.shortId;
 }
 
 // ── 官方图标与 spinner 体系（Tn/an @153067933 权威） ──
@@ -164,7 +181,7 @@ function truncateWidth(s: string, maxCols: number): string {
   if (maxCols <= 0) return '';
   let cols = 0;
   let out = '';
-  for (const ch of s) {
+  for (const { segment: ch } of getGraphemeSegmenter().segment(s)) {
     const cw = stringWidth(ch);
     if (cols + cw > maxCols) break;
     out += ch;
@@ -301,7 +318,11 @@ function JobLine({
           ? `$ ${row.logTail}`
           : row.detail;
   return (
-    <Box ref={el => registerRef(row.shortId, el)} paddingLeft={1}>
+    <Box
+      ref={el => registerRef(rowIdentity(row), el)}
+      paddingLeft={1}
+      backgroundColor={selected ? 'userMessageBackground' : undefined}
+    >
       {/* icon+label 列（官方 [指针, 图标, 2空格, 名字]，width=cols.label+2） */}
       <Box width={labelCol + 2} flexShrink={0}>
         <Text color={selected ? 'suggestion' : undefined}>{selected ? '❯' : ' '}</Text>
@@ -319,7 +340,7 @@ function JobLine({
             <Text color="suggestion">|</Text>
           </Text>
         ) : (
-          <Text bold={selected} wrap="truncate">
+          <Text color={selected ? 'text' : undefined} dimColor={!selected} wrap="truncate">
             {truncateWidth(row.name, labelCol - 4)}
           </Text>
         )}
@@ -352,15 +373,15 @@ function JobLine({
 /** 官方 helpOpen：两列键位覆盖层（absolute 覆盖，消文档流闪烁）。 */
 function FleetHelp(): React.ReactNode {
   const rows: Array<[string, string]> = [
-    ['↑↓ / j k', t('move selection')],
-    ['g / G', t('jump to top / bottom')],
+    ['↑↓ / ctrl+n / ctrl+p', t('move selection')],
+    ['home / end', t('jump to top / bottom')],
     ['alt+1-9', t('open Nth session')],
-    ['↵', t('open session / expand fold')],
-    ['n', t('focus dispatch input')],
+    ['↵', t('dispatch task / open session / expand fold')],
+    ['pageup / pagedown', t('scroll list')],
     ['ctrl+r', t('rename session')],
     ['ctrl+x', t('stop session (press twice)')],
     ['wheel', t('scroll list')],
-    ['esc / q', t('quit')],
+    ['esc / ctrl+c', t('cancel / confirm exit')],
   ];
   // 两列布局（官方 paddingX:2 两两一行）
   const pairs: Array<Array<[string, string]>> = [];
@@ -420,13 +441,13 @@ export function FleetView({
   hint?: string;
 }): React.ReactNode {
   const { exit } = useApp();
-  const { columns } = useTerminalSize();
+  const { columns, rows: terminalRows } = useTerminalSize();
   const [selected, setSelected] = useState(0);
   const [killArmed, setKillArmed] = useState<string | null>(null);
   const [live, setLive] = useState<FleetRow[] | null>(null);
   const [renaming, setRenaming] = useState<{ shortId: string; draft: string } | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [composerDraft, setComposerDraft] = useState<string | null>(null);
+  const [composerDraft, setComposerDraft] = useState('');
   const [dispatching, setDispatching] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -474,12 +495,10 @@ export function FleetView({
     return () => clearTimeout(timer);
   }, [dispatching]);
 
-  // 可聚焦序列（header 不可聚焦；终态合并 PAST 组）
+  // 2.1.284 module-006:541: state groups use the same keys throughout.
   const lines: FleetLine[] = [];
-  const PAST_TEMPOS = ['done', 'failed', 'stopped'] as const;
   for (const g of GROUP_ORDER) {
-    if ((PAST_TEMPOS as readonly string[]).includes(g)) continue;
-    const items = data.filter(r => r.tempo === g);
+    const items = data.filter(r => groupOf(r) === g);
     if (items.length === 0) continue;
     lines.push({ kind: 'header', group: g });
     if (items.length > FOLD_CAP && !expanded.has(g)) {
@@ -487,16 +506,6 @@ export function FleetView({
       lines.push({ kind: 'fold', group: g, hidden: items.length - FOLD_CAP });
     } else {
       for (const row of items) lines.push({ kind: 'job', row });
-    }
-  }
-  const pastItems = data.filter(r => (PAST_TEMPOS as readonly string[]).includes(r.tempo));
-  if (pastItems.length > 0) {
-    lines.push({ kind: 'header', group: 'past' });
-    if (pastItems.length > FOLD_CAP && !expanded.has('past')) {
-      for (const row of pastItems.slice(0, FOLD_CAP)) lines.push({ kind: 'job', row });
-      lines.push({ kind: 'fold', group: 'past', hidden: pastItems.length - FOLD_CAP });
-    } else {
-      for (const row of pastItems) lines.push({ kind: 'job', row });
     }
   }
   lines.push({ kind: 'newsession' });
@@ -511,12 +520,24 @@ export function FleetView({
   const focusedLine = focusable[selected];
   const focusedRow = focusedLine?.kind === 'job' ? focusedLine.row : undefined;
 
-  // 选中跟随（官方 el 的 scrollToElement block:nearest 语义）
+  const focusId = focusedRow
+    ? rowIdentity(focusedRow)
+    : focusedLine?.kind === 'fold'
+      ? `fold:${focusedLine.group}`
+      : 'newsession';
+  // ScrollBox.scrollToElement aligns to top, not nearest. Only move when the
+  // focused row leaves the viewport, including folds and the new-session row.
   useEffect(() => {
-    if (!focusedRow) return;
-    const el = rowRefs.current.get(focusedRow.shortId);
-    if (el) scrollRef.current?.scrollToElement(el, 0);
-  }, [selected, focusedRow?.shortId]);
+    const el = rowRefs.current.get(focusId);
+    const scroll = scrollRef.current;
+    if (!el?.yogaNode || !scroll) return;
+    const top = el.yogaNode.getComputedTop();
+    const height = el.yogaNode.getComputedHeight();
+    const viewport = scroll.getViewportHeight();
+    const current = scroll.getScrollTop();
+    if (top < current) scroll.scrollTo(top);
+    else if (top + height > current + viewport) scroll.scrollTo(top + height - viewport);
+  }, [focusId, terminalRows, columns, expanded]);
 
   const registerRef = (id: string, el: DOMElement | null) => {
     if (el) rowRefs.current.set(id, el);
@@ -525,10 +546,10 @@ export function FleetView({
 
   const submitRename = () => {
     if (!renaming) return;
-    const target = data.find(r => r.shortId === renaming.shortId);
+    const target = data.find(r => rowIdentity(r) === renaming.shortId);
     const draft = renaming.draft.trim();
     if (target && draft) {
-      const clash = data.some(r => r.shortId !== renaming.shortId && r.name === draft);
+      const clash = data.some(r => rowIdentity(r) !== renaming.shortId && r.name === draft);
       if (clash) {
         setRenameError(`(name taken) ${draft}`);
         return;
@@ -541,14 +562,10 @@ export function FleetView({
   };
 
   const submitDispatch = () => {
-    if (!composerDraft) return;
     const task = composerDraft.trim();
-    if (!task) {
-      setComposerDraft(null);
-      return;
-    }
+    if (!task) return;
     setDispatching(true);
-    setComposerDraft(null);
+    setComposerDraft('');
     onDispatch?.(task);
     logEvent('fleet_view_dispatch', {});
   };
@@ -573,6 +590,24 @@ export function FleetView({
         pageDown?: boolean;
       },
     ) => {
+      // 2.1.284 Tp: overlays/query consume Ctrl+C before the exit handler.
+      if (key.ctrl && input === 'c') {
+        if (renaming) {
+          setRenaming(null);
+          setRenameError(null);
+        } else if (helpOpen) setHelpOpen(false);
+        else if (composerDraft) {
+          setComposerDraft('');
+          setExitPending(false);
+        } else if (exitPending) exit();
+        else setExitPending(true);
+        return;
+      }
+      if (key.escape && killArmed) {
+        setKillArmed(null);
+        setExitPending(false);
+        return;
+      }
       // ── 帮助面板 ──
       if (helpOpen) {
         if (key.escape || input === '?' || input === 'q') setHelpOpen(false);
@@ -586,22 +621,9 @@ export function FleetView({
         } else if (key.return) {
           submitRename();
         } else if (key.backspace || key.delete) {
-          setRenaming(r => (r ? { ...r, draft: r.draft.slice(0, -1) } : r));
-        } else if (input.length === 1 && !key.ctrl && input >= ' ') {
-          setRenaming(r => (r ? { ...r, draft: r.draft + input } : r));
-        }
-        return;
-      }
-      // ── composer 输入态 ──
-      if (composerDraft !== null) {
-        if (key.escape) {
-          setComposerDraft(null);
-        } else if (key.return) {
-          submitDispatch();
-        } else if (key.backspace || key.delete) {
-          setComposerDraft(d => (d ? d.slice(0, -1) : d));
-        } else if (input.length === 1 && !key.ctrl && input >= ' ') {
-          setComposerDraft(d => (d ?? '') + input);
+          setRenaming(r => (r ? { ...r, draft: r.draft.slice(0, r.draft.length - lastGrapheme(r.draft).length) } : r));
+        } else if (!key.ctrl && !key.alt && isTextInput(input)) {
+          setRenaming(r => (r ? { ...r, draft: r.draft + input.replace(/\r\n?|\n|\t/g, ' ') } : r));
         }
         return;
       }
@@ -614,16 +636,10 @@ export function FleetView({
         scrollRef.current?.scrollBy(3);
         return;
       }
-      // ── ctrl+c 两段退出（官方 exitPending）──
-      if (key.ctrl && input === 'c') {
-        if (exitPending) exit();
-        else setExitPending(true);
-        return;
-      }
       // ── 翻页/跳转（官方 home/end/pageup/pagedown：位移 max(1, termRows-6)）──
       if (key.home || key.end || key.pageUp || key.pageDown) {
         setKillArmed(null);
-        const jump = Math.max(1, 6);
+        const jump = Math.max(1, terminalRows - 6);
         if (key.home) setSelected(0);
         else if (key.end) setSelected(focusCount - 1);
         else if (key.pageUp) setSelected(s => Math.max(0, s - jump));
@@ -631,17 +647,13 @@ export function FleetView({
         return;
       }
       // ── 列表导航 ──
-      // j/k/g/G 为 cch 增强（官方 Tp 只有方向键与 ctrl+n/p）
-      if (input === 'j' || key.downArrow) {
+      // Printable j/k/g/G/n/q belong to the always-focused prompt, not shortcuts.
+      if (key.downArrow || (key.ctrl && input === 'n')) {
         setKillArmed(null);
         setSelected(s => Math.min(focusCount - 1, s + 1));
-      } else if (input === 'k' || key.upArrow) {
+      } else if (key.upArrow || (key.ctrl && input === 'p')) {
         setKillArmed(null);
         setSelected(s => Math.max(0, s - 1));
-      } else if (input === 'g') {
-        setSelected(0);
-      } else if (input === 'G') {
-        setSelected(focusCount - 1);
       } else if (key.alt && /^[1-9]$/.test(input)) {
         // 官方 meta+N：当前聚焦 origin 组内第 N 个 job → 打开
         // （cch 无 origin 体系——映射为聚焦行所在分组的第 N 个）
@@ -659,26 +671,26 @@ export function FleetView({
       } else if (key.ctrl && input === 'r' && focusedRow) {
         setKillArmed(null);
         setRenameError(null);
-        setRenaming({ shortId: focusedRow.shortId, draft: focusedRow.name });
+        setRenaming({ shortId: rowIdentity(focusedRow), draft: focusedRow.name });
       } else if (key.ctrl && input === 'x' && focusedRow) {
-        if (killArmed === focusedRow.shortId) {
+        if (killArmed === rowIdentity(focusedRow)) {
           setKillArmed(null);
           onKill?.(focusedRow);
           logEvent('fleet_view_kill', {});
         } else {
-          setKillArmed(focusedRow.shortId);
+          setKillArmed(rowIdentity(focusedRow));
         }
-      } else if (input === '?') {
+      } else if (input === '?' && !composerDraft && !key.ctrl && !key.alt) {
         setHelpOpen(true);
-      } else if (input === 'n') {
-        setComposerDraft('');
+      } else if (key.return && composerDraft.trim()) {
+        submitDispatch();
       } else if (key.return && focusedLine) {
-        // 官方 enter=submit 路径（pc）——job 行聚焦 composer 描述任务；
-        // 打开会话的主键是 right（openOrRespawn）与 space（preview toggle）
+        // 2.1.284 core/session.js:18: empty-query pc falls through to openOrRespawn.
         if (focusedLine.kind === 'newsession') {
           setComposerDraft('');
-        } else if (focusedLine.kind === 'job') {
-          setComposerDraft('');
+        } else if (focusedLine.kind === 'job' && focusedRow && onAttach) {
+          onAttach(focusedRow);
+          exit();
         } else if (focusedLine.kind === 'fold' && focusedLine.group) {
           setExpanded(prev => {
             const next = new Set(prev);
@@ -687,11 +699,7 @@ export function FleetView({
           });
           logEvent('fleet_view_fold_expand', { hidden: focusedLine.hidden ?? 0 });
         }
-      } else if (input === ' ' && focusedLine?.kind === 'job' && focusedLine.row && onAttach) {
-        // 官方 space（空 query）→ preview toggle；cch 无 preview 体系——映射为打开
-        onAttach(focusedLine.row);
-        exit();
-      } else if ((key as { rightArrow?: boolean }).rightArrow && focusedLine && onAttach) {
+      } else if ((key as { rightArrow?: boolean }).rightArrow && !composerDraft && focusedLine && onAttach) {
         // 官方 right（非 shift、query 空、prompt）：earlier→openEarlier、
         // newsession→openNewSessionRow、job→openOrRespawn——打开会话的主键
         if (focusedLine.kind === 'job' && focusedLine.row) {
@@ -700,50 +708,21 @@ export function FleetView({
         } else if (focusedLine.kind === 'newsession') {
           setComposerDraft('');
         }
-      } else if (key.escape || input === 'q') {
-        // 两段退出（footer 文案 press ... again to exit 的行为一致性）
-        if (exitPending) exit();
+      } else if (key.escape) {
+        if (composerDraft) {
+          setComposerDraft('');
+          setExitPending(false);
+        } else if (exitPending) exit();
         else setExitPending(true);
+      } else if (key.backspace || key.delete) {
+        setComposerDraft(d => d.slice(0, d.length - lastGrapheme(d).length));
+      } else if (!key.ctrl && !key.alt && isTextInput(input)) {
+        setExitPending(false);
+        setKillArmed(null);
+        setComposerDraft(d => d + input.replace(/\r\n?|\n|\t/g, ' '));
       }
     },
   );
-
-  // ── 空态 ──
-  if (rowCount === 0 && composerDraft === null && !dispatching) {
-    return (
-      <AlternateScreen mouseTracking="scroll">
-        <Box flexDirection="column" paddingX={1} paddingY={1}>
-          <Box>
-            <Text bold>Claude Code</Text>
-            <Text dimColor>{` v${MACRO.VERSION}`}</Text>
-          </Box>
-          <Box marginTop={1} paddingLeft={1} flexDirection="column">
-            <Text bold>{t('Nothing running in the background.')}</Text>
-            <Text dimColor>
-              {t('Hand off a task and it keeps working while you do something else — even if you close this terminal.')}
-            </Text>
-            <Box marginTop={1} flexDirection="column">
-              <Text dimColor>
-                {t('Start one with')} <Text color="suggestion">{t('+ new session')}</Text>
-                {t(' in the full view,')}
-              </Text>
-              <Text dimColor>
-                {t('or run')} <Text color="suggestion">claude --bg &quot;task&quot;</Text>
-                {t(' from any terminal,')}
-              </Text>
-              <Text dimColor>
-                {t('or')} <Text color="suggestion">/fork</Text>
-                {t(" a session you're already in.")}
-              </Text>
-            </Box>
-          </Box>
-          <Box marginTop={1}>
-            <Text dimColor>{t(' ↑↓ select · n dispatch · ? help · esc quit')}</Text>
-          </Box>
-        </Box>
-      </AlternateScreen>
-    );
-  }
 
   // 官方 Ic（§8.6）：label=min(max(40, columns/3), max(12, 内容宽))——40 列下限
   const labelCol = Math.min(
@@ -762,27 +741,47 @@ export function FleetView({
       ? t('ctrl+x again to delete · esc to keep')
       : renaming
         ? t('enter save · escape cancel')
-        : composerDraft !== null
+        : composerDraft.length > 0
           ? t('enter to dispatch · esc to cancel')
           : null;
 
   return (
-    <AlternateScreen>
+    <AlternateScreen mouseTracking="scroll">
       <Box flexDirection="column" paddingX={1} paddingY={1} flexGrow={1}>
         <FleetHeader data={data} columns={columns} />
 
         <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} flexShrink={1} marginTop={1}>
+          {/* 2.1.284 module-006:984: empty copy lives inside the list, not a separate screen. */}
+          {rowCount === 0 ? (
+            <Box marginTop={1} paddingLeft={1} flexDirection="column">
+              <Text bold>{t('Nothing running in the background.')}</Text>
+              <Text dimColor>
+                {t(
+                  'Hand off a task and it keeps working while you do something else — even if you close this terminal.',
+                )}
+              </Text>
+              <Box marginTop={1} flexDirection="column">
+                <Text dimColor>
+                  {t('Start one with')} <Text color="suggestion">{t('+ new session')}</Text>
+                </Text>
+                <Text dimColor>
+                  {t('or run')} <Text color="suggestion">claude --bg &quot;task&quot;</Text>
+                  {t(' from any terminal,')}
+                </Text>
+                <Text dimColor>
+                  {t('or')} <Text color="suggestion">/fork</Text>
+                  {t(" a session you're already in.")}
+                </Text>
+              </Box>
+            </Box>
+          ) : null}
           {lines.map((line, idx) => {
             if (line.kind === 'header') {
               return (
                 <Box key={`h:${line.group}`} marginTop={idx === 0 ? 0 : 1}>
                   <Text bold color="subtle">
                     {' '}
-                    {t(GROUP_TITLE[line.group!])} (
-                    {line.group === 'past'
-                      ? data.filter(r => (['done', 'failed', 'stopped'] as string[]).includes(r.tempo)).length
-                      : data.filter(r => r.tempo === line.group).length}
-                    )
+                    {t(GROUP_TITLE[line.group!])} ({data.filter(r => groupOf(r) === line.group).length})
                   </Text>
                 </Box>
               );
@@ -790,24 +789,42 @@ export function FleetView({
             if (line.kind === 'fold') {
               const sel = focusable.indexOf(line) === selected;
               const isDone = line.group === 'done';
-              const failedHidden = isDone ? data.filter(r => r.tempo === 'failed').length : 0;
+              const failedHidden = isDone
+                ? data
+                    .filter(r => groupOf(r) === 'done')
+                    .slice(FOLD_CAP)
+                    .filter(r => r.tempo === 'failed').length
+                : 0;
               const label = isDone
                 ? `… ${t('show all ({{count}} more{{failed}})', { count: line.hidden ?? 0, failed: failedHidden > 0 ? ` · ${failedHidden} ${t('failed')}` : '' })}`
                 : t('… {{count}} more', { count: line.hidden ?? 0 });
               return (
-                <Box key={`f:${line.group}`} paddingLeft={1}>
-                  <Text color={sel ? 'suggestion' : 'subtle'}>{sel ? '❯ ' : '  '}</Text>
-                  <Text dimColor>{label}</Text>
+                <Box
+                  key={`f:${line.group}`}
+                  ref={el => registerRef(`fold:${line.group}`, el)}
+                  paddingLeft={1}
+                  backgroundColor={sel ? 'userMessageBackground' : undefined}
+                >
+                  <Text color={sel ? 'text' : 'subtle'}>{sel ? '❯ ' : '  '}</Text>
+                  <Text color={sel ? 'text' : undefined} dimColor={!sel}>
+                    {label}
+                  </Text>
                 </Box>
               );
             }
             if (line.kind === 'newsession') {
               const sel = focusable.indexOf(line) === selected;
               return (
-                <Box key="newsession" marginTop={1} paddingLeft={1} backgroundColor={sel ? 'selectionBg' : undefined}>
-                  <Text color={sel ? 'suggestion' : 'subtle'}>{sel ? '❯ ' : '  '}</Text>
-                  <Text color="suggestion">{t('+ new session')}</Text>
-                  <Text dimColor>{` · ${t('enter to type a task')}`}</Text>
+                <Box
+                  key="newsession"
+                  ref={el => registerRef('newsession', el)}
+                  marginTop={1}
+                  paddingLeft={1}
+                  backgroundColor={sel ? 'userMessageBackground' : undefined}
+                >
+                  <Text color={sel ? 'text' : 'subtle'}>{sel ? '❯ ' : '  '}</Text>
+                  <Text color={sel ? 'text' : 'suggestion'}>{t('+ new session')}</Text>
+                  <Text color={sel ? 'text' : undefined} dimColor={!sel}>{` · ${t('enter to type a task')}`}</Text>
                 </Box>
               );
             }
@@ -815,11 +832,11 @@ export function FleetView({
             const sel = focusable.indexOf(line) === selected;
             return (
               <JobLine
-                key={row.shortId}
+                key={rowIdentity(row)}
                 row={row}
                 selected={sel}
-                armed={killArmed === row.shortId}
-                renaming={renaming?.shortId === row.shortId ? { draft: renaming.draft } : undefined}
+                armed={killArmed === rowIdentity(row)}
+                renaming={renaming?.shortId === rowIdentity(row) ? { draft: renaming.draft } : undefined}
                 labelCol={labelCol}
                 ageCol={ageCol}
                 detailCol={detailCol}
@@ -830,19 +847,21 @@ export function FleetView({
         </ScrollBox>
 
         {/* composer（官方 Cl：round 上下边框 + ❯ prefix + placeholder） */}
-        {composerDraft !== null ? (
-          <Box marginTop={1} borderStyle="round" borderLeft={false} borderRight={false} borderDimColor paddingX={1}>
-            <Text color="suggestion">❯ </Text>
-            {composerDraft ? (
-              <Text>
-                {composerDraft}
-                <Text color="suggestion">|</Text>
-              </Text>
-            ) : (
-              <Text dimColor>{t('describe a task for a new session')}|</Text>
-            )}
-          </Box>
-        ) : null}
+        {/* 2.1.284 module-006:992: normal prompt has dim horizontal borders, no border color. */}
+        <Box marginTop={1} borderStyle="round" borderLeft={false} borderRight={false} borderDimColor paddingX={1}>
+          <Text color="suggestion">❯ </Text>
+          {composerDraft ? (
+            <Text>
+              {composerDraft}
+              <Text color="suggestion">|</Text>
+            </Text>
+          ) : (
+            <Text dimColor>
+              {t('describe a task for a new session')}
+              {'|'}
+            </Text>
+          )}
+        </Box>
         {dispatching ? (
           <Box marginTop={1} paddingLeft={1}>
             <Text color="suggestion">{t('Dispatching…')}</Text>
@@ -862,8 +881,8 @@ export function FleetView({
           ) : (
             <Text dimColor>
               {columns >= 80
-                ? t(' ↑↓ select · ↵ open · n dispatch · ctrl+r rename · ctrl+x stop · ? help · esc quit')
-                : t(' ↑↓ select · ↵ open · n dispatch · esc quit')}
+                ? t(' ↑↓ select · ↵ open · type a task · ctrl+r rename · ctrl+x stop · ? help · esc quit')
+                : t(' ↑↓ select · ↵ open · type a task · esc quit')}
             </Text>
           )}
         </Box>
@@ -904,6 +923,7 @@ export function toFleetRows(
         ? (s.terminalAt ?? s.updatedAt)
         : (s.updatedAt ?? s.startedAt)) ?? now;
     return {
+      sessionId: s.sessionId,
       shortId: s.sessionId.slice(0, 8),
       name: s.name ?? s.sessionId,
       kind: s.kind,
