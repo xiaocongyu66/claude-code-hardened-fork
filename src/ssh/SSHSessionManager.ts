@@ -183,7 +183,13 @@ export class SSHSessionManagerImpl implements SSHSessionManager {
         BASE_RECONNECT_DELAY_MS * 2 ** (this.reconnectAttempt - 1),
         MAX_RECONNECT_DELAY_MS,
       )
-      await new Promise<void>(r => setTimeout(r, delay))
+      // unref the backoff timer: a pending timer must not keep the process
+      // alive waiting out the exponential ladder (2+4+8+15+15s) on exit —
+      // bun test harnesses otherwise hang past their per-file timeout.
+      await new Promise<void>(r => {
+        const timer = setTimeout(r, delay)
+        timer.unref?.()
+      })
 
       if (this.userInitiatedDisconnect) return
 

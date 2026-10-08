@@ -50,12 +50,13 @@ jobs:
           STATUS=0
           while IFS= read -r f; do
             rc=0
-            timeout 15 bun test --timeout 10000 "$f" >/dev/null 2>&1 || rc=$?
+            LOG=$(timeout 15 bun test --timeout 10000 "$f" 2>&1) || rc=$?
             if [ $rc -eq 124 ]; then
               echo "HANG: $f"
               STATUS=1
             elif [ $rc -ne 0 ]; then
               echo "FAIL($rc): $f"
+              echo "$LOG" | grep -E '\(fail\)|error:|✗|Expected|Received|Cannot find' | head -8
               STATUS=1
             fi
           done < <(find packages src tests -name '*.test.ts' -o -name '*.test.tsx' | sort)
