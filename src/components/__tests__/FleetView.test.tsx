@@ -9,8 +9,10 @@ import type { FleetRow } from '../FleetView.js';
 // input parsing and theme resolution execute for real. Missing deps fail.
 mock.module('../../services/analytics/index.js', () => ({ logEvent() {} }));
 mock.module('../../utils/settings/settings.js', () => ({ getInitialSettings: () => ({ uiLocale: 'en' }) }));
-const { FleetView, toFleetRows } = await import('../FleetView.js');
+// MACRO must exist BEFORE the module graph loads: transitive module-level
+// reads of MACRO.VERSION throw (empty render tree) if it's assigned later.
 Object.assign(globalThis, { MACRO: { VERSION: 'test' } });
+const { FleetView, toFleetRows } = await import('../FleetView.js');
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
