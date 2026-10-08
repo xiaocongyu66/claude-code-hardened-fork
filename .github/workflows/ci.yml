@@ -56,7 +56,8 @@ jobs:
               STATUS=1
             elif [ $rc -ne 0 ]; then
               echo "FAIL($rc): $f"
-              echo "$LOG" | grep -E '\(fail\)|error:|✗|Expected|Received|Cannot find' | head -8
+              # pipefail+`-e`: grep exits 1 on no match, which must not kill the loop
+              echo "$LOG" | { grep -E '\(fail\)|error:|✗|Expected|Received|Cannot find' | head -8 || true; }
               STATUS=1
             fi
           done < <(find packages src tests -name '*.test.ts' -o -name '*.test.tsx' | sort)
