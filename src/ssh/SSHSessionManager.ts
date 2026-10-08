@@ -21,6 +21,8 @@ export interface SSHSessionManagerOptions {
   onError: (error: Error) => void
   reconnect?: () => Promise<Subprocess>
   maxReconnectAttempts?: number
+  /** 可注入的退避基数（ms）——测试用 10ms 代替真实 2s，语义不变 */
+  reconnectBaseDelayMs?: number
 }
 
 export interface SSHPermissionRequest {
@@ -179,8 +181,9 @@ export class SSHSessionManagerImpl implements SSHSessionManager {
         this.maxReconnectAttempts,
       )
 
+      const base = this.options.reconnectBaseDelayMs ?? BASE_RECONNECT_DELAY_MS
       const delay = Math.min(
-        BASE_RECONNECT_DELAY_MS * 2 ** (this.reconnectAttempt - 1),
+        base * 2 ** (this.reconnectAttempt - 1),
         MAX_RECONNECT_DELAY_MS,
       )
       // unref the backoff timer: a pending timer must not keep the process

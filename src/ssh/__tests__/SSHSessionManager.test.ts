@@ -377,13 +377,14 @@ describe('SSHSessionManagerImpl', () => {
     const opts = createMockOptions({
       reconnect: mock(async () => proc2),
       maxReconnectAttempts: 3,
+      reconnectBaseDelayMs: 10,
     })
     const manager = new SSHSessionManagerImpl(proc1, opts)
 
     manager.connect()
     simulateExit(1)
 
-    await new Promise(r => setTimeout(r, 3000))
+    await new Promise(r => setTimeout(r, 200))
 
     expect(opts.state.reconnectingCalls.length).toBeGreaterThanOrEqual(1)
     expect(opts.state.reconnectingCalls[0]!.attempt).toBe(1)
@@ -398,16 +399,17 @@ describe('SSHSessionManagerImpl', () => {
         throw new Error('SSH connection refused')
       }),
       maxReconnectAttempts: 2,
+      reconnectBaseDelayMs: 10,
     })
     const manager = new SSHSessionManagerImpl(proc, opts)
 
     manager.connect()
     simulateExit(1)
 
-    await new Promise(r => setTimeout(r, 12000))
+    await new Promise(r => setTimeout(r, 500))
 
     expect(opts.state.reconnectingCalls.length).toBe(2)
     expect(opts.state.disconnectedCount).toBe(1)
     expect(manager.isConnected()).toBe(false)
-  }, 15000)
+  }, 5000)
 })

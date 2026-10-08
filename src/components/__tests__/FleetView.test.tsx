@@ -33,6 +33,8 @@ async function mount(rows: FleetRow[], columns = 100, terminalRows = 30) {
   const stdout = Object.assign(new PassThrough(), { isTTY: true, columns, rows: terminalRows });
   stdout.resume();
   const stderr = new PassThrough();
+  const stderrChunks: Buffer[] = [];
+  stderr.on('data', (c: Buffer) => stderrChunks.push(c));
   stderr.resume();
   const attached: FleetRow[] = [];
   const killed: FleetRow[] = [];
@@ -72,11 +74,17 @@ async function mount(rows: FleetRow[], columns = 100, terminalRows = 30) {
   // Inspect the actual reconciled Ink host tree, including resolved theme
   // properties; this is not an emulated React tree or source-code assertion.
   const root = (ink as unknown as { rootNode: DOMElement }).rootNode;
+  const stderrText = () => Buffer.concat(stderrChunks).toString('utf8');
+  // Empty tree means React bailed during render — surface the swallowed error.
+  if (text(root) === '') {
+    console.error('[FleetView stderr]\n' + stderrText().slice(0, 2000));
+  }
   return {
     attached,
     killed,
     dispatched,
     renamed,
+    stderrText,
     text: () => text(root),
     nodes: () => elements(root),
     async key(sequence: string) {
