@@ -15,8 +15,14 @@ Object.assign(globalThis, { MACRO: { VERSION: 'test' } });
 const { FleetView, toFleetRows } = await import('../FleetView.js');
 
 const cleanups: Array<() => void> = [];
+const allStderr: string[] = [];
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
+});
+afterAll(() => {
+  // Empty render trees swallow React errors into stderr — dump at the end so
+  // CI log tails (which only keep the last lines) actually show the cause.
+  if (allStderr.length) console.error('[FV-STDERR-DUMP]\n' + allStderr.join('\n---\n').slice(0, 4000));
 });
 const settle = () => new Promise(resolve => setTimeout(resolve, 60));
 function text(node: DOMNode): string {
@@ -76,9 +82,7 @@ async function mount(rows: FleetRow[], columns = 100, terminalRows = 30) {
   const root = (ink as unknown as { rootNode: DOMElement }).rootNode;
   const stderrText = () => Buffer.concat(stderrChunks).toString('utf8');
   // Empty tree means React bailed during render — surface the swallowed error.
-  if (text(root) === '') {
-    console.error('[FleetView stderr]\n' + stderrText().slice(0, 2000));
-  }
+  if (text(root) === '') allStderr.push(stderrText().slice(0, 2000));
   return {
     attached,
     killed,

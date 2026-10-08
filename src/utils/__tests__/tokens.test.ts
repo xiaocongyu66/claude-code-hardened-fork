@@ -4,17 +4,27 @@ import { logMock } from '../../../tests/mocks/log'
 // Mock heavy dependency chain: tokenEstimation.ts → log.ts → bootstrap/state.ts
 mock.module('src/utils/log.ts', logMock)
 
-// Mock tokenEstimation to avoid pulling in API provider deps
-mock.module('src/services/tokenEstimation.ts', () => ({
-  roughTokenCountEstimation: (text: string) => Math.ceil(text.length / 4),
-  roughTokenCountEstimationForMessages: (msgs: any[]) => msgs.length * 100,
-  roughTokenCountEstimationForMessage: () => 100,
-  roughTokenCountEstimationForFileType: () => 100,
-  bytesPerTokenForFileType: () => 4,
-  countTokensWithAPI: async () => 0,
-  countMessagesTokensWithAPI: async () => 0,
-  countTokensViaHaikuFallback: async () => 0,
-}))
+// Mock tokenEstimation to avoid pulling in API provider deps.
+// Spread the real module: transitive importers (compact chain) bind every
+// export — a partial factory causes "Export not found" at import time.
+mock.module('src/services/tokenEstimation.ts', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const real = require('src/services/tokenEstimation.ts') as Record<
+    string,
+    unknown
+  >
+  return {
+    ...real,
+    roughTokenCountEstimation: (text: string) => Math.ceil(text.length / 4),
+    roughTokenCountEstimationForMessages: (msgs: any[]) => msgs.length * 100,
+    roughTokenCountEstimationForMessage: () => 100,
+    roughTokenCountEstimationForFileType: () => 100,
+    bytesPerTokenForFileType: () => 4,
+    countTokensWithAPI: async () => 0,
+    countMessagesTokensWithAPI: async () => 0,
+    countTokensViaHaikuFallback: async () => 0,
+  }
+})
 
 // Mock slowOperations to avoid bun:bundle import
 mock.module('src/utils/slowOperations.ts', () => ({

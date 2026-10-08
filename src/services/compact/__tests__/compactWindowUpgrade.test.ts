@@ -42,11 +42,18 @@ mock.module('lodash-es/uniqBy.js', () => ({
   default: (arr: unknown[]) => arr,
 }))
 
-mock.module('src/bootstrap/state.js', () => ({
-  getSessionId: () => mockGetSessionId(),
-  getInvokedSkillsForAgent: () => new Set(),
-  markPostCompaction: () => {},
-}))
+mock.module('src/bootstrap/state.js', () => {
+  // Spread the real module: transitive importers bind every export (e.g.
+  // getCwdState) — a partial factory causes "Export not found" at import time.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const real = require('src/bootstrap/state.js') as Record<string, unknown>
+  return {
+    ...real,
+    getSessionId: () => mockGetSessionId(),
+    getInvokedSkillsForAgent: () => new Set(),
+    markPostCompaction: () => {},
+  }
+})
 
 // Import under test AFTER mocks are registered.
 const { resolveCompactMessages } = await import('../compact.js')
