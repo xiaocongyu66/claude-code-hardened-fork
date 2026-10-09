@@ -86,7 +86,17 @@ async function mount(rows: FleetRow[], columns = 100, terminalRows = 30) {
   }
   const stderrText = () => Buffer.concat(stderrChunks).toString('utf8');
   // Empty tree means React bailed during render — surface the swallowed error.
-  if (text(root) === '') allStderr.push(stderrText().slice(0, 2000));
+  if (text(root) === '') {
+    allStderr.push(stderrText().slice(0, 2000));
+    const dump = (n: DOMNode, depth: number): string =>
+      depth > 3 || n.nodeName === '#text'
+        ? String(n.nodeName === '#text' ? n.nodeValue : n.nodeName).slice(0, 30)
+        : `<${n.nodeName}>[${n.childNodes.length}]{${n.childNodes
+            .map(c => dump(c, depth + 1))
+            .join(',')
+            .slice(0, 220)}}`;
+    console.error('[FV-TREE] ' + dump(root, 0).slice(0, 1200));
+  }
   return {
     attached,
     killed,
