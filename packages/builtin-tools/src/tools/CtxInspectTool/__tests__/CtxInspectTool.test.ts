@@ -1,28 +1,22 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { logMock } from '../../../../../../tests/mocks/log'
+import * as realTokenEstimation from 'src/services/tokenEstimation.js'
 
 mock.module('src/utils/log.ts', logMock)
 
-mock.module('src/services/tokenEstimation.ts', () => {
-  // Spread the real module: transitive importers (compact chain) bind every
-  // export — a partial mock factory causes "Export not found" at import time.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const real = require('src/services/tokenEstimation.ts') as Record<
-    string,
-    unknown
-  >
-  return {
-    ...real,
-    roughTokenCountEstimation: (text: string) => Math.ceil(text.length / 4),
-    roughTokenCountEstimationForMessages: (msgs: unknown[]) => msgs.length * 64,
-    roughTokenCountEstimationForMessage: () => 64,
-    roughTokenCountEstimationForFileType: () => 64,
-    bytesPerTokenForFileType: () => 4,
-    countTokensWithAPI: async () => 0,
-    countMessagesTokensWithAPI: async () => 0,
-    countTokensViaHaikuFallback: async () => 0,
-  }
-})
+mock.module('src/services/tokenEstimation.ts', () => ({
+  // Top-level static import resolves fully before mocks register, so
+  // spreading gives every export the transitive chain binds.
+  ...realTokenEstimation,
+  roughTokenCountEstimation: (text: string) => Math.ceil(text.length / 4),
+  roughTokenCountEstimationForMessages: (msgs: unknown[]) => msgs.length * 64,
+  roughTokenCountEstimationForMessage: () => 64,
+  roughTokenCountEstimationForFileType: () => 64,
+  bytesPerTokenForFileType: () => 4,
+  countTokensWithAPI: async () => 0,
+  countMessagesTokensWithAPI: async () => 0,
+  countTokensViaHaikuFallback: async () => 0,
+}))
 
 let sessionMemoryInitialized = false
 mock.module('src/services/SessionMemory/sessionMemoryUtils.ts', () => ({

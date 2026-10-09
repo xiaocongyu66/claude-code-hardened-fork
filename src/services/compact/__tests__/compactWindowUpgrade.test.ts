@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, mock } from 'bun:test'
+import * as realBootstrapState from 'src/bootstrap/state.js'
 import type { Message } from '../../../types/message.js'
 
 // Resume windowing constant the production module reads from sessionStorage.
@@ -42,18 +43,15 @@ mock.module('lodash-es/uniqBy.js', () => ({
   default: (arr: unknown[]) => arr,
 }))
 
-mock.module('src/bootstrap/state.js', () => {
-  // Spread the real module: transitive importers bind every export (e.g.
-  // getCwdState) — a partial factory causes "Export not found" at import time.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const real = require('src/bootstrap/state.js') as Record<string, unknown>
-  return {
-    ...real,
-    getSessionId: () => mockGetSessionId(),
-    getInvokedSkillsForAgent: () => new Set(),
-    markPostCompaction: () => {},
-  }
-})
+mock.module('src/bootstrap/state.js', () => ({
+  // Top-level static import resolves fully before mocks register (hoisted
+  // function bindings survive the module's internal circular chains), so
+  // spreading gives every export the transitive dependency chain binds.
+  ...realBootstrapState,
+  getSessionId: () => mockGetSessionId(),
+  getInvokedSkillsForAgent: () => new Set(),
+  markPostCompaction: () => {},
+}))
 
 // Import under test AFTER mocks are registered.
 const { resolveCompactMessages } = await import('../compact.js')

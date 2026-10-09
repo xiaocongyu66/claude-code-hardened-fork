@@ -1,30 +1,25 @@
 import { mock, describe, expect, test } from 'bun:test'
 import { logMock } from '../../../tests/mocks/log'
+import * as realTokenEstimation from 'src/services/tokenEstimation.js'
 
 // Mock heavy dependency chain: tokenEstimation.ts → log.ts → bootstrap/state.ts
 mock.module('src/utils/log.ts', logMock)
 
-// Mock tokenEstimation to avoid pulling in API provider deps.
-// Spread the real module: transitive importers (compact chain) bind every
-// export — a partial factory causes "Export not found" at import time.
-mock.module('src/services/tokenEstimation.ts', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const real = require('src/services/tokenEstimation.ts') as Record<
-    string,
-    unknown
-  >
-  return {
-    ...real,
-    roughTokenCountEstimation: (text: string) => Math.ceil(text.length / 4),
-    roughTokenCountEstimationForMessages: (msgs: any[]) => msgs.length * 100,
-    roughTokenCountEstimationForMessage: () => 100,
-    roughTokenCountEstimationForFileType: () => 100,
-    bytesPerTokenForFileType: () => 4,
-    countTokensWithAPI: async () => 0,
-    countMessagesTokensWithAPI: async () => 0,
-    countTokensViaHaikuFallback: async () => 0,
-  }
-})
+// Mock tokenEstimation to avoid pulling in API provider deps. Top-level
+// static import resolves fully before mocks register (hoisted function
+// bindings survive its internal circular chains), so spreading gives every
+// export the transitive dependency chain binds.
+mock.module('src/services/tokenEstimation.ts', () => ({
+  ...realTokenEstimation,
+  roughTokenCountEstimation: (text: string) => Math.ceil(text.length / 4),
+  roughTokenCountEstimationForMessages: (msgs: any[]) => msgs.length * 100,
+  roughTokenCountEstimationForMessage: () => 100,
+  roughTokenCountEstimationForFileType: () => 100,
+  bytesPerTokenForFileType: () => 4,
+  countTokensWithAPI: async () => 0,
+  countMessagesTokensWithAPI: async () => 0,
+  countTokensViaHaikuFallback: async () => 0,
+}))
 
 // Mock slowOperations to avoid bun:bundle import
 mock.module('src/utils/slowOperations.ts', () => ({

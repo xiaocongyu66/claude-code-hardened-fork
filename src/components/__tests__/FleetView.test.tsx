@@ -77,9 +77,13 @@ async function mount(rows: FleetRow[], columns = 100, terminalRows = 30) {
     }),
   );
   await settle();
-  // Inspect the actual reconciled Ink host tree, including resolved theme
-  // properties; this is not an emulated React tree or source-code assertion.
   const root = (ink as unknown as { rootNode: DOMElement }).rootNode;
+  // CI runners can be slow: poll until the tree has content (max 2s) instead
+  // of a fixed settle — an empty tree here means React bailed, not "too fast".
+  const deadline = Date.now() + 2000;
+  while (text(root) === '' && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 50));
+  }
   const stderrText = () => Buffer.concat(stderrChunks).toString('utf8');
   // Empty tree means React bailed during render — surface the swallowed error.
   if (text(root) === '') allStderr.push(stderrText().slice(0, 2000));
