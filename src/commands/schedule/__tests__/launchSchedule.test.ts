@@ -62,7 +62,11 @@ mock.module('src/utils/auth.js', () => ({
 mock.module('src/services/oauth/client.js', () => ({
   getOrganizationUUID: async () => 'org-uuid-schedule',
 }))
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. fileSuffixForOauthConfig.
+import * as realOauthConstants from 'src/constants/oauth.js'
 mock.module('src/constants/oauth.js', () => ({
+  ...realOauthConstants,
   getOauthConfig: () => ({ BASE_API_URL: 'https://api.anthropic.com' }),
 }))
 mock.module('src/utils/teleport/api.js', () => ({

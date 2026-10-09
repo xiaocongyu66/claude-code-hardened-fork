@@ -89,7 +89,11 @@ mock.module('src/services/analytics/index.js', () => ({
 // ── State mock with non-null projectDir ──
 let _mockProjectDir: string | null = null
 
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export.
+import * as realBootstrapState from 'src/bootstrap/state.js'
 mock.module('src/bootstrap/state.js', () => ({
+  ...realBootstrapState,
   getSessionId: () => 'test-session-pd',
   getSessionProjectDir: () => _mockProjectDir,
   getOriginalCwd: () => '/mock/cwd',

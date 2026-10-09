@@ -108,10 +108,13 @@ mock.module('src/services/analytics/index.js', () => ({
 }))
 
 const noop = () => {}
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. waitForScrollIdle.
+import * as realBootstrapState from 'src/bootstrap/state.js'
 mock.module('src/bootstrap/state.js', () => ({
+  ...realBootstrapState,
   getSessionId: () => 'parent-session-id',
   getParentSessionId: () => undefined,
-  // Additional exports needed by transitive imports (e.g. cwd.ts, sandbox-adapter.ts)
   getCwdState: () => '/mock/cwd',
   getOriginalCwd: () => '/mock/cwd',
   getSessionProjectDir: () => null,

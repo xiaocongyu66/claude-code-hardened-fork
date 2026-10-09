@@ -19,8 +19,12 @@ mock.module('src/utils/debug.ts', () => ({
   isDebug: () => false,
 }))
 
-// Mock settings to avoid filesystem side effects
+// Mock settings to avoid filesystem side effects. Spread the real module
+// (top-level static import resolves before mocks register): transitive
+// importers bind every export, e.g. getInitialSettings.
+import * as realSettings from 'src/utils/settings/settings.js'
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettings,
   getCachedSettings: () => ({}),
   getSettings: async () => ({}),
   updateSettings: async () => {},

@@ -22,7 +22,11 @@ import { debugMock } from '../../../../tests/mocks/debug';
 mock.module('src/utils/log.ts', logMock);
 mock.module('src/utils/debug.ts', debugMock);
 mock.module('bun:bundle', () => ({ feature: () => false }));
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. getInitialSettings.
+import * as realSettings from 'src/utils/settings/settings.js';
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettings,
   getCachedOrDefaultSettings: () => ({}),
   getSettings: () => ({}),
 }));

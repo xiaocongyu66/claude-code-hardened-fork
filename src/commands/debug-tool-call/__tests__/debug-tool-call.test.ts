@@ -20,7 +20,11 @@ let claudeDir: string
 // mock envUtils with static paths — by reading process.env at call time,
 // our mock stays compatible with the full suite where other tests also
 // drive the real CLAUDE_CONFIG_DIR.
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export.
+import * as realEnvUtils from 'src/utils/envUtils.js'
 mock.module('src/utils/envUtils.js', () => ({
+  ...realEnvUtils,
   getClaudeConfigHomeDir: () =>
     process.env.CLAUDE_CONFIG_DIR ?? `${tmpdir()}/dummy-claude`,
   isEnvTruthy: (v: unknown) => Boolean(v),

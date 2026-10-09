@@ -53,8 +53,8 @@ jobs:
             LOG=$(timeout 15 bun test --timeout 10000 "$f" 2>&1) || rc=$?
             if [ $rc -eq 124 ]; then
               echo "HANG: $f"
-              # print partial output to expose where it stalled
-              echo "$LOG" | tail -6
+              # partial progress + tail to expose where it stalled
+              echo "$LOG" | head -30
               STATUS=1
             elif [ $rc -ne 0 ]; then
               echo "FAIL($rc): $f"
