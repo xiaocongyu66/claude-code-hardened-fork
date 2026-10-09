@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test';
 import { PassThrough } from 'node:stream';
 import { createElement } from 'react';
 import { Ink, getTheme } from '@anthropic/ink';
