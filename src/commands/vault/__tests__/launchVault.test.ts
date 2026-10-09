@@ -25,7 +25,11 @@ mock.module('src/utils/log.ts', logMock)
 mock.module('src/utils/debug.ts', debugMock)
 
 // ── Auth / OAuth mocks ──────────────────────────────────────────────────────
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. getAnthropicApiKey.
+import * as realAuthVault from 'src/utils/auth.js'
 mock.module('src/utils/auth.js', () => ({
+  ...realAuthVault,
   getClaudeAIOAuthTokens: () => ({ accessToken: 'test-token' }),
 }))
 mock.module('src/services/oauth/client.js', () => ({

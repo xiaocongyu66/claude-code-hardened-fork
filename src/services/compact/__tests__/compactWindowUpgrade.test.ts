@@ -15,7 +15,11 @@ let mockGetSessionId: () => string | null = () => 'sid-1'
 let mockFullLog: { messages: unknown[] } | null = null
 let lastGetLastSessionLogCalls = 0
 
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. getProjectDir.
+import * as realSessionStorage from 'src/utils/sessionStorage.js'
 mock.module('src/utils/sessionStorage.js', () => ({
+  ...realSessionStorage,
   RESUME_WINDOW,
   getLastSessionLog: (sid: string) => {
     lastGetLastSessionLogCalls++

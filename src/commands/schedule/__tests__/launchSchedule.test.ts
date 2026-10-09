@@ -56,7 +56,11 @@ mock.module('src/commands/schedule/ScheduleView.js', () => ({
 }))
 
 // ── Auth / OAuth mocks ──────────────────────────────────────────────────────
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. getAnthropicApiKey.
+import * as realAuthSchedule from 'src/utils/auth.js'
 mock.module('src/utils/auth.js', () => ({
+  ...realAuthSchedule,
   getClaudeAIOAuthTokens: () => ({ accessToken: 'test-token-schedule' }),
 }))
 mock.module('src/services/oauth/client.js', () => ({
