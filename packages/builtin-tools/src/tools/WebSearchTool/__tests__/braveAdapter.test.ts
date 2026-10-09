@@ -21,7 +21,11 @@ afterAll(() => {
 // Defensive mock: agent.test.ts mocks config.js which can corrupt Bun's
 // src/* path alias resolution. Provide AbortError directly so the dynamic
 // import in createAdapter() never needs to resolve the alias at runtime.
+// Spread the real module (top-level static import resolves before mocks
+// register): transitive importers bind every export, e.g. getErrnoCode.
+import * as realErrors from 'src/utils/errors.js'
 const _abortMock = () => ({
+  ...realErrors,
   AbortError: class AbortError extends Error {
     constructor(message?: string) {
       super(message)

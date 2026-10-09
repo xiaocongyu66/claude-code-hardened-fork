@@ -42,18 +42,16 @@ mock.module('src/services/policyLimits/index.js', () => ({
 }))
 
 // Narrow mock for the side-effectful entries in `src/constants/oauth.js`.
-// Pure data exports (ALL_OAUTH_SCOPES, CLAUDE_AI_*_SCOPE, etc.) come from
-// the real module and are not mocked, per the test policy that constants
-// modules without side effects should not be replaced wholesale.
-mock.module('src/constants/oauth.js', () => {
-  const actual = require('../../../../../../src/constants/oauth.js')
-  return {
-    ...actual,
-    fileSuffixForOauthConfig: () => '',
-    getOauthConfig: () => ({ BASE_API_URL: 'https://example.test' }),
-    MCP_CLIENT_METADATA_URL: 'https://example.test/oauth/metadata',
-  }
-})
+// Top-level static import resolves fully before mocks register (factory-内
+// require would hit the module's circular chains and return a
+// half-initialized namespace, losing exports like getOauthConfig).
+import * as actualOauth from 'src/constants/oauth.js'
+mock.module('src/constants/oauth.js', () => ({
+  ...actualOauth,
+  fileSuffixForOauthConfig: () => '',
+  getOauthConfig: () => ({ BASE_API_URL: 'https://example.test' }),
+  MCP_CLIENT_METADATA_URL: 'https://example.test/oauth/metadata',
+}))
 
 mock.module('src/utils/remoteTriggerAudit.js', () => ({
   appendRemoteTriggerAuditRecord: async (record: Record<string, unknown>) => {
