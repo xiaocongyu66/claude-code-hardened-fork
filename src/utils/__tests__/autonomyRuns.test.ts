@@ -1,5 +1,13 @@
 import { AsyncLocalStorage } from 'async_hooks'
-import { mock, afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { join, resolve as resolvePath } from 'node:path'
 import {
   getCwdState,
@@ -61,8 +69,17 @@ const RUNS_REL = join(AUTONOMY_DIR, 'runs.json')
 // ?? getCwdState()）：bun 的 mock.module 对普通模块的 live binding 生效，
 // 故无论本文件在 worker 中的加载顺序如何，下一次 getCwd() 调用都会走
 // state 通道，被测的「默认 currentDir = 活动工作目录」契约因此可测。
+// Snapshot the REAL cwd module BEFORE mock.module: bun evaluates the
+// factory immediately, so the spread source must already be initialized.
+import * as realCwdModuleAR from 'src/utils/cwd.js'
+const realCwdSnapshotAR: Record<string, unknown> = { ...realCwdModuleAR }
 const cwdOverrideStorage = new AsyncLocalStorage<string>()
 const stateBackedCwdMock = () => ({
+  // Spread the REAL export surface: a partial face (no setCwd/setCwdState)
+  // is live-binding poison for later consumers — CdTool's write path calls
+  // setCwd on this registry entry and dies with TypeError (CI run
+  // 39422044190, CdTool x19). Only pwd/getCwd/runWithCwdOverride differ.
+  ...realCwdSnapshotAR,
   runWithCwdOverride: <T>(cwd: string, fn: () => T): T =>
     cwdOverrideStorage.run(cwd, fn),
   pwd: () => cwdOverrideStorage.getStore() ?? getCwdState(),
@@ -70,6 +87,14 @@ const stateBackedCwdMock = () => ({
 })
 mock.module('src/utils/cwd.ts', stateBackedCwdMock)
 mock.module('src/utils/cwd.js', stateBackedCwdMock)
+// afterAll 还原真实 cwd 模块：自卫式重注册只护本文件，不能把 state 通道
+// 版 cwd 留给后加载的消费者（CdTool.test.ts 的 per-agent override 层
+// 依赖真实 cwd.ts 的 ALS 语义——CI run 39422044190 CdTool x3 同族根因）。
+afterAll(() => {
+  for (const spec of ['src/utils/cwd.ts', 'src/utils/cwd.js']) {
+    mock.module(spec, () => realCwdSnapshotAR)
+  }
+})
 
 let tempDir = ''
 

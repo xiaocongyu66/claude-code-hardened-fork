@@ -1,13 +1,35 @@
 /**
  * Windows default shell: PowerShell tool on by default; ! routing prefers it.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 
 const settingsState: { defaultShell?: 'bash' | 'powershell' } = {}
 
+import * as realSettingsShell from 'src/utils/settings/settings.js'
+const realSettingsSnapshotShellDef: Record<string, unknown> = {
+  ...realSettingsShell,
+}
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettingsShell,
   getInitialSettings: () => ({ ...settingsState }),
 }))
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/settings.js',
+    () => realSettingsSnapshotShellDef,
+  )
+})
 
 // Force windows platform for these unit tests regardless of host OS.
 mock.module('src/utils/platform.js', () => ({

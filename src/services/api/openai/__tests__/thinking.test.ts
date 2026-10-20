@@ -1,4 +1,12 @@
-import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import {
   isOpenAIThinkingEnabled,
   buildOpenAIRequestBody,
@@ -8,7 +16,18 @@ import {
 // override pollution from other test files (debug-tool-call, issue,
 // break-cache, MagicDocs/prompts, SessionMemory/prompts, cacheStats) that
 // mock this module without exporting isEnvDefinedFalsy.
+import * as realEnvUtilsThinki from 'src/utils/envUtils.js'
+const realEnvUtilsSnapshotsThinki: Record<string, unknown> = {
+  ...realEnvUtilsThinki,
+}
+// 跨套件 mock 污染修复：envUtils 部分替换缺导出会让后加载文件的
+// settings 路径解析/环境判定链拿到 undefined。真实快照 + 只覆盖被测
+// 接缝 + afterAll 还原真实模块。
+afterAll(() => {
+  mock.module('src/utils/envUtils.js', () => realEnvUtilsSnapshotsThinki)
+})
 mock.module('src/utils/envUtils.js', () => ({
+  ...realEnvUtilsSnapshotsThinki,
   isEnvTruthy: (v: string | boolean | undefined): boolean => {
     if (!v) return false
     if (typeof v === 'boolean') return v

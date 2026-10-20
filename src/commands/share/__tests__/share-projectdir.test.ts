@@ -81,71 +81,33 @@ mock.module('bun:bundle', () => ({
   feature: (_name: string) => true,
 }))
 
+import * as realAnalyticsPD from 'src/services/analytics/index.js'
 mock.module('src/services/analytics/index.js', () => ({
+  ...realAnalyticsPD,
   logEvent: () => {},
   stripProtoFields: (v: unknown) => v,
 }))
 
 // ── State mock with non-null projectDir ──
+// 跨套件 mock 污染修复：手写 56 行面缺 getModelStrings/getPlanSlugCache/
+// getInlinePlugins 等真实导出，同进程后加载的消费者会读到 undefined。
+// 改为真实模块快照 + 只覆盖被测接缝（getSessionId 确定性 + projectDir
+// 注入）+ afterAll 还原。
+import * as realBootstrapStatePD from 'src/bootstrap/state.js'
+const bootstrapStateSnapshotPD: Record<string, unknown> = {
+  ...realBootstrapStatePD,
+}
 let _mockProjectDir: string | null = null
 
 mock.module('src/bootstrap/state.js', () => ({
+  ...bootstrapStateSnapshotPD,
   getSessionId: () => 'test-session-pd',
   getSessionProjectDir: () => _mockProjectDir,
-  getOriginalCwd: () => '/mock/cwd',
-  getProjectRoot: () => '/mock/project',
   getIsNonInteractiveSession: () => false,
-  regenerateSessionId: () => {},
-  getParentSessionId: () => undefined,
-  switchSession: () => {},
-  onSessionSwitch: () => () => {},
-  setOriginalCwd: () => {},
-  setProjectRoot: () => {},
-  getDirectConnectServerUrl: () => undefined,
-  setDirectConnectServerUrl: () => {},
-  addToTotalDurationState: () => {},
-  resetTotalDurationStateAndCost_FOR_TESTS_ONLY: () => {},
-  addToTotalCostState: () => {},
-  getTotalCostUSD: () => 0,
-  getTotalAPIDuration: () => 0,
-  getTotalDuration: () => 0,
-  getTotalAPIDurationWithoutRetries: () => 0,
-  getTotalToolDuration: () => 0,
-  addToToolDuration: () => {},
-  getTurnHookDurationMs: () => 0,
-  addToTurnHookDuration: () => {},
-  resetTurnHookDuration: () => {},
-  getTurnHookCount: () => 0,
-  getTurnToolDurationMs: () => 0,
-  resetTurnToolDuration: () => {},
-  getTurnToolCount: () => 0,
-  getTurnClassifierDurationMs: () => 0,
-  addToTurnClassifierDuration: () => {},
-  resetTurnClassifierDuration: () => {},
-  getTurnClassifierCount: () => 0,
-  getStatsStore: () => ({}),
-  setStatsStore: () => {},
-  updateLastInteractionTime: () => {},
-  flushInteractionTime: () => {},
-  addToTotalLinesChanged: () => {},
-  getTotalLinesAdded: () => 0,
-  getTotalLinesRemoved: () => 0,
-  getTotalInputTokens: () => 0,
-  getTotalOutputTokens: () => 0,
-  getTotalCacheReadInputTokens: () => 0,
-  getTotalCacheCreationInputTokens: () => 0,
-  getTotalWebSearchRequests: () => 0,
-  getTurnOutputTokens: () => 0,
-  getCurrentTurnTokenBudget: () => null,
-  setLastAPIRequest: () => {},
-  getLastAPIRequest: () => null,
-  setLastAPIRequestMessages: () => {},
-  getLastAPIRequestMessages: () => [],
-  getSdkAgentProgressSummariesEnabled: () => false,
-  addSlowOperation: () => {},
-  getCwdState: () => '/mock/cwd',
-  setCwdState: () => {},
 }))
+afterAll(() => {
+  mock.module('src/bootstrap/state.js', () => bootstrapStateSnapshotPD)
+})
 
 // ── State ──
 let tmpDir: string

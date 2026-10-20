@@ -1,15 +1,57 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
 import { debugMock } from '../../../../tests/mocks/debug.js'
 import { logMock } from '../../../../tests/mocks/log.js'
 
 // ─── Mocks ───
+//
+// 跨套件 mock 污染修复（CI run 39422044190 同族根因）：Bun 的 mock.module
+// 是进程级 last-write-wins，下面的部分替换曾让同进程后续测试文件读到
+// undefined/缺导出（"Export named ... not found" 随链路漂移）。统一改为
+// 「真实模块快照 + 完整导出面 + 只覆盖被测接缝」，并在 afterAll 还原真实
+// 模块，保证本文件之后加载的任何测试拿到未污染的注册表。
 
 const noop = () => {}
+
+// 真实模块快照（真实命名空间同时充当完整导出面 + afterAll 还原源）。
+import * as realSessionStorage from 'src/utils/sessionStorage.js'
+import * as realDiskOutput from 'src/utils/task/diskOutput.js'
+import * as realMessageQueueManager from 'src/utils/messageQueueManager.js'
+import * as realBootstrapState from 'src/bootstrap/state.js'
+import * as realSpeculation from 'src/services/PromptSuggestion/speculation.js'
+import * as realCleanupRegistry from 'src/utils/cleanupRegistry.js'
+import * as realAbortController from 'src/utils/abortController.js'
+import * as realSdkProgress from 'src/utils/task/sdkProgress.js'
+import * as realSdkEventQueue from 'src/utils/sdkEventQueue.js'
+import * as realXmlConstants from 'src/constants/xml.js'
+import * as realAnalytics from 'src/services/analytics/index.js'
+import * as realCollapseReadSearch from 'src/utils/collapseReadSearch.js'
+
+const realSnapshots: Array<[string, Record<string, unknown>]> = [
+  ['src/utils/sessionStorage.js', { ...realSessionStorage }],
+  ['src/utils/task/diskOutput.js', { ...realDiskOutput }],
+  ['src/utils/messageQueueManager.js', { ...realMessageQueueManager }],
+  ['src/bootstrap/state.js', { ...realBootstrapState }],
+  ['src/services/PromptSuggestion/speculation.js', { ...realSpeculation }],
+  ['src/utils/cleanupRegistry.js', { ...realCleanupRegistry }],
+  ['src/utils/abortController.js', { ...realAbortController }],
+  ['src/utils/task/sdkProgress.js', { ...realSdkProgress }],
+  ['src/utils/sdkEventQueue.js', { ...realSdkEventQueue }],
+  ['src/constants/xml.js', { ...realXmlConstants }],
+  ['src/services/analytics/index.js', { ...realAnalytics }],
+  ['src/utils/collapseReadSearch.js', { ...realCollapseReadSearch }],
+]
+
+afterAll(() => {
+  for (const [specifier, snapshot] of realSnapshots) {
+    mock.module(specifier, () => snapshot)
+  }
+})
 
 mock.module('src/utils/debug.ts', debugMock)
 mock.module('src/utils/log.ts', logMock)
 
 mock.module('src/utils/sessionStorage.js', () => ({
+  ...realSnapshots[0][1],
   getAgentTranscriptPath: (id: string) => `/tmp/transcripts/${id}.jsonl`,
   recordSidechainTranscript: async () => {},
   recordQueueOperation: noop,
@@ -17,6 +59,7 @@ mock.module('src/utils/sessionStorage.js', () => ({
 }))
 
 mock.module('src/utils/task/diskOutput.js', () => ({
+  ...realSnapshots[1][1],
   evictTaskOutput: noop,
   getTaskOutputPath: (id: string) => `/tmp/output/${id}`,
   initTaskOutputAsSymlink: async () => {},
@@ -26,12 +69,14 @@ mock.module('src/utils/task/diskOutput.js', () => ({
 // Capture enqueuePendingNotification calls for verification
 const enqueuedNotifications: string[] = []
 mock.module('src/utils/messageQueueManager.js', () => ({
+  ...realSnapshots[2][1],
   enqueuePendingNotification: (cmd: any) => {
     enqueuedNotifications.push(cmd.value)
   },
 }))
 
 mock.module('src/bootstrap/state.js', () => ({
+  ...realSnapshots[3][1],
   getSdkAgentProgressSummariesEnabled: () => false,
   getSessionId: () => 'test-session-001',
   getProjectRoot: () => '/test/project',
@@ -40,15 +85,18 @@ mock.module('src/bootstrap/state.js', () => ({
 }))
 
 mock.module('src/services/PromptSuggestion/speculation.js', () => ({
+  ...realSnapshots[4][1],
   abortSpeculation: noop,
 }))
 
 const cleanupFns: (() => void)[] = []
 mock.module('src/utils/cleanupRegistry.js', () => ({
+  ...realSnapshots[5][1],
   registerCleanup: () => noop,
 }))
 
 mock.module('src/utils/abortController.js', () => ({
+  ...realSnapshots[6][1],
   createAbortController: () => new AbortController(),
   createChildAbortController: (parent: AbortController) => {
     const ac = new AbortController()
@@ -58,14 +106,17 @@ mock.module('src/utils/abortController.js', () => ({
 }))
 
 mock.module('src/utils/task/sdkProgress.js', () => ({
+  ...realSnapshots[7][1],
   emitTaskProgress: noop,
 }))
 
 mock.module('src/utils/sdkEventQueue.js', () => ({
+  ...realSnapshots[8][1],
   enqueueSdkEvent: noop,
 }))
 
 mock.module('src/constants/xml.js', () => ({
+  ...realSnapshots[9][1],
   TASK_NOTIFICATION_TAG: 'task_notification',
   TASK_ID_TAG: 'task_id',
   TOOL_USE_ID_TAG: 'tool_use_id',
@@ -79,6 +130,7 @@ mock.module('src/constants/xml.js', () => ({
 }))
 
 mock.module('src/services/analytics/index.js', () => ({
+  ...realSnapshots[10][1],
   logEvent: noop,
   logEventAsync: async () => {},
   stripProtoFields: (v: any) => v,
@@ -88,6 +140,7 @@ mock.module('src/services/analytics/index.js', () => ({
 }))
 
 mock.module('src/utils/collapseReadSearch.js', () => ({
+  ...realSnapshots[11][1],
   getSearchExtraToolsOrReadInfo: () => undefined,
 }))
 

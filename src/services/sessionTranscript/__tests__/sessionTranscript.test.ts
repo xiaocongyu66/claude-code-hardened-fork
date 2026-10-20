@@ -35,6 +35,11 @@ const tmpRoot = mkdtempSync(join(tmpdir(), 'kairos-seg-'))
 let projectDirOverride = join(tmpRoot, 'projects', 'proj-a')
 const SESSION_ID = 'kairos-seg-test'
 
+const bootstrapStateSnapshotST: Record<string, unknown> = { ...actualState }
+// afterAll 还原真实 bootstrap/state：恒定 SESSION_ID / tmpRoot cwd 不外溢。
+afterAll(() => {
+  mock.module('src/bootstrap/state.ts', () => bootstrapStateSnapshotST)
+})
 mock.module('src/bootstrap/state.ts', () => ({
   ...actualState,
   getSessionId: () => SESSION_ID,

@@ -192,7 +192,18 @@ const mockedGetClaudeConfigHomeDirMD: (() => string) & {
   { cache: { clear: () => {}, get: (_k: unknown) => undefined } },
 )
 
+import * as realEnvUtilsPrompt from 'src/utils/envUtils.js'
+const realEnvUtilsSnapshotsPrompt: Record<string, unknown> = {
+  ...realEnvUtilsPrompt,
+}
+// 跨套件 mock 污染修复：envUtils 部分替换缺导出会让后加载文件的
+// settings 路径解析/环境判定链拿到 undefined。真实快照 + 只覆盖被测
+// 接缝 + afterAll 还原真实模块。
+afterAll(() => {
+  mock.module('src/utils/envUtils.js', () => realEnvUtilsSnapshotsPrompt)
+})
 mock.module('src/utils/envUtils.js', () => ({
+  ...realEnvUtilsSnapshotsPrompt,
   getClaudeConfigHomeDir: mockedGetClaudeConfigHomeDirMD,
   isEnvTruthy: realIsEnvTruthy,
   getEnvBool: () => false,

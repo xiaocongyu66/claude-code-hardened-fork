@@ -6,7 +6,7 @@
  * this directory imports it for real, so the mock cannot leak). The predicate
  * logic itself is covered by src/utils/sandbox/__tests__/strictSandbox.test.ts.
  */
-import { beforeEach, describe, expect, test, mock } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 const sandboxState = {
   enabled: false,
@@ -85,6 +85,10 @@ mock.module('src/utils/sandbox/sandbox-adapter.js', () => ({
 // src/utils/sandbox/__tests__/sandboxPolicyPin.test.ts — a partial mock would
 // break unrelated tests loaded later) so exclusion scenarios are drivable.
 let currentSettings: Record<string, unknown> = {}
+import * as realSettingsSandbox from 'src/utils/settings/settings.js'
+const realSettingsSnapshotSandbox: Record<string, unknown> = {
+  ...realSettingsSandbox,
+}
 const settingsMock = {
   loadManagedFileSettings: () => null,
   getManagedFileSettingsPresence: () => ({}),
@@ -111,6 +115,15 @@ const settingsMock = {
   rawSettingsContainsKey: () => false,
 }
 mock.module('src/utils/settings/settings.js', () => settingsMock)
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/settings.js',
+    () => realSettingsSnapshotSandbox,
+  )
+})
 
 const { shouldUseSandbox, evaluateSandboxDecision, SANDBOX_REFUSAL_MESSAGES } =
   await import('../shouldUseSandbox.js')

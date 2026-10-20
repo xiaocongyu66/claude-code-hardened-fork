@@ -27,6 +27,16 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 
+// 环境无关化：startupProfiler.ts / headlessProfiler.ts 在模块载入时一次性
+// 读取 CLAUDE_CODE_PROFILE_STARTUP（模块级 const）。开发者机器的 shell 若
+// 导出了该变量（本机环境实测存在），同一 worker 里更早加载该模块的测试
+// （skillLearning smoke → src/commands.ts → startupProfiler）会把
+// DETAILED_PROFILING 冻结为 true，本文件无法追溯。先记录机器环境再钉掉：
+// 若机器环境开启了 profiling，第 1 组「关闭时 no-op」断言的前置契约不成立
+// （见文件头注释 1.「no CLAUDE_CODE_PROFILE_STARTUP」），按套件自身契约跳过。
+const machineProfileStartupEnv = process.env.CLAUDE_CODE_PROFILE_STARTUP
+delete process.env.CLAUDE_CODE_PROFILE_STARTUP
+
 import { logMock } from '../mocks/log.js'
 import { debugMock } from '../mocks/debug.js'
 
@@ -130,6 +140,11 @@ const FAST_PATH_REPORT_OUTLETS: Array<[string, number]> = [
 
 describe('startup profiler: fork-module checkpoints', () => {
   test('profiler calls are no-ops when profiling is disabled', async () => {
+    // 机器环境（CLAUDE_CODE_PROFILE_STARTUP=1 的开发者 shell）会经更早加载
+    // 的模块链把 DETAILED_PROFILING 冻结为 true，本套件的「关闭」契约在该
+    // 环境下不可验证——按契约跳过（CI / 干净环境恒走完整断言）。
+    if (machineProfileStartupEnv) return
+
     const {
       profileCheckpoint,
       profileReport,

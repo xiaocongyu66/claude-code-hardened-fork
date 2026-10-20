@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { cleanupTempDir, createTempDir } from '../../../tests/mocks/file-system'
@@ -8,6 +16,17 @@ import { functionalStateMock } from '../../../tests/mocks/state'
 // module under test — same cross-file mock.module pollution defense as
 // cronTasks.baseline.test.ts (CI log /tmp/test1c.log:879, 899, 921:
 // `EACCES: permission denied, mkdir '/mock'` from a poisoned getProjectRoot).
+import * as realBootstrapStateAW from 'src/bootstrap/state.js'
+const bootstrapStateSnapshotAW: Record<string, unknown> = {
+  ...realBootstrapStateAW,
+}
+// afterAll 还原真实 bootstrap/state：functionalStateMock 的 tmpdir cwd
+// 与恒定 session id 不外溢给后加载文件。
+afterAll(() => {
+  for (const spec of ['src/bootstrap/state.ts', 'src/bootstrap/state.js']) {
+    mock.module(spec, () => bootstrapStateSnapshotAW)
+  }
+})
 mock.module('src/bootstrap/state.ts', functionalStateMock)
 mock.module('src/bootstrap/state.js', functionalStateMock)
 

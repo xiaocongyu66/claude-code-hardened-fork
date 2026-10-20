@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -13,6 +21,17 @@ import { functionalStateMock } from '../../../tests/mocks/state'
 // (CI log /tmp/test1c.log:551, 571, 591, 615, 639, 659). Re-register the
 // functional shim here so this file's tests run against real stateful// semantics regardless of file execution order, then resolve the module
 // under test AFTER the registration (static imports hoist above it).
+import * as realBootstrapStateBL from 'src/bootstrap/state.js'
+const bootstrapStateSnapshotBL: Record<string, unknown> = {
+  ...realBootstrapStateBL,
+}
+// afterAll 还原真实 bootstrap/state：functionalStateMock 的 tmpdir cwd
+// 与恒定 session id 不外溢给后加载文件。
+afterAll(() => {
+  for (const spec of ['src/bootstrap/state.ts', 'src/bootstrap/state.js']) {
+    mock.module(spec, () => bootstrapStateSnapshotBL)
+  }
+})
 mock.module('src/bootstrap/state.ts', functionalStateMock)
 mock.module('src/bootstrap/state.js', functionalStateMock)
 

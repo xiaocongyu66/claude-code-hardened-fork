@@ -124,6 +124,13 @@ describe('CdTool', () => {
 
   beforeEach(() => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'cd-tool-')))
+    // Anchor the bootstrap cwd per test: earlier test files that mutate the
+    // shared session cwd would otherwise leak their value in here (the
+    // afterEach restore only covers mutations made by THIS file). NOTE: do
+    // NOT anchor src/utils/cwd.js's setCwd here — under a full run an
+    // earlier file's partial mock.module('src/utils/cwd.js') makes that
+    // import a partial face, and calling it poisons this whole suite.
+    setCwdState(sessionRoot)
     setCwdMock.mockClear()
     invalidateSessionEnvCacheMock.mockClear()
     onCwdChangedForHooksMock.mockClear()

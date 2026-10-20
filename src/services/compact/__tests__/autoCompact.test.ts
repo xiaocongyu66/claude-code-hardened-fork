@@ -52,6 +52,31 @@ mock.module('src/services/analytics/index.ts', () => ({
 // a 4-export hand-written mock surfaces as "Export not found" at link time
 // whenever the graph widens — CI /tmp/test3.log族).
 import * as actualBootstrapState from '../../../bootstrap/state.js'
+const bootstrapStateSnapshotAC: Record<string, unknown> = {
+  ...actualBootstrapState,
+}
+
+import * as realAnalyticsAC from 'src/services/analytics/index.js'
+import * as realConfigAC from 'src/utils/config.js'
+import * as realContextAC from 'src/utils/context.js'
+import * as realSlowOperationsAC from 'src/utils/slowOperations.js'
+import * as realTokenEstimationAC from 'src/services/tokenEstimation.js'
+const realSnapshotsAC: Array<readonly [string, Record<string, unknown>]> = [
+  ['src/bootstrap/state.ts', bootstrapStateSnapshotAC],
+  ['src/services/analytics/index.ts', { ...realAnalyticsAC }],
+  ['src/utils/config.ts', { ...realConfigAC }],
+  ['src/utils/context.ts', { ...realContextAC }],
+  ['src/utils/slowOperations.ts', { ...realSlowOperationsAC }],
+  ['src/services/tokenEstimation.ts', { ...realTokenEstimationAC }],
+]
+// afterAll 统一还原真实模块：本文件的钉死面（恒定 session id、
+// getGlobalConfig({autoCompactEnabled:true})、1_000_000 窗口、len/divisor
+// 估算器、analytics 捕获器）不外溢给同进程后加载的测试文件。
+afterAll(() => {
+  for (const [spec, snapshot] of realSnapshotsAC) {
+    mock.module(spec, () => snapshot)
+  }
+})
 mock.module('src/bootstrap/state.ts', () => ({
   ...actualBootstrapState,
   markPostCompaction: () => {},

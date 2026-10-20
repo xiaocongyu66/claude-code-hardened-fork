@@ -1,3 +1,7 @@
+// Locale pin FIRST (depth-first evaluation order): 真实 teleport/analytics
+// 导入链会拉起 i18n 探测，本机 LANG=zh_CN 时 t() 返回中文包文案，断言的
+// 英文模式全部翻转。见 tests/mocks/localeEn.ts 的首导入钉死模式。
+import '../../../../tests/mocks/localeEn.js'
 import {
   afterAll,
   afterEach,
@@ -38,7 +42,10 @@ const teleportMock = mock(
   (): Promise<TeleportResult> =>
     Promise.resolve({ id: 'session-123', title: 'Autofix PR: acme/myrepo#42' }),
 )
+import * as realTeleportModule from 'src/utils/teleport.js'
+const teleportSnapshot: Record<string, unknown> = { ...realTeleportModule }
 mock.module('src/utils/teleport.js', () => ({
+  ...teleportSnapshot,
   teleportToRemote: teleportMock,
   // Stubs for other exports — Bun mock-module is process-level, so when
   // run combined with teleport-command tests these would otherwise leak as
@@ -112,8 +119,10 @@ mock.module('src/utils/detectRepository.js', () => ({
   detectCurrentRepositoryWithHost: detectRepoMock,
 }))
 
+import * as realAnalyticsModule from 'src/services/analytics/index.js'
 const logEventMock = mock(() => {})
 mock.module('src/services/analytics/index.js', () => ({
+  ...realAnalyticsModule,
   logEvent: logEventMock,
   logEventAsync: mock(() => Promise.resolve()),
   _resetForTesting: mock(() => {}),
@@ -123,18 +132,11 @@ mock.module('src/services/analytics/index.js', () => ({
 
 const noop = () => {}
 mock.module('src/bootstrap/state.js', () => ({
+  ...bootstrapStateSnapshot,
   getSessionId: () => 'parent-session-id',
   getParentSessionId: () => undefined,
   // Additional exports needed by transitive imports (e.g. cwd.ts, sandbox-adapter.ts)
-  getCwdState: () => '/mock/cwd',
-  getOriginalCwd: () => '/mock/cwd',
-  getSessionProjectDir: () => null,
-  getProjectRoot: () => '/mock/project',
-  setCwdState: noop,
-  setOriginalCwd: noop,
-  setLastAPIRequestMessages: noop,
   getIsNonInteractiveSession: () => false,
-  addSlowOperation: noop,
 }))
 
 // Mock skillDetect so initialMessage is deterministic across CI environments

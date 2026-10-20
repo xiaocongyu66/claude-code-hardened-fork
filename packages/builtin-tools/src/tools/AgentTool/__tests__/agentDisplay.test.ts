@@ -1,4 +1,4 @@
-import { mock, describe, expect, test } from 'bun:test'
+import { afterAll, mock, describe, expect, test } from 'bun:test'
 
 // Mock heavy deps
 mock.module('src/utils/model/agent.js', () => ({
@@ -11,7 +11,23 @@ mock.module('src/utils/model/agent.js', () => ({
   getAgentModelOptions: () => [],
 }))
 
+// 跨套件 mock 污染修复：getEnabledSettingSources 被钉成 () => [] 会让
+// 后加载文件的 getInitialSettings()（遍历 enabled sources，settings.ts:841）
+// 读不到任何 settings 源——bypassPermissionsKillswitch.test.ts 直读真实
+// settings.json 的三门判定因此集体失灵（CI run 39422044190 killswitch x3）。
+// 真实模块快照 + 只覆盖本文件需要的显示名接缝 + afterAll 还原。
+import * as realSettingsConstants from 'src/utils/settings/constants.js'
+const realSettingsConstantsSnapshot: Record<string, unknown> = {
+  ...realSettingsConstants,
+}
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/constants.js',
+    () => realSettingsConstantsSnapshot,
+  )
+})
 mock.module('src/utils/settings/constants.js', () => ({
+  ...realSettingsConstantsSnapshot,
   getSourceDisplayName: (source: string) => source,
   getSourceDisplayNameLowercase: (source: string) => source,
   getSourceDisplayNameCapitalized: (source: string) => source,

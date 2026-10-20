@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,7 +28,18 @@ let claudeDir: string
 // mock envUtils with static paths — by reading process.env at call time,
 // our mock stays compatible with the full suite where other tests also
 // drive the real CLAUDE_CONFIG_DIR.
+import * as realEnvUtilsDebugT from 'src/utils/envUtils.js'
+const realEnvUtilsSnapshotsDebugT: Record<string, unknown> = {
+  ...realEnvUtilsDebugT,
+}
+// 跨套件 mock 污染修复：envUtils 部分替换缺导出会让后加载文件的
+// settings 路径解析/环境判定链拿到 undefined。真实快照 + 只覆盖被测
+// 接缝 + afterAll 还原真实模块。
+afterAll(() => {
+  mock.module('src/utils/envUtils.js', () => realEnvUtilsSnapshotsDebugT)
+})
 mock.module('src/utils/envUtils.js', () => ({
+  ...realEnvUtilsSnapshotsDebugT,
   getClaudeConfigHomeDir: () =>
     process.env.CLAUDE_CONFIG_DIR ?? `${tmpdir()}/dummy-claude`,
   isEnvTruthy: (v: unknown) => Boolean(v),

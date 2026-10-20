@@ -1,10 +1,37 @@
 import { mkdir, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { beforeEach, afterEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 
 import { logMock } from '../../../tests/mocks/log'
 import { debugMock } from '../../../tests/mocks/debug'
+
+// 跨套件 mock 污染修复：bootstrap/state 不再部分替换（Bun mock.module 是
+// 进程级 last-write-wins，两导出面缺 getModelStrings/getPlanSlugCache/
+// getInlinePlugins/getSessionCreatedTeams 等真实函数时，已绑定消费者读出
+// undefined —— CI run 39422044190 的 getDefaultOpusModel/CdTool/
+// PaneBackendExecutor/saveCacheSafeParams/skillLearning 等 33 fail 的主根因）。
+// 改为真实模块快照 + 只覆盖被测接缝（getSessionId 确定性）+ afterAll 还原。
+import * as bootstrapStateModule from 'src/bootstrap/state.js'
+const bootstrapStateSnapshot: Record<string, unknown> = {
+  ...bootstrapStateModule,
+}
+mock.module('src/bootstrap/state.ts', () => ({
+  ...bootstrapStateSnapshot,
+  getSessionId: () => 'test-session-123',
+  getIsNonInteractiveSession: () => false,
+}))
+afterAll(() => {
+  mock.module('src/bootstrap/state.ts', () => bootstrapStateSnapshot)
+})
 
 // Mock dependencies before importing the module under test
 mock.module('src/utils/log.ts', logMock)
@@ -12,17 +39,29 @@ mock.module('src/utils/debug.ts', debugMock)
 mock.module('bun:bundle', () => ({
   feature: () => false,
 }))
-mock.module('src/bootstrap/state.ts', () => ({
-  getSessionId: () => 'test-session-123',
-  getIsNonInteractiveSession: () => false,
-}))
+// teammate/teammateContext/slowOperations 同款修法：真实快照基线，只覆盖
+// 被测接缝，避免缺导出/缺 slowLogging 等真实函数污染同进程后续文件
+// （autoCompact.test.ts 注释记录过 slowLogging 部分替换的全局毒发）。
+import * as realTeammateModule from 'src/utils/teammate.js'
+import * as realTeammateContextModule from 'src/utils/teammateContext.js'
+import * as realSlowOperationsModule from 'src/utils/slowOperations.js'
+const teammateSnapshot: Record<string, unknown> = { ...realTeammateModule }
+const teammateContextSnapshot: Record<string, unknown> = {
+  ...realTeammateContextModule,
+}
+const slowOperationsSnapshot: Record<string, unknown> = {
+  ...realSlowOperationsModule,
+}
 mock.module('src/utils/teammate.ts', () => ({
+  ...teammateSnapshot,
   getTeamName: () => undefined,
 }))
 mock.module('src/utils/teammateContext.ts', () => ({
+  ...teammateContextSnapshot,
   getTeammateContext: () => undefined,
 }))
 mock.module('src/utils/slowOperations.ts', () => ({
+  ...slowOperationsSnapshot,
   jsonParse: (s: string) => JSON.parse(s),
   jsonStringify: (
     v: unknown,

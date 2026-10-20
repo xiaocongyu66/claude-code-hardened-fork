@@ -1,3 +1,6 @@
+// Locale pin FIRST（首导入钉死模式）：本机 zh locale 下 t() 返回中文包
+// 文案，description 断言翻转。CI / en 环境恒等。
+import '../../../../tests/mocks/localeEn.js'
 import { describe, test, expect } from 'bun:test'
 
 describe('/job command', () => {

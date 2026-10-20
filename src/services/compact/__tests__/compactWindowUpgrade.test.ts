@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, mock } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { Message } from '../../../types/message.js'
 
 // Resume windowing constant the production module reads from sessionStorage.
@@ -54,6 +54,14 @@ mock.module('lodash-es/uniqBy.js', () => ({
 }))
 
 import * as actualBootstrapState from '../../../bootstrap/state.js'
+const bootstrapStateSnapshotCWU: Record<string, unknown> = {
+  ...actualBootstrapState,
+}
+// afterAll 还原真实 bootstrap/state：getSessionId 钉死会让后加载文件
+// （cacheSafeParamsSlot.test.ts 的会话快照失效判定等）拿到恒定会话 id。
+afterAll(() => {
+  mock.module('src/bootstrap/state.js', () => bootstrapStateSnapshotCWU)
+})
 mock.module('src/bootstrap/state.js', () => ({
   ...actualBootstrapState,
   getSessionId: () => mockGetSessionId(),

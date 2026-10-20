@@ -2,7 +2,7 @@
  * W4 (#55) — tests for the policySettings read/validation layer.
  * The settings source is process-mocked; predicates are pure views over it.
  */
-import { beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { logMock } from '../../../../tests/mocks/log.js'
 import { debugMock } from '../../../../tests/mocks/debug.js'
 
@@ -12,6 +12,10 @@ mock.module('src/utils/log.ts', logMock)
 mock.module('src/utils/debug.ts', debugMock)
 // Complete settings.js export set (mock.module is process-global; a partial
 // mock would break unrelated tests loaded later that link real named exports).
+import * as realSettingsPolicySettings from 'src/utils/settings/settings.js'
+const realSettingsSnapshotPolicySettings: Record<string, unknown> = {
+  ...realSettingsPolicySettings,
+}
 const settingsMock = {
   loadManagedFileSettings: () => null,
   getManagedFileSettingsPresence: () => ({}),
@@ -38,6 +42,15 @@ const settingsMock = {
   rawSettingsContainsKey: () => false,
 }
 mock.module('src/utils/settings/settings.js', () => settingsMock)
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/settings.js',
+    () => realSettingsSnapshotPolicySettings,
+  )
+})
 
 const {
   getPolicySettings,

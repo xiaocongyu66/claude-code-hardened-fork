@@ -1,3 +1,7 @@
+// Locale pin FIRST（首导入钉死模式，见 tests/mocks/localeEn.ts）：
+// 本机 zh locale 下 t() 返回中文包文案（如 daemon 描述「管理后台会话和
+// 守护进程」），断言的英文 'daemon' 子串翻转。CI / en 环境恒等。
+import '../../../../tests/mocks/localeEn.js'
 import { describe, test, expect } from 'bun:test'
 
 describe('/daemon command', () => {

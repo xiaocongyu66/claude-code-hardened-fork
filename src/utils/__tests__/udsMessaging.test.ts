@@ -77,7 +77,10 @@ async function waitForEnqueues(
   await sendMessages()
   await Promise.race([
     done,
-    sleep(5_000).then(() => {
+    // 5s was load-sensitive: under a full parallel test run the UDS socket
+    // drains slower than the machine's idle latency. 30s only ever bites on
+    // a genuinely hung socket (the happy path resolves in milliseconds).
+    sleep(30_000).then(() => {
       throw new Error(`Timed out waiting for ${expected} UDS enqueues`)
     }),
   ])

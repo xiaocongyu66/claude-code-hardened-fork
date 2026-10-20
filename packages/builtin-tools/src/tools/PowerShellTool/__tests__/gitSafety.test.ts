@@ -1,17 +1,29 @@
-import { mock, describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, mock, test } from 'bun:test'
 
 // Mock dependencies before import
 const mockCwd = '/Users/test/project'
+
+// 真实快照必须在 mock.module 工厂引用之前初始化：当 src/utils/cwd.js 已被
+// 同进程先前测试文件加载时，mock.module 会同步执行工厂，声明在后会撞 TDZ
+// （Cannot access 'realCwdSnapshotGS' before initialization）。
+import * as realCwdModuleGS from 'src/utils/cwd.js'
+const realCwdSnapshotGS: Record<string, unknown> = { ...realCwdModuleGS }
 
 // Complete cwd.js export set — mock.module is process-global and a partial
 // mock breaks unrelated files loaded later that import the other real named
 // exports (e.g. the R4 sandboxDecision tests pull the Bash decision chain,
 // which needs pwd()).
 mock.module('src/utils/cwd.js', () => ({
+  ...realCwdSnapshotGS,
   runWithCwdOverride: (_cwd: string, fn: <T>() => T) => fn(),
   pwd: () => mockCwd,
   getCwd: () => mockCwd,
 }))
+// afterAll 还原真实 cwd 模块：'/Users/test/project' 假 cwd 不外溢给后加载
+// 的消费者（真实快照兜底导出面 + 还原，双保险）。
+afterAll(() => {
+  mock.module('src/utils/cwd.js', () => realCwdSnapshotGS)
+})
 
 // Defensive: agent.test.ts can corrupt Bun's src/* path alias at runtime.
 mock.module('src/utils/powershell/parser.js', () => ({

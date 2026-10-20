@@ -3,7 +3,15 @@
  * Covers subscription set/unset, workspace API key prefix variants, and third-party provider env vars.
  * All tests are pure (no network calls) — only process.env + mocked OAuth file reads.
  */
-import { describe, expect, test, mock, beforeEach, afterEach } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { logMock } from '../../../../tests/mocks/log'
 import { debugMock } from '../../../../tests/mocks/debug'
 
@@ -11,10 +19,22 @@ import { debugMock } from '../../../../tests/mocks/debug'
 mock.module('src/utils/log.ts', logMock)
 mock.module('src/utils/debug.ts', debugMock)
 mock.module('bun:bundle', () => ({ feature: () => false }))
+import * as realSettingsAuth from 'src/utils/settings/settings.js'
+const realSettingsSnapshotAuth: Record<string, unknown> = {
+  ...realSettingsAuth,
+}
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettingsAuth,
   getCachedOrDefaultSettings: () => ({}),
   getSettings: () => ({}),
 }))
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module('src/utils/settings/settings.js', () => realSettingsSnapshotAuth)
+})
+
 mock.module('src/utils/config.ts', () => ({
   isConfigEnabled: () => true,
   getGlobalConfig: () => ({

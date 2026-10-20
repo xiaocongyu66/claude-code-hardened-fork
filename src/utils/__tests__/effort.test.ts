@@ -1,12 +1,35 @@
-import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 
 // Mock heavy dependencies to avoid import chain issues
 mock.module('src/utils/thinking.js', () => ({
   isUltrathinkEnabled: () => false,
 }))
+import * as realSettingsEffort from 'src/utils/settings/settings.js'
+const realSettingsSnapshotEffort: Record<string, unknown> = {
+  ...realSettingsEffort,
+}
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettingsEffort,
   getInitialSettings: () => ({}),
 }))
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/settings.js',
+    () => realSettingsSnapshotEffort,
+  )
+})
+
 mock.module('src/utils/auth.js', () => ({
   isProSubscriber: () => false,
   isMaxSubscriber: () => false,

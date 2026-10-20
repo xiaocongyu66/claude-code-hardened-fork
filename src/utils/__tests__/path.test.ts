@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'async_hooks'
-import { describe, expect, mock, test } from 'bun:test'
+import { afterAll, describe, expect, mock, test } from 'bun:test'
 import { tmpdir } from 'os'
 import { resolve } from 'path'
 import {
@@ -21,9 +21,18 @@ import {
 // 的进程全局桩会泄漏到本文件，使 getCwd() 与 process.cwd() 不一致——CI 中
 // toRelativePath(cwd) 收到绝对路径而非 ''（relative 落入 '..' 分支保留原样）。
 // 这里重新注册与真实实现等价的 getCwd，钉定到真实 process.cwd()。
+// Snapshot the REAL cwd module BEFORE mock.module: bun evaluates the
+// factory immediately, so the spread source must already be initialized.
+import * as realCwdModulePT from 'src/utils/cwd.js'
+const realCwdSnapshotPT: Record<string, unknown> = { ...realCwdModulePT }
 const cwdOverrideStorage = new AsyncLocalStorage<string>()
 const pinnedCwd = process.cwd()
 const cwdMock = () => ({
+  // Spread the REAL export surface: a partial face (no setCwd) is
+  // live-binding poison for later consumers of this registry entry
+  // (CdTool's write path — CI run 39422044190, CdTool x19). Only
+  // pwd/getCwd/runWithCwdOverride are pinned here.
+  ...realCwdSnapshotPT,
   runWithCwdOverride: (cwd: string, fn: () => unknown) =>
     cwdOverrideStorage.run(cwd, fn as () => never),
   pwd: () => cwdOverrideStorage.getStore() ?? pinnedCwd,
@@ -31,6 +40,13 @@ const cwdMock = () => ({
 })
 mock.module('src/utils/cwd.ts', cwdMock)
 mock.module('src/utils/cwd.js', cwdMock)
+// afterAll 还原真实 cwd 模块（同 autonomyRuns.test.ts：自卫式重注册只护
+// 本文件，不能把 pinned process.cwd() 版 cwd 留给后加载的消费者）。
+afterAll(() => {
+  for (const spec of ['src/utils/cwd.ts', 'src/utils/cwd.js']) {
+    mock.module(spec, () => realCwdSnapshotPT)
+  }
+})
 
 // ─── containsPathTraversal ──────────────────────────────────────────────
 

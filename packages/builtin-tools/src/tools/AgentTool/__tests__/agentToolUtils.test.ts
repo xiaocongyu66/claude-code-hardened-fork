@@ -1,6 +1,49 @@
-import { mock, describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, mock, test } from 'bun:test'
 import { debugMock } from '../../../../../../tests/mocks/debug'
 import { errorsMock } from '../../../../../../tests/mocks/errors'
+
+// 跨套件 mock 污染修复（真实模块快照范式）：本文件的 15 个部分替换 mock 曾
+// 让同进程后续文件读到缺导出（resumeAgent.test.ts 撞 constants/tools.js 缺
+// CORE_TOOLS 即实证）。统一真实快照 + 只覆盖被测接缝 + afterAll 还原。
+import * as realConstantsTools from 'src/constants/tools.js'
+import * as realAgentSummaryAU from 'src/services/AgentSummary/agentSummary.js'
+import * as realAnalyticsAU from 'src/services/analytics/index.js'
+import * as realDumpPromptsAU from 'src/services/api/dumpPrompts.js'
+import * as realToolModuleAU from 'src/Tool.js'
+import * as realMessagesAU from 'src/utils/messages.js'
+import * as realUseKeybindingAU from 'src/keybindings/useKeybinding.js'
+import * as realShortcutFormatAU from 'src/keybindings/shortcutFormat.js'
+import * as realUseCommandQueueAU from 'src/hooks/useCommandQueue.js'
+import * as realNotificationsAU from 'src/context/notifications.js'
+import * as realOverlayContextAU from 'src/context/overlayContext.js'
+import * as realPromptInputUtilsAU from 'src/components/PromptInput/utils.js'
+import * as realTeammateViewHelpersAU from 'src/state/teammateViewHelpers.js'
+import * as realMessageQueueManagerAU from 'src/utils/messageQueueManager.js'
+import * as realSdkEventQueueAU from 'src/utils/sdkEventQueue.js'
+
+const realSnapshotsAU: Array<readonly [string, Record<string, unknown>]> = [
+  ['src/constants/tools.js', { ...realConstantsTools }],
+  ['src/services/AgentSummary/agentSummary.js', { ...realAgentSummaryAU }],
+  ['src/services/analytics/index.js', { ...realAnalyticsAU }],
+  ['src/services/api/dumpPrompts.js', { ...realDumpPromptsAU }],
+  ['src/Tool.js', { ...realToolModuleAU }],
+  ['src/utils/messages.ts', { ...realMessagesAU }],
+  ['src/keybindings/useKeybinding.js', { ...realUseKeybindingAU }],
+  ['src/keybindings/shortcutFormat.js', { ...realShortcutFormatAU }],
+  ['src/hooks/useCommandQueue.js', { ...realUseCommandQueueAU }],
+  ['src/context/notifications.js', { ...realNotificationsAU }],
+  ['src/context/overlayContext.js', { ...realOverlayContextAU }],
+  ['src/components/PromptInput/utils.js', { ...realPromptInputUtilsAU }],
+  ['src/state/teammateViewHelpers.js', { ...realTeammateViewHelpersAU }],
+  ['src/utils/messageQueueManager.js', { ...realMessageQueueManagerAU }],
+  ['src/utils/sdkEventQueue.js', { ...realSdkEventQueueAU }],
+]
+
+afterAll(() => {
+  for (const [specifier, snapshot] of realSnapshotsAU) {
+    mock.module(specifier, () => snapshot)
+  }
+})
 
 // ─── Mocks for agentToolUtils.ts dependencies ───
 // Only mock modules that are truly unavailable or cause side effects.
@@ -12,6 +55,7 @@ const noop = () => {}
 mock.module('bun:bundle', () => ({ feature: () => false }))
 
 mock.module('src/constants/tools.js', () => ({
+  ...realSnapshotsAU[0][1],
   ALL_AGENT_DISALLOWED_TOOLS: new Set(),
   ASYNC_AGENT_ALLOWED_TOOLS: new Set(),
   CUSTOM_AGENT_DISALLOWED_TOOLS: new Set(),
@@ -19,10 +63,12 @@ mock.module('src/constants/tools.js', () => ({
 }))
 
 mock.module('src/services/AgentSummary/agentSummary.js', () => ({
+  ...realSnapshotsAU[1][1],
   startAgentSummarization: noop,
 }))
 
 mock.module('src/services/analytics/index.js', () => ({
+  ...realSnapshotsAU[2][1],
   logEvent: noop,
   logEventAsync: async () => {},
   stripProtoFields: (v: any) => v,
@@ -32,16 +78,19 @@ mock.module('src/services/analytics/index.js', () => ({
 }))
 
 mock.module('src/services/api/dumpPrompts.js', () => ({
+  ...realSnapshotsAU[3][1],
   clearDumpState: noop,
 }))
 
 mock.module('src/Tool.js', () => ({
+  ...realSnapshotsAU[4][1],
   toolMatchesName: () => false,
   findToolByName: noop,
 }))
 
 // messages.ts is complex - provide stubs for all named exports
 mock.module('src/utils/messages.ts', () => ({
+  ...realSnapshotsAU[5][1],
   extractTextContent: (content: any[]) =>
     content
       ?.filter?.((b: any) => b.type === 'text')
@@ -93,17 +142,24 @@ mock.module('src/tasks/LocalAgentTask/LocalAgentTask.js', localAgentTaskMock)
 
 // UI/context chain pulled in by src/hooks/useCancelRequest.ts
 // (only loaded for teardownRunningAgentsOnQuit coverage)
-mock.module('src/keybindings/useKeybinding.js', () => ({ useKeybinding: noop }))
+mock.module('src/keybindings/useKeybinding.js', () => ({
+  ...realSnapshotsAU[6][1],
+  useKeybinding: noop,
+}))
 mock.module('src/keybindings/shortcutFormat.js', () => ({
+  ...realSnapshotsAU[7][1],
   getShortcutDisplay: () => '',
 }))
 mock.module('src/hooks/useCommandQueue.js', () => ({
+  ...realSnapshotsAU[8][1],
   useCommandQueue: () => [],
 }))
 mock.module('src/context/notifications.js', () => ({
+  ...realSnapshotsAU[9][1],
   useNotifications: () => ({ addNotification: noop, removeNotification: noop }),
 }))
 mock.module('src/context/overlayContext.js', () => ({
+  ...realSnapshotsAU[10][1],
   useIsOverlayActive: () => false,
   // 进程级注册表 last-write-wins：同进程后跑的消费面（MessageRow 等组件
   // 链 import useRegisterOverlay）也吃这份 stub——缺导出会让后续文件
@@ -112,17 +168,21 @@ mock.module('src/context/overlayContext.js', () => ({
   useIsModalOverlayActive: () => false,
 }))
 mock.module('src/components/PromptInput/utils.js', () => ({
+  ...realSnapshotsAU[11][1],
   isVimModeEnabled: () => false,
 }))
 mock.module('src/state/teammateViewHelpers.js', () => ({
+  ...realSnapshotsAU[12][1],
   exitTeammateView: noop,
 }))
 mock.module('src/utils/messageQueueManager.js', () => ({
+  ...realSnapshotsAU[13][1],
   clearCommandQueue: noop,
   enqueuePendingNotification: noop,
   hasCommandsInQueue: () => false,
 }))
 mock.module('src/utils/sdkEventQueue.js', () => ({
+  ...realSnapshotsAU[14][1],
   emitTaskTerminatedSdk: noop,
   enqueueSdkEvent: noop,
 }))

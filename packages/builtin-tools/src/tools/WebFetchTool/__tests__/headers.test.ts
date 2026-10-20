@@ -57,10 +57,24 @@ mock.module('src/utils/mcpOutputStorage.js', () => ({
   }),
 }))
 
+import * as realSettingsHeaders from 'src/utils/settings/settings.js'
+const realSettingsSnapshotHeaders: Record<string, unknown> = {
+  ...realSettingsHeaders,
+}
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettingsHeaders,
   getInitialSettings: () => ({}),
   getSettings_DEPRECATED: () => ({ skipWebFetchPreflight: true }),
 }))
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/settings.js',
+    () => realSettingsSnapshotHeaders,
+  )
+})
 
 beforeEach(() => {
   getMock = async () => ({

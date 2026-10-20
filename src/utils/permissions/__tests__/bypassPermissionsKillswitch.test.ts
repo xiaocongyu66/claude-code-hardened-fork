@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -24,6 +32,39 @@ function logMockWithCapture() {
 // below, matching the pattern used by src/services/sessionTranscript tests.
 mock.module('src/utils/log.ts', logMockWithCapture)
 mock.module('src/utils/debug.ts', debugMock)
+
+// 本文件的读链契约是「真实 settings/constants/config/growthbook/envUtils +
+// 真实 CLAUDE_CONFIG_DIR 落盘读取」。其他测试文件对这些模块的部分替换
+// mock（poorMode 的 getSettings_DEPRECATED → {poorMode:true}、
+// agentDisplay 的 getEnabledSettingSources → [] 等）会让
+// initialPermissionModeFromCLI 读不到 permissions.disableBypassPermissionsMode，
+// 三门判定静默提前 return（CI run 39422044190 killswitch x3）。
+// 真实面钉定必须用 ?query 后缀新实例：Bun 把 mock.module 提升到静态导入
+// 之前，同 specifier（别名或相对形式）捕获到的都是污染后的注册表条目
+// （实测：别名捕获 → 钉定变身份 mock）。后缀强制全新求值，拿到生产语义。
+type FreshModule = Record<string, unknown>
+const freshBK = async (rel: string): Promise<FreshModule> =>
+  (await import(`${rel}?realBK`)) as FreshModule
+const realSettingsBK = await freshBK('../../../utils/settings/settings.js')
+const realSettingsConstantsBK = await freshBK(
+  '../../../utils/settings/constants.js',
+)
+const realConfigBK = await freshBK('../../../utils/config.js')
+const realGrowthbookBK = await freshBK(
+  '../../../services/analytics/growthbook.js',
+)
+const realEnvUtilsBK = await freshBK('../../../utils/envUtils.js')
+const realChainSnapshotsBK: Array<readonly [string, Record<string, unknown>]> =
+  [
+    ['src/utils/settings/settings.js', { ...realSettingsBK }],
+    ['src/utils/settings/constants.js', { ...realSettingsConstantsBK }],
+    ['src/utils/config.ts', { ...realConfigBK }],
+    ['src/services/analytics/growthbook.js', { ...realGrowthbookBK }],
+    ['src/utils/envUtils.js', { ...realEnvUtilsBK }],
+  ]
+for (const [spec, snapshot] of realChainSnapshotsBK) {
+  mock.module(spec, () => snapshot)
+}
 
 // Settings are loaded from CLAUDE_CONFIG_DIR (`<dir>/settings.json`) with a
 // session cache cleared via resetSettingsCache() — no module mock, so other

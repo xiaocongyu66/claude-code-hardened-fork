@@ -22,9 +22,10 @@ import { join } from 'path'
 // Bun 运行时把 .js 解析回 .ts 源文件——与 src/ 内部导入约定一致）。
 import * as realBootstrapStateModule from 'src/bootstrap/state.js'
 
-function allRealStateExportNames(): string[] {
-  return Object.keys(realBootstrapStateModule)
-}
+const realStateSurface = realBootstrapStateModule as unknown as Record<
+  string | symbol,
+  unknown
+>
 
 export function stateMock() {
   const noop = () => {}
@@ -37,14 +38,10 @@ export function stateMock() {
     switchSession: noop,
     onSessionSwitch: () => () => {},
 
-    // CWD / project
-    getOriginalCwd: () => '/mock/cwd',
-    getSessionProjectDir: () => null,
-    getProjectRoot: () => '/mock/project',
-    getCwdState: () => '/mock/cwd',
-    setCwdState: noop,
-    setOriginalCwd: noop,
-    setProjectRoot: noop,
+    // CWD / project — 真实透传（不在此处伪造路径）：伪造 '/mock/cwd' 会随
+    // last-write-wins 漂进后加载的消费者（如 CdTool.test.ts 在文件体用真实
+    // setter 锚定 cwd），让 not_found/same 判定集体失真。显式覆盖只留给
+    // 与 cwd 无关的纯计数/会话接缝。
 
     // Direct-connect
     getDirectConnectServerUrl: () => undefined,
@@ -107,54 +104,50 @@ export function stateMock() {
     getSdkAgentProgressSummariesEnabled: () => false,
     addSlowOperation: noop,
   }
-  return withCompleteExportSurface(explicit, noop)
+  return withCompleteExportSurface(explicit)
 }
 
 /**
- * ESM link guard: Bun verifies a consumer's named imports against the mock
- * module's OWN properties at file-load time (Proxy `get` traps don't help;
- * a missing name fails the whole worker with "Export named '…' not found").
- * Fill every real src/bootstrap/state.ts export the mock does not explicitly
- * drive with a noop (functions) or undefined (consts) so any test file
- * consuming an unlisted export still resolves — process-wide, in any order.
+ * ESM link guard + real-semantics baseline: Bun verifies a consumer's named
+ * imports against the mock module's OWN properties at file-load time (Proxy
+ * `get` traps don't help; a missing name fails the whole worker with
+ * "Export named '…' not found"). Every real src/bootstrap/state.ts export the
+ * mock does not explicitly drive now keeps its REAL implementation (real
+ * module snapshot passthrough) instead of a noop — a noop fallback poisons
+ * already-bound consumers process-globally with `undefined` returns
+ * (getPlanSlugCache/getModelStrings/getSessionCreatedTeams/getInlinePlugins
+ * 撞出 "undefined is not an object"，CI run 39422044190 全量 33 fail 的主根因).
+ * mock.module 是进程级 last-write-wins，任意顺序注册都安全的前提是基线真实。
  */
 function withCompleteExportSurface(
   explicit: Record<string | symbol, unknown>,
-  noop: () => void,
 ): Record<string | symbol, unknown> {
-  const baseline: Record<string | symbol, unknown> = {}
-  const surface = realBootstrapStateModule as unknown as Record<string, unknown>
-  for (const name of allRealStateExportNames()) {
-    if (name in explicit) continue
-    baseline[name] = typeof surface[name] === 'function' ? noop : undefined
-  }
   return new Proxy(
-    { ...baseline, ...explicit },
+    { ...realStateSurface, ...explicit },
     {
       get(target, prop) {
         if (prop in target) return target[prop]
-        // Unknown state export (new in src/bootstrap/state.ts): safe noop so
-        // consumers never get "undefined is not a function".
-        return noop
+        // Unknown state export (new in src/bootstrap/state.ts): real passthrough
+        // so consumers keep production semantics; undefined only for symbols.
+        return realStateSurface[prop]
       },
     },
   )
 }
 
 /**
- * Functional variant of the state mock: unlike {@link stateMock} (whose
- * setProjectRoot is a noop and getProjectRoot pinned to '/mock/project'),
- * this mirrors the REAL bootstrap/state semantics — cwd/project-root setters
- * are stateful, the session-cron store works, and resetStateForTests resets
- * to safe defaults. Use it in test files whose subjects resolve paths through
- * getProjectRoot() (e.g. cronTasks) AND register it before importing the
- * module under test, so ordering against other files'
- * `mock.module('src/bootstrap/state.ts', stateMock)` registrations cannot
- * poison the paths (CI log /tmp/test1c.log:551-659, 879-921: durable cron
- * writes hit `EACCES: permission denied, mkdir '/mock'`).
+ * Functional variant of the state mock: unlike {@link stateMock} (纯真实基线
+ * + 显式接缝覆盖），this mirrors the REAL bootstrap/state semantics —
+ * cwd/project-root setters are stateful, the session-cron store works, and
+ * resetStateForTests resets to safe defaults. Use it in test files whose
+ * subjects resolve paths through getProjectRoot() (e.g. cronTasks) AND
+ * register it before importing the module under test, so ordering against
+ * other files' bootstrap/state registrations cannot poison the paths
+ * (CI log /tmp/test1c.log:551-659, 879-921: durable cron writes hit
+ * `EACCES: permission denied, mkdir '/mock'`).
  *
- * Unknown state exports fall back to a noop via a Proxy so newly added state
- * exports never break consumers.
+ * Unknown state exports fall back to the real module via the Proxy so newly
+ * added state exports never break consumers.
  */
 export function functionalStateMock() {
   // Default to a temp-dir-rooted cwd/project so a test that writes relative
@@ -281,5 +274,5 @@ export function functionalStateMock() {
 
   // Same ESM link guard as stateMock: complete export-name surface + noop
   // backstop for exports added later (see withCompleteExportSurface).
-  return withCompleteExportSurface(explicit, noop)
+  return withCompleteExportSurface(explicit)
 }

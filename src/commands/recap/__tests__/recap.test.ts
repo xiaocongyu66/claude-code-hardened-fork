@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 
 // Mock bun:bundle before any imports that use feature()
 // Note: in the test environment AWAY_SUMMARY compile-time flag is false, so
@@ -20,11 +28,22 @@ mock.module('src/utils/debug.ts', () => ({
 }))
 
 // Mock settings to avoid filesystem side effects
+import * as realSettingsRecap from 'src/utils/settings/settings.js'
+const realSettingsSnapshotRecap: Record<string, unknown> = {
+  ...realSettingsRecap,
+}
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettingsRecap,
   getCachedSettings: () => ({}),
   getSettings: async () => ({}),
   updateSettings: async () => {},
 }))
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module('src/utils/settings/settings.js', () => realSettingsSnapshotRecap)
+})
 
 // Mock analytics (GrowthBook) — required for isEnabled()
 let gbValue = true

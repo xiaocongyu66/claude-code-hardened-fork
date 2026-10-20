@@ -1,4 +1,12 @@
-import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -11,10 +19,24 @@ mock.module('src/utils/log.ts', logMock)
 mock.module('bun:bundle', () => ({ feature: () => false }))
 
 // settings.js must be mocked to cut bootstrap chain
+import * as realSettingsLoader from 'src/utils/settings/settings.js'
+const realSettingsSnapshotLoader: Record<string, unknown> = {
+  ...realSettingsLoader,
+}
 mock.module('src/utils/settings/settings.js', () => ({
+  ...realSettingsLoader,
   getSettings_DEPRECATED: () => ({}),
   updateSettingsForSource: () => {},
 }))
+// afterAll 还原真实 settings 模块：交错模型下后加载的测试文件（如
+// bypassPermissionsKillswitch.test.ts 直读真实 settings.json）不再吃到
+// 本文件钉死的静态 settings 面（CI run 39422044190 killswitch x3 同族根因）。
+afterAll(() => {
+  mock.module(
+    'src/utils/settings/settings.js',
+    () => realSettingsSnapshotLoader,
+  )
+})
 
 let tmpDir: string
 
