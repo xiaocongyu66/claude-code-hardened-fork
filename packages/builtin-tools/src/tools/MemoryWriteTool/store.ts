@@ -54,7 +54,7 @@ export function isValidMemoryStoreName(store: string): boolean {
 // ── Store allowlist（官方 connected-store 面）───────────────────────────────
 
 /**
- * Session-available store set, official 2.8.4 对位（reverse-284 _ALL.js:5230
+ * Session-available store set, official 2.8.4 对位（reverse-284 _ALL.js:4911
  * `Eit({storeId:e,write:n=!1})`）：store 必须属于本会话已连接的 store 集，
  * 未连接的 id 一律 `refused/unknown_store`（"No memory store with id X is
  * available in this session. Available stores: …"）。CCH 的"已连接集" =

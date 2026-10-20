@@ -33,7 +33,7 @@ export function getMaxTimeoutMs(): number {
 }
 
 /**
- * Clamp a model-supplied timeout (official `Rxo`, reverse-284 _ALL.js:7381):
+ * Clamp a model-supplied timeout (official `Rxo`, reverse-284 _ALL.js byte 7299144 (0648 module-002:206)):
  * `timeout: Math.min(typeof o === "number" && o > 0 ? o : mRe(), W)` —
  * an explicit timeout is an UPPER BOUND to the max, and the
  * BASH_DEFAULT_TIMEOUT_MS env only supplies the value when the model omits

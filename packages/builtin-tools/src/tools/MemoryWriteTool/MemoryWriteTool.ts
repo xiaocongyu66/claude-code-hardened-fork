@@ -131,7 +131,7 @@ export const MemoryWriteTool = buildTool({
   },
   async call(input: Input) {
     try {
-      // 官方 connected-store 面（reverse-284 _ALL.js:5230 Eit）：store 缺省落
+      // 官方 connected-store 面（reverse-284 _ALL.js:4911 Eit）：store 缺省落
       // 项目默认；显式 store 必须在本会话可用集内，否则 refused/unknown_store。
       const resolved = resolveStoreAccess(input.store)
       if (resolved.error !== undefined) {

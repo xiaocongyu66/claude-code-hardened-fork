@@ -79,7 +79,7 @@ export const MemoryListTool = buildTool({
   async call(input: Input) {
     try {
       // 官方 connected-store 面：显式 store 必须在本会话可用集内
-      // （reverse-284 _ALL.js:5230 Eit → refused/unknown_store）。
+      // （reverse-284 _ALL.js:4911 Eit → refused/unknown_store）。
       const resolved = resolveStoreAccess(input.store)
       if (resolved.error !== undefined) {
         return { data: { error: resolved.error } }

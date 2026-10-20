@@ -65,7 +65,7 @@ describe('clampTimeoutMs', () => {
 
   test('explicit timeout below the default is NOT lifted (official upper-bound semantics)', () => {
     cleanEnv()
-    // Official `Rxo` (reverse-284 _ALL.js:7381):
+    // Official `Rxo` (reverse-284 _ALL.js byte 7299144 (0648 module-002:206)):
     // `Math.min(typeof o === "number" && o > 0 ? o : default, max)` —
     // BASH_DEFAULT_TIMEOUT_MS is only the fallback for 0/absent values, never
     // a floor. A deliberate short probe timeout (2s) must not be dragged to
