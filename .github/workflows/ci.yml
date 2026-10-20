@@ -44,7 +44,9 @@ jobs:
           # Tolerate pre-existing flaky tests (Bun mock pollution / order-dependent state).
           # We still require lcov.info to be generated and contain real coverage data.
           set -o pipefail
-          bun test --coverage --coverage-reporter lcov --coverage-dir coverage 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | sed '/^.*\/__tests__\/.*:$/d' | cat -s
+          # Keep the per-file header lines: dropping them (the old sed) made
+          # load-time failures unattributable in the log.
+          bun test --coverage --coverage-reporter lcov --coverage-dir coverage 2>&1 | grep -vE '^\s*(\(pass\)|\(skip\))' | cat -s
           test -s coverage/lcov.info
           grep -q '^SF:' coverage/lcov.info
 
