@@ -86,7 +86,7 @@ describe('MemoryTools (memory_write / memory_list / memory_read)', () => {
     })
 
     test('refuses stores outside the session allowlist (official unknown_store)', async () => {
-      // Official `Eit` (reverse-284 _ALL.js:5230): a store id not in the
+      // Official `Eit` (reverse-284 _ALL.js:4911): a store id not in the
       // session's connected set is refused — the model can no longer invent
       // arbitrary (e.g. cross-project) store names.
       const { MemoryWriteTool } = await import('../MemoryWriteTool.js')
