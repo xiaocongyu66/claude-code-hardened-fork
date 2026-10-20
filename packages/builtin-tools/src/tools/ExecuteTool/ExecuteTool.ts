@@ -21,7 +21,7 @@ import { EXECUTE_TOOL_NAME } from './constants.js'
 import { isDeferredTool } from '../SearchExtraToolsTool/prompt.js'
 
 /**
- * 官方对照（reverse-284 _ALL.js:10321，ToolSearch select 引导文案）：
+ * 官方对照（reverse-284 _ALL.js byte 9239903，ToolSearch select 引导文案）：
  * `. Call ${Ge.name} instead, loading it first with ${Ha} query
  * "select:${Ge.name}" if it is not loaded yet.` / `. Call ${Ge.name} instead.`
  * 官方没有委派包装 —— select 之后模型直呼目标工具名，PreToolUse /
@@ -414,7 +414,7 @@ export const ExecuteTool = buildTool({
 
     // Replay PreToolUse hooks under the TARGET tool's own name with the
     // decomposed input (official has no delegation wrapper — after ToolSearch
-    // select the model calls the tool directly, `_ALL.js:10321` "Call
+    // select the model calls the tool directly, `_ALL.js` byte 9239903 "Call
     // ${Ge.name} instead" — so CCH must re-bind the hook line to the real
     // name here or `PreToolUse:Bash|WebFetch` defenses silently miss the
     // delegated path).
