@@ -706,6 +706,13 @@ class Project {
     }
     this.flushTimer = setTimeout(async () => {
       this.flushTimer = null
+      // Re-check the tombstone window: a timer scheduled *before*
+      // removeMessageByUuid opened the window can fire mid-truncate and cut
+      // the positional re-append. The window opener re-arms the drain in its
+      // `finally`, so silently skipping here is order-safe.
+      if (this.tombstoneWindow) {
+        return
+      }
       this.activeDrain = this.drainWriteQueue()
       await this.activeDrain
       this.activeDrain = null
