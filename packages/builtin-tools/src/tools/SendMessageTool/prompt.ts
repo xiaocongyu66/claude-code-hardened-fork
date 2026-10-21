@@ -33,6 +33,11 @@ Send a message to another agent.
 | \`"researcher"\` | Teammate by name |
 | \`"*"\` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |${udsRow}
 
+Inputs:
+- summary (REQUIRED whenever \`message\` is a plain string): a 5-10 word preview shown in the UI. Omitting it fails validation.
+- to: a teammate name or \`"*"\`. Names containing \`@\` are rejected (they look like cross-session addresses); cross-session targets use the address forms in the table above and only accept plain-text messages.
+- message: plain string, or a structured object for protocol responses (\`shutdown_response\` / \`plan_approval_response\`). Structured messages cannot be broadcast and cannot be sent cross-session.
+
 Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.${udsSection}
 
 ## Protocol responses (legacy)

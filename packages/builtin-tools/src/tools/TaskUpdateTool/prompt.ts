@@ -42,6 +42,10 @@ export const PROMPT = `Use this tool to update a task in the task list.
 
 Status progresses: \`pending\` → \`in_progress\` → \`completed\`
 
+Notes:
+- In swarm mode, setting a task to \`in_progress\` without an owner auto-claims it for you.
+- A \`completed\` hook may reject the transition (its message is returned) — resolve the hook's complaint instead of retrying blindly.
+
 Use \`deleted\` to permanently remove a task.
 
 ## Staleness

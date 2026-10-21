@@ -84,7 +84,14 @@ export const MemoryWriteTool = buildTool({
     return 'Save a markdown document (with name/description/type frontmatter) to the project memory store. Same-path writes overwrite.'
   },
   async prompt() {
-    return 'Write a markdown + frontmatter document into the memory store. Provide a relative .md path; store defaults to the project-scoped store. Existing documents at the same path are overwritten.'
+    return `Write a markdown + frontmatter document into a memory store.
+
+Usage:
+- path: relative .md path matching ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*\\.md$ (no leading slash, no "..", max 8 levels).
+- content: markdown body, max 102400 bytes — a larger write fails with "Content too large (max 102400 bytes)."
+- store: defaults to the project-scoped store. Only writable stores are accepted: an unknown store is refused, and a store that is read-only in this session is refused ("read_only_store"). Writing to the current project store may require user approval.
+- Existing documents at the same path are overwritten.
+- To see which stores exist, load and call MemoryList first (it is a deferred tool: SearchExtraTools "select:memory_list").`
   },
   get inputSchema(): InputSchema {
     return inputSchema()

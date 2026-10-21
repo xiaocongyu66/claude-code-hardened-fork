@@ -107,6 +107,13 @@ Interactive and blocking commands (will hang — this tool runs with -NonInterac
    - Destructive cmdlets (\`Remove-Item\`, \`Stop-Process\`, \`Clear-Content\`, etc.) may prompt for confirmation. Add \`-Confirm:$false\` when you intend the action to proceed. Use \`-Force\` for read-only/hidden items.
    - Never use \`git rebase -i\`, \`git add -i\`, or other commands that open an interactive editor
 
+Command sandbox:
+   - When the sandbox is enabled, commands run inside it by default: filesystem writes and network access outside the allowed directories/hosts are blocked.
+   - Default to the sandbox. Set \`dangerouslyDisableSandbox: true\` only when the user explicitly asks, or a command just failed with evidence of sandbox restrictions ("Access is denied" on paths outside allowed directories, connection failures to non-whitelisted hosts). Retry that one command with the override — it prompts the user for permission. Future commands go back to the sandbox.
+   - If policy enforces the sandbox (override disabled), commands cannot run outside it at all; work with the user to adjust sandbox settings instead.
+   - On Windows, PowerShell commands run unsandboxed (the sandbox applies to POSIX shells only), so no override is needed there.
+   - For temporary files use \`$env:TMPDIR\` (set to the sandbox-writable directory in sandbox mode); do not hardcode \`/tmp\` or \`C:\\Temp\`.
+
 Passing multiline strings (commit messages, file content) to native executables:
    - Use a single-quoted here-string so PowerShell does not expand \`$\` or backticks inside. The closing \`'@\` MUST be at column 0 (no leading whitespace) on its own line — indenting it is a parse error:
 <example>

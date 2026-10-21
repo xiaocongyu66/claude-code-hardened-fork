@@ -44,6 +44,7 @@ NOTE that you should not use this tool if there is only one trivial task to do. 
 - **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
 - **description**: What needs to be done
 - **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
+- **metadata** (optional): Arbitrary structured data attached to the task (visible via TaskGet) — use it for identifiers the work needs later, not for the description itself.
 
 All tasks are created with status \`pending\`.
 

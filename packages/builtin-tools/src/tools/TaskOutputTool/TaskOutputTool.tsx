@@ -200,8 +200,10 @@ export const TaskOutputTool: Tool<InputSchema, TaskOutputToolOutput> = buildTool
 - Returns the task output along with status information
 - Use block=true (default) to wait for task completion
 - Use block=false for non-blocking check of current status
+- timeout (optional, ms): max wait time when blocking; the call returns the current status when it elapses
 - Task IDs can be found using the /tasks command
-- Works with all task types: background shells, async agents, and remote sessions`;
+- Works with all task types: background shells, async agents, and remote sessions
+- Output includes a retrieval status; for background shells the result may carry an \`exit_code\` field — it is only meaningful for \`local_bash\` tasks and is omitted (null) when the process has not exited`;
   },
 
   async validateInput({ task_id }, { getAppState }) {

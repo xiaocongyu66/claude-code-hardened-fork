@@ -96,13 +96,13 @@ const inputSchema = lazySchema(() =>
       'Print only the matched (non-empty) parts of each line instead of the full line (rg -o). Requires output_mode: "content"; context options are ignored when set.',
     ),
     files_without_match: semanticBoolean(z.boolean().optional()).describe(
-      'Invert the file selection: list files that contain NO matches (ugrep -L). Requires output_mode: "count". Mutually exclusive with output_mode: "files_with_matches".',
+      'Invert the file selection: list files that contain NO matches (ugrep -L). Use with output_mode: "count"; mutually exclusive with output_mode: "files_with_matches" (that combination errors) and has no effect in "content" mode.',
     ),
     binary_skip: semanticBoolean(z.boolean().optional()).describe(
       'Skip binary files entirely (probe first 8KiB for NUL bytes) instead of stopping at their first match (ugrep -I). Default: false.',
     ),
     max_columns: semanticNumber(z.number().optional()).describe(
-      'Truncate lines longer than N characters in output (rg --max-columns). Omitted lines are reported as "[Omitted long matching line]". Defaults to 500.',
+      'Truncate lines longer than N BYTES in output (rg --max-columns counts bytes, not characters — CJK lines hit the cap ~3x sooner). Omitted lines are reported as "[Omitted long matching line]". Defaults to 500.',
     ),
   }),
 )

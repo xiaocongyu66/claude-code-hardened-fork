@@ -13,7 +13,9 @@ export const workflowInputSchema = z.object({
   scriptPath: z
     .string()
     .optional()
-    .describe('Absolute path to an existing script file'),
+    .describe(
+      'Path to an existing script file — absolute, or relative to the session cwd',
+    ),
   args: z
     .unknown()
     .optional()
@@ -36,7 +38,7 @@ export const workflowInputSchema = z.object({
     .max(16)
     .optional()
     .describe(
-      'Concurrency cap for agent(). Defaults to 3 (max 16). When the workflow contains heavy parallel/pipeline fan-out, you may confirm the desired concurrency with the user via AskUserQuestion before launching.',
+      'Concurrency cap for agent(). Defaults to 3 (hard ceiling 16). To use any value other than 3 you MUST first ask the user via AskUserQuestion (propose 3/6/9 with 3 recommended) — unless the user already specified a concurrency number in this session.',
     ),
 })
 

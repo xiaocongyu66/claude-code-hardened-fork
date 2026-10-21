@@ -349,6 +349,7 @@ export function getSimplePrompt(): string {
     'If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.',
     'Always quote file paths that contain spaces with double quotes in your command (e.g., cd "path with spaces/file.txt")',
     'Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.',
+    'A sandbox refusal is not bypassable: if a command is refused because the sandbox cannot be provided under policy (unsupported environment or missing dependencies with a strict sandbox setting), `dangerouslyDisableSandbox` does NOT exempt it — report the refusal to the user instead of retrying.',
     `You may specify an optional timeout in milliseconds (up to ${getMaxTimeoutMs()}ms / ${getMaxTimeoutMs() / 60000} minutes). By default, your command will timeout after ${getDefaultTimeoutMs()}ms (${getDefaultTimeoutMs() / 60000} minutes). If you specify a timeout above the maximum it is silently capped at the maximum (not rejected); setting it to 0 or a negative value falls back to the default.`,
     ...(backgroundNote !== null ? [backgroundNote] : []),
     'When issuing multiple commands:',

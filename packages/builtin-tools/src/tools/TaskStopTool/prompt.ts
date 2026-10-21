@@ -1,8 +1,16 @@
 export const TASK_STOP_TOOL_NAME = 'TaskStop'
 
-export const DESCRIPTION = `
-- Stops a running background task by its ID
-- Takes a task_id parameter identifying the task to stop
-- Returns a success or failure status
-- Use this tool when you need to terminate a long-running task
-`
+export const DESCRIPTION = `Stops a running background task by its ID.
+
+## When to use
+- A long-running task is no longer needed (user cancelled, superseded, or clearly stuck).
+- Do NOT use it to "refresh" a task, or on a task you just started and expect to finish.
+
+## Inputs
+- task_id (required): the task ID. Task IDs come from the task tool results, TaskList, and the /tasks command.
+
+## Behavior
+- Only tasks in the \`running\` state can be stopped. A task that is pending, completed, failed, killed, or otherwise not running is rejected (errorCode 3) — check TaskList/TaskGet first if unsure.
+- An unknown task_id is rejected (errorCode 1).
+- Task types that do not support stopping raise an \`unsupported_type\` error.
+- Returns a success or failure status; stopping is not instantaneous — the task receives a stop signal and its final state is reported in the tool result.`

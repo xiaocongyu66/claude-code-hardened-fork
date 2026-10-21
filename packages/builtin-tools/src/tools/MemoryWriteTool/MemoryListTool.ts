@@ -68,7 +68,11 @@ export const MemoryListTool = buildTool({
     return 'List memory documents in a store with their frontmatter name, description and type.'
   },
   async prompt() {
-    return 'List saved memory documents (path, name, description, type) from the project memory store. Store defaults to the project-scoped store.'
+    return `List saved memory documents (path, name, description, type) from a memory store.
+
+Usage:
+- store: defaults to the project-scoped store.
+- Results are capped at 1024 documents — if the list is truncated, read documents by path instead.`
   },
   get inputSchema(): InputSchema {
     return inputSchema()
