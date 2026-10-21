@@ -347,7 +347,7 @@ export const ExecuteTool = buildTool({
         },
         newMessages: [
           createUserMessage({
-            content: `工具 "${input.tool_name}" 当前不可用：Remote Control 未连接。`,
+            content: `Tool "${input.tool_name}" is not enabled in this session, so it cannot run. Continue without it, or tell the user what was needed.`,
           }),
         ],
       }

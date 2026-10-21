@@ -6,7 +6,9 @@ export { SEARCH_EXTRA_TOOLS_TOOL_NAME } from './constants.js'
 
 import { SEARCH_EXTRA_TOOLS_TOOL_NAME } from './constants.js'
 
-const PROMPT_HEAD = `Search for deferred tools by name or keyword. LOW PRIORITY — only use this tool when no core tool can accomplish the task. Core tools (Read, Edit, Write, Bash, Glob, Grep, Agent, WebFetch, WebSearch, Skill) are always available and should be used directly. This tool is for discovering additional capabilities like MCP tools, cron scheduling, worktree management, agent teams (TeamCreate, TeamDelete, SendMessage), etc.
+const PROMPT_HEAD = `Fetches full schema definitions for deferred tools so they can be called.
+
+LOW PRIORITY — only use this tool when no core tool can accomplish the task. Core tools (${[...CORE_TOOLS].join(', ')}) are loaded when enabled in this session and should be used directly. If a name in that list is NOT in your actual tool list, it is unavailable in this session — do not call it or search for it. This tool is for discovering additional capabilities like MCP tools, cron scheduling, worktree management, agent teams (TeamCreate, TeamDelete, SendMessage), etc.
 
 `
 
@@ -23,41 +25,32 @@ function getToolLocationHint(): string {
     : 'Deferred tools appear by name in <available-deferred-tools> messages.'
 }
 
-const PROMPT_TAIL = ` Returns matching tool names.
+const PROMPT_TAIL = ` Until fetched, only the name is known — there is no parameter schema, so it cannot be invoked correctly (ExecuteExtraTool rejects it as "has not been discovered yet"). When any instruction, system reminder, or other tool's description names a deferred tool, fetch it with query "select:<name>" before calling it.
 
-## Two-step workflow (MUST follow exactly)
+This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block.
 
-Deferred tools CANNOT be called directly. You MUST use this two-step pattern:
-
-Step 1 — Search: Call this tool (SearchExtraTools) to discover the target tool.
-  Input: {"query": "select:CronCreate"}
-  Response: "Found 1 deferred tool(s): CronCreate. Use ExecuteExtraTool with {"tool_name": "<name>", "params": {...}} to invoke."
-
-Step 2 — Execute: Call ExecuteExtraTool to run the discovered tool.
-  Input: {"tool_name": "CronCreate", "params": {"schedule": "*/5 * * * *", "prompt": "check the deploy"}}
-  Response: the actual tool result.
-
-## Example: user asks "schedule a cron to check deploy every 5 minutes"
-
-1. SearchExtraTools({"query": "select:CronCreate"})
-   → Response: Found deferred tool CronCreate
-2. ExecuteExtraTool({"tool_name": "CronCreate", "params": {"schedule": "*/5 * * * *", "prompt": "check the deploy"}})
-   → Response: Cron job created successfully
-
-If you don't know the exact tool name, use keyword search first:
-1. SearchExtraTools({"query": "cron schedule"})
-   → Response: Found deferred tool(s): CronCreate
-2. ExecuteExtraTool({"tool_name": "CronCreate", "params": {...}})
+Result format: each matched tool appears as one <function>{"description": "...", "name": "...", "parameters": {...}}</function> line inside the <functions> block — the same encoding as the tool list at the top of this prompt. Read the exact parameter names from it; never guess.
 
 ## Query forms
-- "select:CronCreate" — exact tool name (fastest, preferred when you know the name from <available-deferred-tools>)
+- "select:CronCreate" — fetch these exact tools by name (fastest)
 - "select:CronCreate,CronList" — comma-separated multi-select
-- "discover:schedule cron job" — returns tool name + description + schema without loading. Use to understand a tool before calling it.
 - "notebook jupyter" — keyword search, up to max_results best matches
 - "+slack send" — require "slack" in the name, rank by remaining terms
+- "discover:schedule cron job" — CCH extension: keyword search that also returns the complete schemas (same payload as select:)
+
+## Two-step invocation (CCH architecture)
+
+Deferred tools are not in the model's tool list, so they are invoked through ExecuteExtraTool — a CCH architectural difference from official Claude Code, where a fetched tool is called directly.
+
+Step 1 — Fetch: SearchExtraTools({"query": "select:CronCreate"}) → <functions> block with the full schema.
+Step 2 — Execute: ExecuteExtraTool({"tool_name": "CronCreate", "params": {...}}) using the parameter names from the schema.
+
+Example — "schedule a cron to check deploy every 5 minutes":
+1. SearchExtraTools({"query": "select:CronCreate"}) → schema shows params: cron, prompt, recurring, durable
+2. ExecuteExtraTool({"tool_name": "CronCreate", "params": {"cron": "*/5 * * * *", "prompt": "check the deploy"}})
 
 ## Failure policy
-If ExecuteExtraTool fails, do NOT re-search for the same tool — it will loop. Stop and tell the user what failed.`
+If ExecuteExtraTool reports the tool is not found, call this tool with query "select:<name>" first (that loads its schema), then retry the ExecuteExtraTool call. Do not retry with guessed parameters — fetch the schema and use its exact names.`
 
 /**
  * Check if a tool should be deferred (requires SearchExtraTools to load).

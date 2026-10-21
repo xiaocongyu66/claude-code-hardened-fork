@@ -14,7 +14,9 @@ import {
 } from 'src/Tool.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { lazySchema } from 'src/utils/lazySchema.js'
+import { jsonStringify } from 'src/utils/slowOperations.js'
 import { escapeRegExp } from 'src/utils/stringUtils.js'
+import { zodToJsonSchema } from 'src/utils/zodToJsonSchema.js'
 import { isSearchExtraToolsEnabledOptimistic } from 'src/utils/searchExtraTools.js'
 import {
   getPrompt,
@@ -58,6 +60,22 @@ export const outputSchema = lazySchema(() =>
     pending_mcp_servers: z.array(z.string()).optional(),
     /** Matches that are already loaded (core tools) and can be called directly. */
     already_loaded: z.array(z.string()).optional(),
+    /**
+     * Complete schema definitions for selected deferred tools — the official
+     * `select:` payload. Official 2.8.4 (_ALL.js byte 7232009): the tool
+     * "returns the matched tools' complete JSONSchema definitions inside a
+     * <functions> block. Once a tool's schema appears in that result, it is
+     * callable exactly like any tool defined at the top of the prompt."
+     */
+    schemas: z
+      .array(
+        z.object({
+          name: z.string(),
+          description: z.string(),
+          parameters: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -131,6 +149,7 @@ function buildSearchResult(
   totalDeferredTools: number,
   pendingMcpServers?: string[],
   alreadyLoaded?: string[],
+  schemas?: Output['schemas'],
 ): { data: Output } {
   return {
     data: {
@@ -143,8 +162,51 @@ function buildSearchResult(
       ...(alreadyLoaded && alreadyLoaded.length > 0
         ? { already_loaded: alreadyLoaded }
         : {}),
+      ...(schemas && schemas.length > 0 ? { schemas } : {}),
     },
   }
+}
+
+/**
+ * Build the official `<functions>` payload entry for one tool: name,
+ * description (the tool's prompt text) and the complete JSON Schema of its
+ * input. Official select: returns exactly these three fields per tool.
+ */
+/** Cap per-tool description inside <functions>: the parameter schema is what
+ * the model needs; an unbounded prompt text (Bash is ~10-22KB) would push a
+ * multi-select result past the 50k tool-result persistence threshold and get
+ * the whole payload replaced by a 2KB preview. */
+const SCHEMA_ENTRY_DESCRIPTION_MAX = 2_000
+
+async function buildSchemaEntry(
+  tool: Tool,
+  tools: Tools,
+): Promise<{
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+}> {
+  const fullDescription = await getToolDescriptionMemoized(tool.name, tools)
+  const description =
+    fullDescription.length > SCHEMA_ENTRY_DESCRIPTION_MAX
+      ? `${fullDescription.slice(0, SCHEMA_ENTRY_DESCRIPTION_MAX)}…`
+      : fullDescription
+  let parameters: Record<string, unknown>
+  if ('inputJSONSchema' in tool && tool.inputJSONSchema) {
+    parameters = tool.inputJSONSchema as unknown as Record<string, unknown>
+  } else {
+    try {
+      parameters = zodToJsonSchema(tool.inputSchema as never) as Record<
+        string,
+        unknown
+      >
+    } catch {
+      // Not a zod schema (test doubles, exotic tool shapes): degrade to an
+      // opaque object schema instead of failing the whole select call.
+      parameters = { type: 'object' }
+    }
+  }
+  return { name: tool.name, description, parameters }
 }
 
 /**
@@ -334,7 +396,9 @@ export const SearchExtraToolsTool = buildTool({
     return true
   },
   name: SEARCH_EXTRA_TOOLS_TOOL_NAME,
-  maxResultSizeChars: 100_000,
+  // Effective persistence threshold is min(declared, 50_000); declaring more
+  // is misleading. Descriptions are capped (2k each) so 5 tools stay under it.
+  maxResultSizeChars: 50_000,
   async description() {
     return getPrompt()
   },
@@ -390,6 +454,7 @@ export const SearchExtraToolsTool = buildTool({
         .filter(Boolean)
 
       const found: string[] = []
+      const foundTools: Tool[] = []
       const alreadyLoaded: string[] = []
       const missing: string[] = []
       for (const toolName of requested) {
@@ -398,6 +463,7 @@ export const SearchExtraToolsTool = buildTool({
         if (fullMatch) {
           if (!found.includes(fullMatch.name)) {
             found.push(fullMatch.name)
+            foundTools.push(fullMatch)
             if (!deferredMatch) {
               alreadyLoaded.push(fullMatch.name)
             }
@@ -429,12 +495,21 @@ export const SearchExtraToolsTool = buildTool({
         logForDebugging(`SearchExtraToolsTool: selected ${found.join(', ')}`)
       }
       logSearchOutcome(found, 'select')
+      // Official semantics: select: returns the complete JSONSchema for each
+      // matched tool so it becomes callable like a top-level tool. Core tools
+      // already in the list need no schema.
+      const schemas = await Promise.all(
+        foundTools
+          .filter(t => deferredTools.includes(t))
+          .map(t => buildSchemaEntry(t, tools)),
+      )
       return buildSearchResult(
         found,
         query,
         deferredTools.length,
         undefined,
         alreadyLoaded.length > 0 ? alreadyLoaded : undefined,
+        schemas,
       )
     }
 
@@ -446,25 +521,23 @@ export const SearchExtraToolsTool = buildTool({
       const discoverQuery = discoverMatch[1]!.trim()
       const index = await getToolIndex(deferredTools)
       const tfIdfResults = searchTools(discoverQuery, index, max_results)
-      const textResults = tfIdfResults.map(r => {
-        let line = `**${r.name}** (score: ${r.score.toFixed(2)})\n${r.description}`
-        if (r.inputSchema) {
-          line += `\nSchema: ${JSON.stringify(r.inputSchema)}`
-        }
-        return line
-      })
-      const text =
-        textResults.length > 0
-          ? `Found ${textResults.length} tools:\n${textResults.join('\n\n')}`
-          : 'No matching deferred tools found'
-      logSearchOutcome(
-        tfIdfResults.map(r => r.name),
-        'keyword',
+      const matches = tfIdfResults.map(r => r.name)
+      logSearchOutcome(matches, 'keyword')
+      // CCH extension form — same payload as select: (names + complete
+      // schemas) so "discover: then call" needs no second round-trip.
+      const matchedTools = matches
+        .map(n => findToolByName(deferredTools, n))
+        .filter((t): t is Tool => t !== undefined)
+      const schemas = await Promise.all(
+        matchedTools.map(t => buildSchemaEntry(t, tools)),
       )
       return buildSearchResult(
-        tfIdfResults.map(r => r.name),
+        matches,
         query,
         deferredTools.length,
+        undefined,
+        undefined,
+        schemas,
       )
     }
 
@@ -520,12 +593,23 @@ export const SearchExtraToolsTool = buildTool({
       )
     }
 
+    // Official semantics: a keyword query ALSO returns the matched tools'
+    // complete JSONSchema — not just their names.
+    const deferredMatchedTools = matches
+      .filter(name => deferredToolNames.has(name))
+      .map(name => findToolByName(deferredTools, name))
+      .filter((t): t is Tool => t !== undefined)
+    const keywordSchemas = await Promise.all(
+      deferredMatchedTools.map(t => buildSchemaEntry(t, tools)),
+    )
+
     return buildSearchResult(
       matches,
       query,
       deferredTools.length,
       undefined,
       alreadyLoaded.length > 0 ? alreadyLoaded : undefined,
+      keywordSchemas,
     )
   },
   renderToolUseMessage(input: Partial<{ query: string; max_results: number }>) {
@@ -589,6 +673,21 @@ export const SearchExtraToolsTool = buildTool({
         `Found ${deferredNames.length} deferred tool(s): ${deferredNames.join(', ')}.` +
           `\nUse ExecuteExtraTool with {"tool_name": "<name>", "params": {...}} to invoke any of these deferred tools.`,
       )
+    }
+
+    // Official <functions> payload: one <function>{description,name,parameters}
+    // line per selected tool — the same encoding as the top-of-prompt tool
+    // list, so the model can read exact parameter names instead of guessing.
+    if (content.schemas && content.schemas.length > 0) {
+      const lines = content.schemas.map(
+        s =>
+          `<function>${jsonStringify({
+            description: s.description,
+            name: s.name,
+            parameters: s.parameters,
+          })}</function>`,
+      )
+      parts.push(`<functions>\n${lines.join('\n')}\n</functions>`)
     }
 
     const text = parts.join('\n')
