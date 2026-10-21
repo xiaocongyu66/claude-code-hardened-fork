@@ -1491,6 +1491,9 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       return {
         client_id: storedInfo.clientId,
         client_secret: storedInfo.clientSecret,
+        // 1.32.x binds credentials to the issuing AS; dropping this falls back
+        // to the unbound legacy path and defeats the advisory fix.
+        issuer: storedInfo.issuer,
       }
     }
 
@@ -1527,6 +1530,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           serverUrl: this.serverConfig.url,
           clientId: clientInformation.client_id,
           clientSecret: clientInformation.client_secret,
+          issuer: clientInformation.issuer,
           // Provide default values for required fields if not present
           accessToken: existingData.mcpOAuth?.[serverKey]?.accessToken || '',
           expiresAt: existingData.mcpOAuth?.[serverKey]?.expiresAt || 0,
@@ -1691,6 +1695,8 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       expires_in: expiresIn,
       scope: tokenData.scope,
       token_type: 'Bearer',
+      // Stamped by the SDK at issue time; required for issuer binding.
+      issuer: tokenData.issuer,
     }
 
     logMCPDebug(this.serverName, `Returning tokens`)
@@ -1723,6 +1729,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           refreshToken: tokens.refresh_token,
           expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
           scope: tokens.scope,
+          issuer: tokens.issuer,
         },
       },
     }
