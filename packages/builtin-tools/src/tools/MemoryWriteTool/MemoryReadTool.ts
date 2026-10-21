@@ -52,7 +52,9 @@ export const MemoryReadTool = buildTool({
   name: MEMORY_READ_TOOL_NAME,
   searchHint: 'read one saved memory document by path',
   userFacingName: () => 'Memory Read',
-  maxResultSizeChars: MAX_MEMORY_READ_BYTES,
+  // Effective persistence threshold is min(declared, 50_000) — declaring the
+  // raw 50KB read cap would exceed it and persist full reads to disk.
+  maxResultSizeChars: Math.min(MAX_MEMORY_READ_BYTES, 50_000),
   isReadOnly() {
     return true
   },
@@ -82,7 +84,12 @@ export const MemoryReadTool = buildTool({
     return 'Read a single memory document (frontmatter + markdown body) from the project memory store.'
   },
   async prompt() {
-    return 'Read one memory document by relative .md path. Store defaults to the project-scoped store. Content is capped at 50KB and flagged truncated beyond that.'
+    return `Read one memory document by relative .md path.
+
+Usage:
+- store: defaults to the project-scoped store. Only stores in the session allowlist are readable; an unknown store is refused ("Memory store ... not found").
+- Content is capped at 50KB and flagged truncated beyond that.
+- To see which documents exist, load and call MemoryList first (it is a deferred tool: SearchExtraTools "select:memory_list").`
   },
   get inputSchema(): InputSchema {
     return inputSchema()
@@ -106,6 +113,18 @@ export const MemoryReadTool = buildTool({
         target = resolved.target
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e)
+        // A missing STORE and a missing DOCUMENT both surface as "... not
+        // found."; keep them distinct so the model doesn't go hunting for a
+        // document inside a store that doesn't exist.
+        if (message.startsWith('Memory store')) {
+          return {
+            data: {
+              store,
+              path: input.path,
+              error: message,
+            },
+          }
+        }
         if (message.includes('not found')) {
           return {
             data: {

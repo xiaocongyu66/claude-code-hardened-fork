@@ -1039,6 +1039,16 @@ async function* runShellCommand({
   void
 > {
   const { command, description, timeout, run_in_background } = input;
+
+  // Load-bearing guard: executeShellCommandsInPrompt (src/utils/promptShellExecution.ts)
+  // calls BashTool.call() directly, bypassing validateInput. Without this,
+  // a strict/closed sandbox policy that cannot provide the sandbox would
+  // run the command bare. Mirrors PowerShellTool.call's guard.
+  const sandboxDecision = evaluateSandboxDecision(input);
+  if (sandboxDecision.mode === 'refuse' && sandboxDecision.reason) {
+    throw new Error(SANDBOX_REFUSAL_MESSAGES[sandboxDecision.reason]);
+  }
+
   // 0/negative/undefined → default; above-max → clamped to max (parity with
   // PowerShellTool.tsx:807; the raw `timeout` is still used for the no-op
   // telemetry gate below).
