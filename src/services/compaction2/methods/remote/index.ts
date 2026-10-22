@@ -298,7 +298,7 @@ function isToolResultMessage(message: Message | undefined): boolean {
   if (!Array.isArray(content)) return false
   return content.some(block => {
     if (!block || typeof block !== 'object') return false
-    return (block as Record<string, unknown>).type === 'tool_result'
+    return (block as unknown as Record<string, unknown>).type === 'tool_result'
   })
 }
 

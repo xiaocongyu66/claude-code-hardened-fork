@@ -128,7 +128,9 @@ export function isShapeName(value: unknown): value is string {
 function shape(name: string, frameSize: number): Shape {
   const base = SHAPES[name]
   if (!base) throw new Error(`unknown snapcompact shape: ${name}`)
-  return { ...base, frameSize }
+  // The family profile replaces this estimate when it resolves; the shape
+  // itself only needs a conservative default.
+  return { ...base, frameSize, frameTokenEstimate: 5_024 }
 }
 
 /**

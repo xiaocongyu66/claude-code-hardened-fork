@@ -51,7 +51,10 @@ describe('budget and selection', () => {
       600,
       message => tokens[message.uuid] ?? 0,
     )
-    expect(prepared.messages.map(message => message.uuid)).toEqual(['e2', 'e3'])
+    expect(prepared.messages.map(message => String(message.uuid))).toEqual([
+      'e2',
+      'e3',
+    ])
     expect(prepared.totalTokens).toBe(500)
   })
 

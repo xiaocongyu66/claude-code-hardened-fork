@@ -1,4 +1,4 @@
-import type { CompactionResult } from '../../compact/compact.js'
+import type { CompactionResult } from '../compact/compact.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import type { Message } from '../../types/message.js'
 import type { ToolUseContext } from '../../Tool.js'
@@ -663,20 +663,20 @@ function defaultEstimateEntryTokens(entry: EntryView, model?: string): number {
 }
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-function loadCompact(): typeof import('../../compact/compact.js') {
-  return require('../../compact/compact.js') as typeof import('../../compact/compact.js')
+function loadCompact(): typeof import('../compact/compact.js') {
+  return require('../compact/compact.js') as typeof import('../compact/compact.js')
 }
 
-function loadAutoCompact(): typeof import('../../compact/autoCompact.js') {
-  return require('../../compact/autoCompact.js') as typeof import('../../compact/autoCompact.js')
+function loadAutoCompact(): typeof import('../compact/autoCompact.js') {
+  return require('../compact/autoCompact.js') as typeof import('../compact/autoCompact.js')
 }
 
-function loadPostCompactCleanup(): typeof import('../../compact/postCompactCleanup.js') {
-  return require('../../compact/postCompactCleanup.js') as typeof import('../../compact/postCompactCleanup.js')
+function loadPostCompactCleanup(): typeof import('../compact/postCompactCleanup.js') {
+  return require('../compact/postCompactCleanup.js') as typeof import('../compact/postCompactCleanup.js')
 }
 
-function loadSessionMemory(): typeof import('../../SessionMemory/sessionMemoryUtils.js') {
-  return require('../../SessionMemory/sessionMemoryUtils.js') as typeof import('../../SessionMemory/sessionMemoryUtils.js')
+function loadSessionMemory(): typeof import('../SessionMemory/sessionMemoryUtils.js') {
+  return require('../SessionMemory/sessionMemoryUtils.js') as typeof import('../SessionMemory/sessionMemoryUtils.js')
 }
 
 function loadTokens(): typeof import('../../utils/tokens.js') {
