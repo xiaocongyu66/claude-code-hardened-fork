@@ -3956,13 +3956,27 @@ You have exited auto mode. The user may now want to interact more directly. You 
       // For running tasks, warn against spawning a duplicate — this attachment
       // is only emitted post-compaction, where the original spawn message is gone.
       if (attachment.status === 'running') {
-        const parts = [
-          `Background agent "${attachment.description}" (${attachment.taskId}) is still running.`,
-        ]
+        const isShell = attachment.taskType === 'local_bash'
+        const parts = isShell
+          ? [
+              `Background shell ${attachment.taskId} ("${attachment.description}") is still running.`,
+            ]
+          : [
+              `Background agent "${attachment.description}" (${attachment.taskId}) is still running.`,
+            ]
         if (attachment.deltaSummary) {
           parts.push(`Progress: ${attachment.deltaSummary}`)
         }
-        if (attachment.outputFilePath) {
+        if (isShell) {
+          parts.push(
+            'Do not start it again; to restart it, stop it with TaskStop first.',
+          )
+          if (attachment.outputFilePath) {
+            parts.push(
+              `You can read its output at ${attachment.outputFilePath}.`,
+            )
+          }
+        } else if (attachment.outputFilePath) {
           parts.push(
             `Do NOT spawn a duplicate. You will be notified when it completes. You can read partial output at ${attachment.outputFilePath} or send it a message with ${SEND_MESSAGE_TOOL_NAME}.`,
           )
