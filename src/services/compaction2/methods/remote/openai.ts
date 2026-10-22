@@ -207,14 +207,18 @@ function resolveOpenAiBase(baseUrl: string | undefined): string {
   return raw.replace(/\/+$/, '')
 }
 
-export function resolveOpenAiCompactEndpoint(baseUrl: string | undefined): string {
+export function resolveOpenAiCompactEndpoint(
+  baseUrl: string | undefined,
+): string {
   const base = resolveOpenAiBase(baseUrl)
   return base.endsWith('/v1')
     ? `${base}/responses/compact`
     : `${base}/v1/responses/compact`
 }
 
-export function resolveOpenAiResponsesEndpoint(baseUrl: string | undefined): string {
+export function resolveOpenAiResponsesEndpoint(
+  baseUrl: string | undefined,
+): string {
   const base = resolveOpenAiBase(baseUrl)
   return base.endsWith('/v1') ? `${base}/responses` : `${base}/v1/responses`
 }
@@ -234,9 +238,7 @@ function shouldKeepV1OutputItem(item: Record<string, unknown>): boolean {
   return item.role === 'assistant' || item.role === 'user'
 }
 
-function isCompactionItem(
-  item: Record<string, unknown>,
-): boolean {
+function isCompactionItem(item: Record<string, unknown>): boolean {
   if (item.type === 'compaction') {
     return typeof item.encrypted_content === 'string'
   }
@@ -387,9 +389,7 @@ export function parseOpenAiCompactionSse(
   return events
 }
 
-function parseUsage(
-  event: Record<string, unknown>,
-): OpenAiV2Usage | undefined {
+function parseUsage(event: Record<string, unknown>): OpenAiV2Usage | undefined {
   const response = recordOf(event.response)
   const usage = recordOf(response?.usage)
   if (!usage) return undefined
@@ -464,7 +464,9 @@ export function collectOpenAiCompactionV2Events(
 }
 
 /** Accept either a raw SSE body or a non-streamed Responses JSON body. */
-export function collectOpenAiCompactionV2Body(text: string): OpenAiV2Collection {
+export function collectOpenAiCompactionV2Body(
+  text: string,
+): OpenAiV2Collection {
   const trimmed = text.trim()
   if (trimmed.startsWith('{')) {
     const body = recordOf(JSON.parse(trimmed) as unknown)
@@ -511,10 +513,7 @@ function itemTokenCount(item: Record<string, unknown>): number {
     if (!record) continue
     if (record.type === 'input_image') {
       tokens += IMAGE_TOKEN_ESTIMATE
-    } else if (
-      record.type === 'input_text' ||
-      record.type === 'output_text'
-    ) {
+    } else if (record.type === 'input_text' || record.type === 'output_text') {
       tokens += approxTokenCount(
         typeof record.text === 'string' ? record.text : '',
       )

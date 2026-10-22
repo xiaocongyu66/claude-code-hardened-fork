@@ -186,18 +186,20 @@ describe('V1 lane', () => {
   test('posts /responses/compact and keeps replacement history', async () => {
     const calls: Array<{ url: string; body: unknown }> = []
     const result = await runOpenAiCompactionLane(
-      laneRequest([user('u1', 'hello')], async (url, init) => {
-        calls.push({
-          url,
-          body: init.body ? JSON.parse(init.body as string) : undefined,
-        })
-        return new Response(v1Response, { status: 200 })
-      }, 'v1'),
+      laneRequest(
+        [user('u1', 'hello')],
+        async (url, init) => {
+          calls.push({
+            url,
+            body: init.body ? JSON.parse(init.body as string) : undefined,
+          })
+          return new Response(v1Response, { status: 200 })
+        },
+        'v1',
+      ),
     )
     expect('summary' in result).toBe(true)
-    expect(calls[0]?.url).toBe(
-      'https://api.openai.com/v1/responses/compact',
-    )
+    expect(calls[0]?.url).toBe('https://api.openai.com/v1/responses/compact')
     expect((calls[0]?.body as { input: unknown[] }).input).toHaveLength(1)
     if (!('preserveData' in result)) return
     const preserved = getPreservedOpenAiRemoteCompactionData(
@@ -238,10 +240,14 @@ describe('V2 streaming lane', () => {
   test('posts the trailing compaction_trigger and stores v2 history', async () => {
     let seen: Record<string, unknown> | undefined
     const result = await runOpenAiCompactionLane(
-      laneRequest([user('u1', 'hello')], async (_url, init) => {
-        seen = JSON.parse(init.body as string) as Record<string, unknown>
-        return new Response(v2Sse, { status: 200 })
-      }, 'v2'),
+      laneRequest(
+        [user('u1', 'hello')],
+        async (_url, init) => {
+          seen = JSON.parse(init.body as string) as Record<string, unknown>
+          return new Response(v2Sse, { status: 200 })
+        },
+        'v2',
+      ),
     )
     expect(seen?.stream).toBe(true)
     expect(seen?.store).toBe(false)
@@ -257,8 +263,16 @@ describe('V2 streaming lane', () => {
   test('retains newest user messages within the budget', () => {
     const longText = 'x'.repeat(100)
     const input = [
-      { type: 'message', role: 'user', content: [{ type: 'input_text', text: longText }] },
-      { type: 'message', role: 'user', content: [{ type: 'input_text', text: longText }] },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: longText }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: longText }],
+      },
       { type: 'function_call', call_id: 'c1', name: 'Read', arguments: '{}' },
     ]
     const { replacementHistory } = buildOpenAiV2ReplacementHistory(

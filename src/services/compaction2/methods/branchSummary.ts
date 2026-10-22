@@ -305,7 +305,8 @@ export function formatFileOperations(
   return output.join('\n')
 }
 
-const LEGACY_FILE_TAGS = /<(?:files|read-files|modified-files)>[\s\S]*?<\/(?:files|read-files|modified-files)>/g
+const LEGACY_FILE_TAGS =
+  /<(?:files|read-files|modified-files)>[\s\S]*?<\/(?:files|read-files|modified-files)>/g
 
 /** Replace any stale file list and append the current one. */
 export function upsertFileOperations(

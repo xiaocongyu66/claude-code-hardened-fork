@@ -184,9 +184,7 @@ describe('remote method run', () => {
     expect(outcome.cutPoint.tokensBefore).toBe(300)
     expect(outcome.preserveData?.openaiRemoteCompaction).toBeDefined()
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe(
-      'https://api.openai.com/v1/responses/compact',
-    )
+    expect(calls[0]?.url).toBe('https://api.openai.com/v1/responses/compact')
   })
 
   test('runs the Anthropic lane and persists the signed block', async () => {

@@ -46,13 +46,12 @@ describe('budget and selection', () => {
       { id: 'e3', kind: 'message', message: user('e3', 'three') },
     ]
     const tokens: Record<string, number> = { e1: 500, e2: 300, e3: 200 }
-    const prepared = prepareBranchEntries(entries, 600, message =>
-      tokens[message.uuid] ?? 0,
+    const prepared = prepareBranchEntries(
+      entries,
+      600,
+      message => tokens[message.uuid] ?? 0,
     )
-    expect(prepared.messages.map(message => message.uuid)).toEqual([
-      'e2',
-      'e3',
-    ])
+    expect(prepared.messages.map(message => message.uuid)).toEqual(['e2', 'e3'])
     expect(prepared.totalTokens).toBe(500)
   })
 
@@ -66,8 +65,10 @@ describe('budget and selection', () => {
       { id: 'e2', kind: 'message', message: user('e2', 'two') },
     ]
     const tokens: Record<string, number> = { c1: 600, e2: 100 }
-    const prepared = prepareBranchEntries(entries, 650, message =>
-      tokens[message.uuid] ?? 0,
+    const prepared = prepareBranchEntries(
+      entries,
+      650,
+      message => tokens[message.uuid] ?? 0,
     )
     expect(prepared.messages).toHaveLength(2)
     expect(prepared.totalTokens).toBe(700)
@@ -96,15 +97,30 @@ describe('file operations', () => {
     const ops = createFileOps()
     extractFileOpsFromMessage(
       assistant('a1', [
-        { type: 'tool_use', id: '1', name: 'Read', input: { file_path: '/a.ts' } },
+        {
+          type: 'tool_use',
+          id: '1',
+          name: 'Read',
+          input: { file_path: '/a.ts' },
+        },
         {
           type: 'tool_use',
           id: '2',
           name: 'Read',
           input: { file_path: '/b.ts:1-5' },
         },
-        { type: 'tool_use', id: '3', name: 'Edit', input: { file_path: '/b.ts' } },
-        { type: 'tool_use', id: '4', name: 'Write', input: { file_path: '/c.ts' } },
+        {
+          type: 'tool_use',
+          id: '3',
+          name: 'Edit',
+          input: { file_path: '/b.ts' },
+        },
+        {
+          type: 'tool_use',
+          id: '4',
+          name: 'Write',
+          input: { file_path: '/c.ts' },
+        },
       ]),
       ops,
     )

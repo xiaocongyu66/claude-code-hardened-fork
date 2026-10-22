@@ -221,9 +221,11 @@ export function isRemoteMethodAvailable(
  * `settings.keepRecentTokens` intact, never splitting a tool result from its
  * assistant tool call.
  */
-export function computeRemoteCut(
-  ctx: CompactionContext,
-): { cutPoint: CutPoint; kept: Message[]; tokensAfter: number } {
+export function computeRemoteCut(ctx: CompactionContext): {
+  cutPoint: CutPoint
+  kept: Message[]
+  tokensAfter: number
+} {
   const messages = ctx.messages
   const keepRecent = Math.max(0, ctx.settings.keepRecentTokens)
   let index = messages.length
@@ -236,7 +238,11 @@ export function computeRemoteCut(
       index = i
     }
   }
-  while (index > 0 && index < messages.length && isToolResultMessage(messages[index])) {
+  while (
+    index > 0 &&
+    index < messages.length &&
+    isToolResultMessage(messages[index])
+  ) {
     index--
   }
 

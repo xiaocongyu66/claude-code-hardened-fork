@@ -213,7 +213,10 @@ export function toAnthropicMessages(
           break
         default:
           // Unknown block types cannot be replayed safely.
-          return { messages: [], unsupported: 'anthropic-unsupported-content-block' }
+          return {
+            messages: [],
+            unsupported: 'anthropic-unsupported-content-block',
+          }
       }
     }
     if (blocks.length > 0) converted.push({ role, content: blocks })
@@ -287,7 +290,10 @@ function parseCompactionBlock(
   if (typeof candidate.content !== 'string' || candidate.content.length === 0) {
     return undefined
   }
-  if (typeof candidate.signature !== 'string' || candidate.signature.length === 0) {
+  if (
+    typeof candidate.signature !== 'string' ||
+    candidate.signature.length === 0
+  ) {
     // Legacy `encrypted_content` blocks are replay-only, never a new summary.
     return undefined
   }
@@ -313,7 +319,10 @@ export function extractAnthropicCompactionBlock(
 ): AnthropicCompactionBlock | undefined {
   const message = recordOf(payload)
   if (!message) return undefined
-  if (message.stop_reason !== undefined && message.stop_reason !== 'compaction') {
+  if (
+    message.stop_reason !== undefined &&
+    message.stop_reason !== 'compaction'
+  ) {
     return undefined
   }
   const content = Array.isArray(message.content) ? message.content : []
@@ -374,7 +383,8 @@ export function withAnthropicCompactionPreserveData(
   if (!preserveData || !(ANTHROPIC_COMPACTION_PRESERVE_KEY in preserveData)) {
     return preserveData
   }
-  const { [ANTHROPIC_COMPACTION_PRESERVE_KEY]: _removed, ...rest } = preserveData
+  const { [ANTHROPIC_COMPACTION_PRESERVE_KEY]: _removed, ...rest } =
+    preserveData
   return Object.keys(rest).length > 0 ? rest : undefined
 }
 
@@ -451,7 +461,9 @@ export async function runAnthropicCompactionLane(
   const payload = (await response.json()) as unknown
   const block =
     extractAnthropicCompactionBlock(payload) ??
-    (Array.isArray(payload) ? parseAnthropicCompactionEvents(payload) : undefined)
+    (Array.isArray(payload)
+      ? parseAnthropicCompactionEvents(payload)
+      : undefined)
   if (!block) {
     throw new Error('Anthropic compaction returned no signed summary')
   }
