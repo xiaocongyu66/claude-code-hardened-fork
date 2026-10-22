@@ -276,8 +276,12 @@ export function buildAnthropicCompactionHeaders(input: {
   const headers: Record<string, string> = {
     'content-type': 'application/json',
   }
-  if (input.apiKey) headers['x-api-key'] = input.apiKey
   if (!input.vertex) {
+    // Direct Anthropic Messages API requires the version header; Vertex's
+    // rawPredict path rejects it (and uses bearer auth injected by the
+    // caller, not x-api-key).
+    headers['anthropic-version'] = '2023-06-01'
+    if (input.apiKey) headers['x-api-key'] = input.apiKey
     const betas = [ANTHROPIC_COMPACTION_BETA, ...(input.extraBetas ?? [])]
     headers[ANTHROPIC_BETA_HEADER] = betas.join(',')
   }

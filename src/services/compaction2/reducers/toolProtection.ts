@@ -29,6 +29,21 @@ export interface ToolResultBlock {
   [key: string]: unknown
 }
 
+// Out-of-band "already blanked" marker. A `pruned` property would be copied
+// into the live request by the message converter and rejected by strict
+// providers (Anthropic: "Extra inputs are not permitted").
+const prunedBlocks = new WeakSet<object>()
+
+export function markToolResultPruned(block: object): void {
+  prunedBlocks.add(block)
+}
+
+export function isToolResultPruned(block: object): boolean {
+  return (
+    prunedBlocks.has(block) || (block as { pruned?: unknown }).pruned === true
+  )
+}
+
 export interface TextBlockLike {
   type: 'text'
   text: string

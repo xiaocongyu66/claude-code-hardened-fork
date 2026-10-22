@@ -15,6 +15,8 @@ import {
   getToolResultText,
   isProtectedToolResult,
   isSkillReadToolResult,
+  isToolResultPruned,
+  markToolResultPruned,
   replaceToolResultText,
   type ProtectedToolMatcher,
   type ToolResultBlock,
@@ -237,7 +239,7 @@ function collectSuperseded(
     const entries = getToolResultEntries(messages[i])
     for (let e = entries.length - 1; e >= 0; e--) {
       const { block, index } = entries[e]
-      if (block.pruned) continue
+      if (isToolResultPruned(block)) continue
       const toolCall = toolUses.get(block.tool_use_id)
       if (isProtectedToolResult(block, toolCall, config.protectedTools)) {
         continue
@@ -293,7 +295,7 @@ function collectUseless(
   for (let i = 0; i < messages.length; i++) {
     for (const { block, index } of getToolResultEntries(messages[i])) {
       if (block.useless !== true) continue
-      if (block.pruned || block.is_error === true) continue
+      if (isToolResultPruned(block) || block.is_error === true) continue
       const key = `${i}:${index}`
       if (exclude.has(key)) continue
       const toolCall = toolUses.get(block.tool_use_id)
@@ -346,7 +348,7 @@ function collectAged(
     accumulated += estimateMessageTokens(messages[i], countTokens)
 
     for (const { block, index } of getToolResultEntries(messages[i])) {
-      if (block.pruned) continue
+      if (isToolResultPruned(block)) continue
       if (accumulated < config.protectTokens) continue
       const tokens = countTokens(getToolResultText(block) ?? '')
       if (tokens < MIN_PRUNE_TOKENS) continue
@@ -379,7 +381,8 @@ function applyCandidates(
 
   for (const candidate of candidates) {
     const replacement = replaceToolResultText(candidate.block, candidate.notice)
-    const blanked: ToolResultBlock = { ...replacement, pruned: true }
+    const blanked: ToolResultBlock = { ...replacement }
+    markToolResultPruned(blanked)
     let blocks = byMessage.get(candidate.messageIndex)
     if (!blocks) {
       blocks = new Map()
@@ -437,8 +440,9 @@ function applyCandidates(
  * are pruned only once they fall outside the `protectTokens` window. The whole
  * pass is skipped when total savings fall below `minimumSavings`.
  *
- * `pruned: true` is stamped on rewritten `tool_result` blocks so a later pass
- * does not blank them again; non-text blocks are preserved.
+ * Rewritten `tool_result` blocks are marked in an out-of-band WeakSet so a
+ * later pass does not blank them again without leaking a private field into
+ * the provider request; non-text blocks are preserved.
  */
 export function pruneToolOutputs(
   messages: readonly Message[],

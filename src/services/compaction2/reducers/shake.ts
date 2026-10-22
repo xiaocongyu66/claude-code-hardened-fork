@@ -19,6 +19,8 @@ import {
   isSkillReadToolResult,
   isTextBlock,
   isToolResultBlock,
+  isToolResultPruned,
+  markToolResultPruned,
   replaceToolResultText,
   type ProtectedToolMatcher,
   type ToolResultBlock,
@@ -282,7 +284,7 @@ export function collectShakeRegions(
 
     if (results.length > 0) {
       for (const { block, index } of results) {
-        if (block.pruned) continue
+        if (isToolResultPruned(block)) continue
         const toolCall = toolUses.get(block.tool_use_id)
         if (isProtectedToolResult(block, toolCall, config.protectedTools)) {
           continue
@@ -381,8 +383,8 @@ function applyOne(
     if (!isToolResultBlock(block)) return
     const blanked: ToolResultBlock = {
       ...replaceToolResultText(block, replacement),
-      pruned: true,
     }
+    markToolResultPruned(blanked)
     content[region.blockIndex] = blanked as unknown as (typeof content)[number]
     return
   }

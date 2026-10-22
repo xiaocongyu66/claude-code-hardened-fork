@@ -45,6 +45,7 @@ import type {
 export interface CompactionV2Tracking {
   compacted?: boolean
   turnCounter?: number
+  consecutiveFailures?: number
 }
 
 export type DecisionOutcome =
@@ -436,6 +437,8 @@ export interface CompactionV2QueryResult {
   consecutiveFailures?: number
   /** Mechanical reduction (shake/prune) to use for this request only. */
   reducedMessages?: Message[]
+  /** Tokens removed by that reduction (for stale-usage adjustments). */
+  tokensSaved?: number
 }
 
 /**
@@ -503,11 +506,21 @@ export async function runCompactionV2ForQuery(
     return {
       wasCompacted: false,
       reducedMessages: result.outcome.messages,
+      tokensSaved: result.outcome.tokensSaved,
     }
   }
   const legacyResult = getLegacyCompactionResult(result.outcome)
   if (legacyResult) {
     return { wasCompacted: true, compactionResult: legacyResult }
+  }
+  if (result.shouldCompact) {
+    // A threshold pass was needed but no method produced a usable result.
+    // Propagate the cumulative failure count so query.ts's circuit breaker
+    // can stop retrying, matching autoCompactIfNeeded.
+    return {
+      wasCompacted: false,
+      consecutiveFailures: (request.tracking?.consecutiveFailures ?? 0) + 1,
+    }
   }
   return { wasCompacted: false }
 }
@@ -529,8 +542,9 @@ export interface IdleCompactionV2Result {
 }
 
 /**
- * Idle maintenance adapter. Default settings have `idleEnabled: false`, so
- * this is a no-op unless a caller opts in.
+ * Idle maintenance adapter. The caller only invokes this when idle
+ * maintenance is explicitly enabled, so force `idleEnabled` here; the default
+ * settings would otherwise make the trigger a permanent no-op.
  */
 export async function runIdleCompactionV2(
   request: IdleCompactionV2Request,
@@ -543,7 +557,7 @@ export async function runIdleCompactionV2(
       model: request.model,
       trigger: 'idle',
       messages: request.messages,
-      settings: request.settings,
+      settings: { ...request.settings, idleEnabled: true },
       windowTokens: getEffectiveContextWindowSize(request.model),
       tokenCount,
       lastActivityAt: request.lastActivityAt,

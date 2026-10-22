@@ -133,15 +133,14 @@ export function resolveReserveTokens(
   contextWindow: number,
   configured?: number,
 ): number {
-  const reserve = Math.max(
-    Math.floor(contextWindow * 0.15),
-    configured ?? 16_384,
-  )
-  // On very small windows the floor would consume the whole window, making
-  // the threshold 1 and every pass guard-blocked. Fall back to half the
-  // window (oh-my-pi's proportional-reserve fallback).
-  if (reserve >= contextWindow) {
-    return Math.max(1, Math.floor(contextWindow * 0.5))
+  const proportional = Math.floor(contextWindow * 0.15)
+  const reserve = Math.max(proportional, configured ?? 16_384)
+  // On small windows the floor can consume nearly the whole window, making
+  // the threshold tiny and every pass guard-blocked. oh-my-pi falls back to
+  // the proportional reserve when the configured floor leaves less than that
+  // much headroom.
+  if (reserve >= contextWindow - proportional) {
+    return Math.max(1, proportional)
   }
   return reserve
 }

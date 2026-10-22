@@ -599,6 +599,10 @@ async function* queryLoop(
     // what snip removed; tokenCountWithEstimation alone can't see it (reads usage
     // from the protected-tail assistant, which survives snip unchanged).
     let snipTokensFreed = 0
+    // A COMPACTION_V2 shake reduction rewrites old tool results but leaves the
+    // assistant usage anchor untouched; track its savings so the blocking and
+    // predictive checks below don't read the pre-reduction count.
+    let compactionV2TokensSaved = 0
     if (feature('HISTORY_SNIP')) {
       queryCheckpoint('query_snip_start')
       const snipResult = snipModule!.snipCompactIfNeeded(messagesForQuery)
@@ -713,6 +717,7 @@ async function* queryLoop(
       autoCompactOutcome = v2Result
       if (v2Result.reducedMessages) {
         messagesForQuery = v2Result.reducedMessages
+        compactionV2TokensSaved = v2Result.tokensSaved ?? 0
       }
     } else {
       autoCompactOutcome = await deps.autocompact(
@@ -939,7 +944,9 @@ async function* queryLoop(
       !collapseOwnsIt
     ) {
       const { isAtBlockingLimit } = calculateTokenWarningState(
-        tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+        tokenCountWithEstimation(messagesForQuery) -
+          snipTokensFreed -
+          compactionV2TokensSaved,
         toolUseContext.options.mainLoopModel,
       )
       if (isAtBlockingLimit) {
@@ -958,7 +965,9 @@ async function* queryLoop(
     if (!compactionResult && isAutoCompactEnabled()) {
       const model = toolUseContext.options.mainLoopModel
       const currentTokens =
-        tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
+        tokenCountWithEstimation(messagesForQuery) -
+        snipTokensFreed -
+        compactionV2TokensSaved
       const estimatedGrowth = estimateMaxTurnGrowth(model)
       const predictiveThreshold =
         getEffectiveContextWindowSize(model) - estimatedGrowth

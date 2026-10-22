@@ -10,7 +10,10 @@ import {
   type ShakeConfig,
   type ShakeRegion,
 } from '../../reducers/shake.js'
-import { isSkillReadToolResult } from '../../reducers/toolProtection.js'
+import {
+  isSkillReadToolResult,
+  isToolResultPruned,
+} from '../../reducers/toolProtection.js'
 
 const countTokens = (text: string): number => Math.ceil(text.length / 4)
 
@@ -233,7 +236,9 @@ describe('shakeMessages', () => {
     >
     const block = content[0]
     expect(block.type).toBe('tool_result')
-    expect(block.pruned).toBe(true)
+    expect(isToolResultPruned(block)).toBe(true)
+    // The marker must stay out of the wire payload.
+    expect('pruned' in block).toBe(false)
     const inner = block.content as unknown as Array<Record<string, unknown>>
     expect(inner.some(item => item.type === 'image')).toBe(true)
     const text = inner.find(item => item.type === 'text')

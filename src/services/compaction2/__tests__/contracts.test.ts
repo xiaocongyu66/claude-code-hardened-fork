@@ -20,8 +20,9 @@ describe('resolveReserveTokens', () => {
     expect(resolveReserveTokens(200_000, 50_000)).toBe(50_000)
   })
 
-  test('tiny windows fall back to half the window', () => {
-    expect(resolveReserveTokens(16_000)).toBe(8_000)
+  test('tiny windows fall back to the proportional reserve', () => {
+    expect(resolveReserveTokens(16_000)).toBe(2_400)
+    expect(resolveReserveTokens(19_000)).toBe(2_850)
     expect(resolveReserveTokens(20_000)).toBe(16_384)
   })
 })
