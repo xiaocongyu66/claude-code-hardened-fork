@@ -34,7 +34,7 @@ const inputSchema = lazySchema(() =>
       .max(30_000)
       .optional()
       .describe(
-        'Optional time to wait for active teammates to acknowledge shutdown before cleanup.',
+        'Optional time to wait for active members to exit after shutdown is requested.',
       ),
   }),
 )

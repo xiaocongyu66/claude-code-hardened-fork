@@ -34,9 +34,7 @@ const inputSchema = lazySchema(() =>
     status: z
       .enum(['complete', 'blocked'])
       .optional()
-      .describe(
-        'Required for "update". Only "complete" or "blocked" are accepted.',
-      ),
+      .describe('Only "complete" or "blocked" are accepted.'),
     reason: z
       .string()
       .optional()
