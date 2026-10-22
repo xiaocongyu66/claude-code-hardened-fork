@@ -389,6 +389,9 @@ export function getToolsForDefaultPreset(): string[] {
  * NOTE: This MUST stay in sync with https://console.statsig.com/4aF3Ewatb6xPVpCwxb5nA3/dynamic_configs/claude_code_global_system_caching, in order to cache the system prompt across users.
  */
 export function getAllBaseTools(): Tools {
+  // Read once so the truthiness check narrows the same value (calling twice
+  // leaves the array element typed Tool | null).
+  const powerShellTool = getPowerShellTool()
   return [
     getAgentTool(),
     getTaskOutputTool(),
@@ -457,7 +460,7 @@ export function getAllBaseTools(): Tools {
     ...(PushNotificationToolLoader ? [PushNotificationToolLoader()] : []),
     ...(SubscribePRToolLoader ? [SubscribePRToolLoader()] : []),
     ...(ReviewArtifactToolLoader ? [ReviewArtifactToolLoader()] : []),
-    ...(getPowerShellTool() ? [getPowerShellTool()] : []),
+    ...(powerShellTool ? [powerShellTool] : []),
     ...(SnipToolLoader ? [SnipToolLoader()] : []),
     ...(DiscoverSkillsToolLoader ? [DiscoverSkillsToolLoader()] : []),
     ...(process.env.NODE_ENV === 'test' ? [getTestingPermissionTool()] : []),
