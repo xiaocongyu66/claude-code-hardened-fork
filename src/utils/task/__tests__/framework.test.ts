@@ -463,18 +463,28 @@ describe('enqueueStillRunningReminder', () => {
     )
   })
 
-  test('generateTaskAttachments 每轮驱动注入（组装面接线）', async () => {
-    recordTaskHandle({
-      id: 'agnt_snap08',
-      type: 'local_agent',
-      status: 'running',
-      description: 'driven',
-    })
-    await generateTaskAttachments({ tasks: {} } as any)
-    expect(queuedNotifications.length).toBeGreaterThanOrEqual(1)
-    expect(queuedNotifications[0]!.value).toContain(
-      'Background agent "driven" (agnt_snap08) is still running',
-    )
+  test('generateTaskAttachments 每轮注入 still-running 附件（官方组装面）', async () => {
+    queuedNotifications.length = 0
+    const { attachments } = await generateTaskAttachments({
+      tasks: {
+        task_snap08: {
+          id: 'task_snap08',
+          type: 'local_agent',
+          status: 'running',
+          description: 'driven',
+          outputFile: '/tmp/output/task_snap08',
+          outputOffset: 0,
+          notified: false,
+          startTime: Date.now(),
+        },
+      },
+    } as any)
+    const running = attachments.find(a => a.taskId === 'task_snap08')
+    expect(running).toBeDefined()
+    expect(running!.status).toBe('running')
+    expect(running!.description).toBe('driven')
+    // Official path: attachment, not a command-queue notification.
+    expect(queuedNotifications).toHaveLength(0)
   })
 
   test('信封带 passive（官方 so():9229 排除 passive——纯快照不唤醒 query 轮）', () => {

@@ -195,7 +195,7 @@ export async function generateTaskAttachments(state: AppState): Promise<{
         taskState.id,
         taskState.outputOffset,
       )
-      if (delta.content) {
+      if (delta?.content) {
         updatedTaskOffsets[taskState.id] = delta.newOffset
       }
     }
@@ -212,12 +212,21 @@ export async function generateTaskAttachments(state: AppState): Promise<{
   // resumeAgent 显式复活点）；进程死亡 = 表清空，零启动回放。本附件面只
   // 承担 still-running 视图注入与输出增量/逐出记账。
 
-  // CCH #52/#44: 子代理列表模型侧视图——每轮把中央句柄表里的 still-running
-  // 快照注入给主代理（官方对齐 docs/reverse-284:
-  // 0001-chunk-xrzcaagk/module-006-uncategorized.js:8781 task_status 附件
-  // running 分支：`<system-reminder>` + isMeta 形态 + bash/agent 两分支
-  // 逐字措辞 + 每任务一信使）。
-  enqueueStillRunningReminder()
+  // Official 2.8.4 (:8781): still-running is a turn-scoped task_status
+  // attachment — one per running task, converted to an isMeta user message by
+  // messages.ts. It is NOT a command-queue notification (that path renders in
+  // the prompt input and leaks across sessions when copied).
+  for (const taskState of Object.values(tasks)) {
+    if (taskState.status !== 'running') continue
+    attachments.push({
+      type: 'task_status',
+      taskId: taskState.id,
+      taskType: taskState.type,
+      status: 'running',
+      description: taskState.description,
+      deltaSummary: null,
+    })
+  }
 
   // CCH #38: 输出增量 → 中央句柄心跳（reaper"超时无增量"的增量来源）。
   recordTaskHeartbeats(Object.keys(updatedTaskOffsets))
