@@ -703,7 +703,8 @@ async function* queryLoop(
         messages: messagesForQuery,
         model: toolUseContext.options.mainLoopModel,
         trigger: 'threshold',
-        tokenCount: tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+        tokenCount:
+          tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
         toolUseContext,
         cacheSafeParams: autoCompactCacheSafeParams,
         querySource,
