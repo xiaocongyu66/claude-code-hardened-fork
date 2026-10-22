@@ -1,8 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import {
-  resolveReserveTokens,
-  speculationLeadTokens,
-} from '../contracts.js'
+import { resolveReserveTokens, speculationLeadTokens } from '../contracts.js'
 
 describe('speculationLeadTokens', () => {
   test('clamps to [8192, 32000]', () => {

@@ -58,8 +58,7 @@ export function createShakeMethod(
           method: 'shake',
           messages: reduction.messages,
           tokensSaved: Math.max(0, reduction.tokensSaved),
-          headroomTokens:
-            threshold === undefined ? 0 : threshold - afterTokens,
+          headroomTokens: threshold === undefined ? 0 : threshold - afterTokens,
           warning: reduction.warning,
         }
       } catch (error) {

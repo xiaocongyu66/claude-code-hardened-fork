@@ -110,8 +110,8 @@ export function evaluatePayloadGuard(
 
   const occupancy =
     windowTokens > 0 ? localTokens / windowTokens : Number.POSITIVE_INFINITY
-  const localHeadroom = windowTokens > 0 &&
-    occupancy <= PAYLOAD_REJECTION_OCCUPANCY_CEILING
+  const localHeadroom =
+    windowTokens > 0 && occupancy <= PAYLOAD_REJECTION_OCCUPANCY_CEILING
   const usageWithinWindow =
     providerTokens === undefined ||
     windowTokens <= 0 ||

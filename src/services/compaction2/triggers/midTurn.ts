@@ -5,9 +5,7 @@ import type { ThresholdInput, TriggerDecision } from './types.js'
  * Mid-turn maintenance: the same threshold check, evaluated before the next
  * provider request inside a tool loop and gated by `midTurnEnabled`.
  */
-export function evaluateMidTurnTrigger(
-  input: ThresholdInput,
-): TriggerDecision {
+export function evaluateMidTurnTrigger(input: ThresholdInput): TriggerDecision {
   if (!input.settings.midTurnEnabled) {
     const threshold = evaluateThresholdTrigger(input).threshold
     return {

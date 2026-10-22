@@ -6,7 +6,9 @@ export interface IncompleteInput extends ThresholdInput {
   stopReason?: string | null
 }
 
-export function isIncompleteStop(stopReason: string | null | undefined): boolean {
+export function isIncompleteStop(
+  stopReason: string | null | undefined,
+): boolean {
   return (
     stopReason === 'length' ||
     stopReason === 'max_tokens' ||
@@ -26,7 +28,8 @@ export function evaluateIncompleteTrigger(
   const incomplete = isIncompleteStop(input.stopReason)
   const windowUnknown = input.windowTokens <= 0
   const shouldCompact =
-    incomplete && (windowUnknown || input.tokenCount > threshold.thresholdTokens)
+    incomplete &&
+    (windowUnknown || input.tokenCount > threshold.thresholdTokens)
 
   return {
     trigger: 'incomplete',

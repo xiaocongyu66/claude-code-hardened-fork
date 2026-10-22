@@ -25,6 +25,8 @@ import {
   type SoftMethodDeps,
 } from './methods/soft.js'
 import { createSnapcompactMethod } from './methods/snapcompact.js'
+import { createShakeReducer } from './reducers/shakeReducer.js'
+import { estimateTokens } from './tokens/index.js'
 import { evaluateIdleTrigger } from './triggers/idle.js'
 import { evaluateIncompleteTrigger } from './triggers/incomplete.js'
 import { evaluateManualTrigger } from './triggers/manual.js'
@@ -118,8 +120,7 @@ export function createDefaultMethods(
         ...options.soft,
         instructions: options.instructions ?? options.soft.instructions,
         resolveThresholdTokens:
-          options.resolveThresholdTokens ??
-          options.soft.resolveThresholdTokens,
+          options.resolveThresholdTokens ?? options.soft.resolveThresholdTokens,
       }
     : null
   return [
@@ -152,7 +153,8 @@ export function buildCompactionContext(input: {
     settings: input.settings,
     tokenCount: input.countTokens,
     estimateEntryTokens:
-      input.estimateEntryTokens ?? defaultEstimateEntryTokens,
+      input.estimateEntryTokens ??
+      (entry => defaultEstimateEntryTokens(entry, input.model)),
     abortSignal: input.abortSignal,
     agentId: input.agentId,
     now: input.now,
@@ -278,15 +280,18 @@ export async function runCompactionV2(
         soft: options.soft,
         shake: options.shake,
         instructions: request.instructions,
-        resolveThresholdTokens: () =>
-          triggerDecision.threshold.thresholdTokens,
+        resolveThresholdTokens: () => triggerDecision.threshold.thresholdTokens,
       }),
   )
 
   for (const name of order) {
     const method = methods.get(name)
     if (!method) {
-      record({ method: name, outcome: 'skipped', reason: 'method-not-registered' })
+      record({
+        method: name,
+        outcome: 'skipped',
+        reason: 'method-not-registered',
+      })
       continue
     }
     if (
@@ -435,6 +440,7 @@ export async function runCompactionV2ForQuery(
         autoCompactThreshold,
         tracking: request.tracking,
       }),
+      shake: createShakeReducer(),
       resolveWindowTokens: getEffectiveContextWindowSize,
     },
   )
@@ -542,9 +548,7 @@ function createLegacySoftDeps(input: {
         result,
         tokensBefore: result.preCompactTokenCount ?? input.tokenCount,
         tokensAfter:
-          result.truePostCompactTokenCount ??
-          result.postCompactTokenCount ??
-          0,
+          result.truePostCompactTokenCount ?? result.postCompactTokenCount ?? 0,
       } satisfies SoftCompactRun
     },
   }
@@ -580,8 +584,7 @@ function resolveSettings(
   input: Partial<CompactionSettings> | undefined,
 ): CompactionSettings {
   return {
-    methodOrder:
-      input?.methodOrder ?? DEFAULT_COMPACTION_SETTINGS.methodOrder,
+    methodOrder: input?.methodOrder ?? DEFAULT_COMPACTION_SETTINGS.methodOrder,
     keepRecentTokens:
       input?.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
     reserveTokens:
@@ -606,11 +609,13 @@ function resolveSettings(
   }
 }
 
-function defaultEstimateEntryTokens(entry: EntryView): number {
+function defaultEstimateEntryTokens(entry: EntryView, model?: string): number {
   if (typeof entry.tokens === 'number') return entry.tokens
   if (!entry.message) return 0
   const serialized = JSON.stringify(entry.message)
-  return serialized ? Math.ceil(serialized.length / 4) : 0
+  if (!serialized) return 0
+  if (model) return estimateTokens(serialized, model).tokens
+  return Math.ceil(serialized.length / 4)
 }
 
 /* eslint-disable @typescript-eslint/no-require-imports */

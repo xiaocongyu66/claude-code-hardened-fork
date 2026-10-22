@@ -6,10 +6,7 @@ import {
   type CompactionMethodName,
   type CompactionOutcome,
 } from '../contracts.js'
-import {
-  runCompactionV2,
-  type DecisionTraceEntry,
-} from '../orchestrator.js'
+import { runCompactionV2, type DecisionTraceEntry } from '../orchestrator.js'
 
 const message = {
   type: 'user',
@@ -179,7 +176,12 @@ describe('runCompactionV2 method chain', () => {
   test('reports a final skip when every method is unavailable', async () => {
     const calls: string[] = []
     const methods = DEFAULT_COMPACTION_SETTINGS.methodOrder.map(name =>
-      method(name, false, { kind: 'skipped', method: name, reason: 'no' }, calls),
+      method(
+        name,
+        false,
+        { kind: 'skipped', method: name, reason: 'no' },
+        calls,
+      ),
     )
 
     const result = await runCompactionV2(

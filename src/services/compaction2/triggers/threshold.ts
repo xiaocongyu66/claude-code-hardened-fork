@@ -58,9 +58,7 @@ export function resolveThresholdDecision(
     thresholdTokens,
     tokenCount,
     headroomTokens: thresholdTokens - tokenCount,
-    progressTargetTokens: Math.floor(
-      thresholdTokens * PROGRESS_HEADROOM_RATIO,
-    ),
+    progressTargetTokens: Math.floor(thresholdTokens * PROGRESS_HEADROOM_RATIO),
     // oh-my-pi's shouldCompact() uses a strict `>`: exactly at the threshold
     // the next request still fits, so no maintenance pass is needed.
     overThreshold: tokenCount > thresholdTokens,

@@ -102,7 +102,12 @@ export type CompactionOutcome =
       warning?: string
     }
   | { kind: 'skipped'; method: CompactionMethodName; reason: string }
-  | { kind: 'failed'; method: CompactionMethodName; reason: string; error?: unknown }
+  | {
+      kind: 'failed'
+      method: CompactionMethodName
+      reason: string
+      error?: unknown
+    }
 
 export interface CompactionMethod {
   readonly name: CompactionMethodName

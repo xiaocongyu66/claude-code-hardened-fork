@@ -40,7 +40,9 @@ export interface SpeculationDecision {
  * arm the result for instant commit at threshold. W2 intentionally ships the
  * pure decision only — no timers, no network, no background tasks.
  */
-export function evaluateSpeculation(input: SpeculationInput): SpeculationDecision {
+export function evaluateSpeculation(
+  input: SpeculationInput,
+): SpeculationDecision {
   const thresholdTokens = Math.max(0, Math.floor(input.thresholdTokens))
   const leadTokens = speculationLeadTokens(thresholdTokens)
   const bandHighTokens = thresholdTokens
@@ -71,7 +73,10 @@ export function evaluateSpeculation(input: SpeculationInput): SpeculationDecisio
       bandLowTokens,
       bandHighTokens,
       inBand,
-      reason: input.tokenCount < bandLowTokens ? 'below-band' : 'at-or-above-threshold',
+      reason:
+        input.tokenCount < bandLowTokens
+          ? 'below-band'
+          : 'at-or-above-threshold',
     }
   }
   if (!method) {
