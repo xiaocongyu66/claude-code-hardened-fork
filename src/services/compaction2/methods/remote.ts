@@ -1,34 +1,21 @@
-import type {
-  CompactionContext,
-  CompactionMethod,
-  CompactionOutcome,
-} from '../contracts.js'
-
 /**
- * Provider-native server compaction (OpenAI Responses compact / Anthropic
- * compaction beta). W2 ships the skeleton only: unavailable by default, and a
- * dependency hook for the provider workstream to fill in.
+ * W2 skeleton retained as the public entry point. W5 moved the implementation
+ * into `./remote/` (per-provider lanes); this module only re-exports it so the
+ * orchestrator and downstream callers keep their existing imports.
  */
-export interface RemoteMethodDeps {
-  isAvailable?(ctx: CompactionContext): boolean
-  run?(ctx: CompactionContext): Promise<CompactionOutcome>
-}
-
-export function createRemoteMethod(
-  deps?: RemoteMethodDeps | null,
-): CompactionMethod {
-  return {
-    name: 'remote',
-    isAvailable: ctx => deps?.isAvailable?.(ctx) ?? false,
-    run: async (ctx): Promise<CompactionOutcome> =>
-      deps?.run
-        ? deps.run(ctx)
-        : {
-            kind: 'skipped',
-            method: 'remote',
-            reason: 'remote-not-available',
-          },
-  }
-}
-
-export const remoteMethod = createRemoteMethod()
+export {
+  createRemoteMethod,
+  DEFAULT_REMOTE_COMPACTION_INSTRUCTIONS,
+  isRemoteCompactionEnabled,
+  isRemoteMethodAvailable,
+  REMOTE_COMPACTION_ENV,
+  remoteMethod,
+  type RemoteFetch,
+  type RemoteLane,
+  type RemoteLaneRequest,
+  type RemoteLaneResult,
+  type RemoteLaneSkip,
+  type RemoteLaneSuccess,
+  type RemoteLaneTransport,
+  type RemoteMethodDeps,
+} from './remote/index.js'
