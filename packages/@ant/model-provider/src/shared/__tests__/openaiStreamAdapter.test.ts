@@ -911,4 +911,84 @@ describe('prompt caching support', () => {
     expect(msgDelta.usage.cache_read_input_tokens).toBe(34048)
     expect(msgDelta.usage.output_tokens).toBe(30)
   })
+
+  test('does not open a ghost thinking block when reasoning_content is "" during text streaming', async () => {
+    const events = await collectEvents([
+      // DeepSeek sends reasoning_content:"" on the first chunk, then thinking.
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { role: 'assistant', reasoning_content: '' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: 'think' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      // First content chunk: close thinking, open text(1).
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { content: 'TCP', reasoning_content: '' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      // Later content chunks still carry reasoning_content:"" — these must
+      // NOT open another thinking block.
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { content: '三次握手', reasoning_content: '' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { content: '。', reasoning_content: '' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { content: '', reasoning_content: '' },
+            finish_reason: 'stop',
+          },
+        ],
+      }),
+    ])
+
+    const starts = events.filter(e => e.type === 'content_block_start') as any[]
+    expect(
+      starts.filter(e => e.content_block.type === 'thinking'),
+    ).toHaveLength(1)
+    expect(starts.filter(e => e.content_block.type === 'text')).toHaveLength(1)
+
+    const textStart = starts.find(e => e.content_block.type === 'text')!
+    const textDeltas = events
+      .filter(
+        e => e.type === 'content_block_delta' && e.delta.type === 'text_delta',
+      )
+      .map(e => e.delta.text)
+    expect(textDeltas.join('')).toBe('TCP三次握手。')
+
+    const stops = events.filter(e => e.type === 'content_block_stop') as any[]
+    expect(stops.map(e => e.index)).toContain(textStart.index)
+  })
 })

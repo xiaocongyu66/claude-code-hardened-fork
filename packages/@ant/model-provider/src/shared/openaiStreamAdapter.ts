@@ -51,9 +51,11 @@ export async function* adaptOpenAIStreamToAnthropic(
 
   // Track thinking block state
   let thinkingBlockOpen = false
+  let thinkingIndex = -1
 
   // Track text block state
   let textBlockOpen = false
+  let textIndex = -1
 
   // Track raw OpenAI usage across chunks. The normalized Anthropic fields are
   // disjoint: ordinary input + cache reads + cache writes = total input.
@@ -137,14 +139,25 @@ export async function* adaptOpenAIStreamToAnthropic(
     // requests, otherwise DeepSeek rejects with 400.
     const reasoningContent = (delta as any).reasoning_content
     if (reasoningContent != null) {
-      if (!thinkingBlockOpen) {
+      // DeepSeek sends `reasoning_content: ""` on every content chunk. Only
+      // open a thinking block before any text/tool block has started —
+      // otherwise an empty thinking block is interleaved into the text stream,
+      // and the later content_block_stop for the text block is emitted with
+      // the wrong index, dropping the accumulated text from the final message.
+      if (
+        !thinkingBlockOpen &&
+        !textBlockOpen &&
+        toolBlocks.size === 0 &&
+        (reasoningContent !== '' || currentContentIndex === -1)
+      ) {
         currentContentIndex++
+        thinkingIndex = currentContentIndex
         thinkingBlockOpen = true
-        openBlockIndices.add(currentContentIndex)
+        openBlockIndices.add(thinkingIndex)
 
         yield {
           type: 'content_block_start',
-          index: currentContentIndex,
+          index: thinkingIndex,
           content_block: {
             type: 'thinking',
             thinking: '',
@@ -153,10 +166,10 @@ export async function* adaptOpenAIStreamToAnthropic(
         } as BetaRawMessageStreamEvent
       }
 
-      if (reasoningContent !== '') {
+      if (thinkingBlockOpen && reasoningContent !== '') {
         yield {
           type: 'content_block_delta',
-          index: currentContentIndex,
+          index: thinkingIndex,
           delta: {
             type: 'thinking_delta',
             thinking: reasoningContent,
@@ -172,15 +185,16 @@ export async function* adaptOpenAIStreamToAnthropic(
         if (thinkingBlockOpen) {
           yield {
             type: 'content_block_stop',
-            index: currentContentIndex,
+            index: thinkingIndex,
           } as BetaRawMessageStreamEvent
-          openBlockIndices.delete(currentContentIndex)
+          openBlockIndices.delete(thinkingIndex)
           thinkingBlockOpen = false
         }
 
         currentContentIndex++
+        textIndex = currentContentIndex
         textBlockOpen = true
-        openBlockIndices.add(currentContentIndex)
+        openBlockIndices.add(textIndex)
 
         yield {
           type: 'content_block_start',
@@ -212,9 +226,9 @@ export async function* adaptOpenAIStreamToAnthropic(
           if (thinkingBlockOpen) {
             yield {
               type: 'content_block_stop',
-              index: currentContentIndex,
+              index: thinkingIndex,
             } as BetaRawMessageStreamEvent
-            openBlockIndices.delete(currentContentIndex)
+            openBlockIndices.delete(thinkingIndex)
             thinkingBlockOpen = false
           }
 
@@ -222,9 +236,9 @@ export async function* adaptOpenAIStreamToAnthropic(
           if (textBlockOpen) {
             yield {
               type: 'content_block_stop',
-              index: currentContentIndex,
+              index: textIndex,
             } as BetaRawMessageStreamEvent
-            openBlockIndices.delete(currentContentIndex)
+            openBlockIndices.delete(textIndex)
             textBlockOpen = false
           }
 
@@ -275,18 +289,18 @@ export async function* adaptOpenAIStreamToAnthropic(
       if (thinkingBlockOpen) {
         yield {
           type: 'content_block_stop',
-          index: currentContentIndex,
+          index: thinkingIndex,
         } as BetaRawMessageStreamEvent
-        openBlockIndices.delete(currentContentIndex)
+        openBlockIndices.delete(thinkingIndex)
         thinkingBlockOpen = false
       }
 
       if (textBlockOpen) {
         yield {
           type: 'content_block_stop',
-          index: currentContentIndex,
+          index: textIndex,
         } as BetaRawMessageStreamEvent
-        openBlockIndices.delete(currentContentIndex)
+        openBlockIndices.delete(textIndex)
         textBlockOpen = false
       }
 
