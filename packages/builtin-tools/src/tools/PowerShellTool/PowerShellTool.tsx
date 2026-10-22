@@ -552,18 +552,20 @@ export const PowerShellTool = buildTool({
     _canUseTool?: CanUseToolFn,
     _parentMessage?: AssistantMessage,
     onProgress?: ToolCallProgress<PowerShellProgress>,
+    userTypedShellDispatch = false,
   ): Promise<{ data: Out }> {
     // Load-bearing guard: promptShellExecution.ts and processBashCommand.tsx
     // call PowerShellTool.call() directly, bypassing validateInput. This is
     // the check that covers ALL callers. See isWindowsSandboxPolicyViolation
     // comment for the policy rationale.
-    if (isWindowsSandboxPolicyViolation()) {
+    if (!userTypedShellDispatch && isWindowsSandboxPolicyViolation()) {
       throw new Error(WINDOWS_SANDBOX_POLICY_REFUSAL);
     }
     // R2 (#0051) — same three-state consumption as validateInput: refuse now,
     // never run bare under a strict/closed policy that cannot provide the
-    // sandbox (tool error, Bash-verbatim texts).
-    const sandboxDecision = evaluateSandboxDecisionForPowerShell(input);
+    // sandbox (tool error, Bash-verbatim texts). User-typed `!` dispatch is
+    // exempt, mirroring official tn()'s third argument.
+    const sandboxDecision = evaluateSandboxDecisionForPowerShell(input, userTypedShellDispatch);
     if (sandboxDecision.mode === 'refuse' && sandboxDecision.reason) {
       throw new Error(SANDBOX_REFUSAL_MESSAGES[sandboxDecision.reason]);
     }

@@ -209,6 +209,7 @@ export const SANDBOX_REFUSAL_MESSAGES: Record<SandboxDecisionReason, string> = {
  */
 export function evaluateSandboxDecision(
   input: Partial<SandboxInput>,
+  userTypedShellDispatch = false,
 ): SandboxDecision {
   const strict = SandboxManager.isStrictSandboxModeConfigured()
   // The escape hatch is closed for this call: the model tried to opt out and
@@ -219,6 +220,11 @@ export function evaluateSandboxDecision(
     SandboxManager.areUnsandboxedCommandsDisabled()
 
   if (
+    // Official tn(0051:729): `if(r||…) return null` — user-typed shell
+    // dispatch (the `r` argument) is exempt from the strict refusal. The
+    // normal sandbox decision below still applies, so a policy that denies
+    // unsandboxed execution runs the command sandboxed instead of refusing.
+    !userTypedShellDispatch &&
     (strict || optOutDenied) &&
     // Official tn `!ze.isSandboxEnabledInSettings()` → null (0051:729): no
     // enabled-in-settings sandbox, no refusal.

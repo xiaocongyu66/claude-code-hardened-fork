@@ -13,4 +13,4 @@ export const DESCRIPTION = `Stops a running background task by its ID.
 - Only tasks in the \`running\` state can be stopped. A task that is pending, completed, failed, killed, or otherwise not running is rejected (errorCode 3) — check TaskList/TaskGet first if unsure.
 - An unknown task_id is rejected (errorCode 1).
 - Task types that do not support stopping raise an \`unsupported_type\` error.
-- Returns a success or failure status; stopping is not instantaneous — the task receives a stop signal and its final state is reported in the tool result.`
+- Returns a success or failure status; stopping is not instantaneous — the task receives a stop signal. The result reports the task id/type/command, not a post-stop status; use TaskList/TaskGet or the /tasks command to observe the final state.`

@@ -3,7 +3,7 @@ import { FILE_EDIT_TOOL_NAME } from '../FileEditTool/constants.js'
 export const PROMPT = `Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
 
-NOTE — choose ONE task system per session: when the Task tools (TaskCreate/TaskUpdate/TaskList) are available, use them instead of TodoWrite — the two are mutually exclusive and never registered together. Use TodoWrite only in sessions where the Task tools are absent (older/non-interactive flows).
+NOTE — choose ONE task system per session: when the Task tools (TaskCreate/TaskUpdate/TaskList) are available, use them instead of TodoWrite — the two are mutually exclusive and never enabled together. Use TodoWrite only in sessions where the Task tools are absent (older/non-interactive flows).
 
 ## When to Use This Tool
 Use this tool proactively in these scenarios:

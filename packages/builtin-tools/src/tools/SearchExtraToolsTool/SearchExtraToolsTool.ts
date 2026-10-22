@@ -76,6 +76,9 @@ export const outputSchema = lazySchema(() =>
         }),
       )
       .optional(),
+    /** Tools whose schema was omitted to stay under the result-size budget.
+     * Select them individually to load their schema. */
+    schemas_omitted: z.array(z.string()).optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -150,6 +153,7 @@ function buildSearchResult(
   pendingMcpServers?: string[],
   alreadyLoaded?: string[],
   schemas?: Output['schemas'],
+  schemasOmitted?: string[],
 ): { data: Output } {
   return {
     data: {
@@ -163,6 +167,9 @@ function buildSearchResult(
         ? { already_loaded: alreadyLoaded }
         : {}),
       ...(schemas && schemas.length > 0 ? { schemas } : {}),
+      ...(schemasOmitted && schemasOmitted.length > 0
+        ? { schemas_omitted: schemasOmitted }
+        : {}),
     },
   }
 }
@@ -176,7 +183,13 @@ function buildSearchResult(
  * the model needs; an unbounded prompt text (Bash is ~10-22KB) would push a
  * multi-select result past the 50k tool-result persistence threshold and get
  * the whole payload replaced by a 2KB preview. */
-const SCHEMA_ENTRY_DESCRIPTION_MAX = 2_000
+const SCHEMA_ENTRY_DESCRIPTION_MAX = 4_000
+
+/** Total budget for all schema entries in one result. The effective tool-result
+ * persistence threshold is 50k chars; staying well under it keeps the
+ * `<functions>` block (and the "Found …" discovery line) in context instead of
+ * being replaced by a 2KB on-disk preview. */
+const SCHEMA_RESULT_BUDGET = 40_000
 
 async function buildSchemaEntry(
   tool: Tool,
@@ -207,6 +220,34 @@ async function buildSchemaEntry(
     }
   }
   return { name: tool.name, description, parameters }
+}
+
+/**
+ * Build schema entries under a total budget. Tools that would overflow the
+ * budget are returned in `omitted` so the result can tell the model to select
+ * them individually instead of silently dropping their schemas.
+ */
+async function buildSchemaEntries(
+  toolsToLoad: Tool[],
+  allTools: Tools,
+): Promise<{
+  schemas: NonNullable<Output['schemas']>
+  omitted: string[]
+}> {
+  const schemas: NonNullable<Output['schemas']> = []
+  const omitted: string[] = []
+  let used = 0
+  for (const tool of toolsToLoad) {
+    const entry = await buildSchemaEntry(tool, allTools)
+    const size = jsonStringify(entry).length
+    if (schemas.length > 0 && used + size > SCHEMA_RESULT_BUDGET) {
+      omitted.push(tool.name)
+      continue
+    }
+    schemas.push(entry)
+    used += size
+  }
+  return { schemas, omitted }
 }
 
 /**
@@ -498,10 +539,9 @@ export const SearchExtraToolsTool = buildTool({
       // Official semantics: select: returns the complete JSONSchema for each
       // matched tool so it becomes callable like a top-level tool. Core tools
       // already in the list need no schema.
-      const schemas = await Promise.all(
-        foundTools
-          .filter(t => deferredTools.includes(t))
-          .map(t => buildSchemaEntry(t, tools)),
+      const { schemas, omitted } = await buildSchemaEntries(
+        foundTools.filter(t => deferredTools.includes(t)),
+        tools,
       )
       return buildSearchResult(
         found,
@@ -510,6 +550,7 @@ export const SearchExtraToolsTool = buildTool({
         undefined,
         alreadyLoaded.length > 0 ? alreadyLoaded : undefined,
         schemas,
+        omitted,
       )
     }
 
@@ -528,9 +569,7 @@ export const SearchExtraToolsTool = buildTool({
       const matchedTools = matches
         .map(n => findToolByName(deferredTools, n))
         .filter((t): t is Tool => t !== undefined)
-      const schemas = await Promise.all(
-        matchedTools.map(t => buildSchemaEntry(t, tools)),
-      )
+      const { schemas, omitted } = await buildSchemaEntries(matchedTools, tools)
       return buildSearchResult(
         matches,
         query,
@@ -538,6 +577,7 @@ export const SearchExtraToolsTool = buildTool({
         undefined,
         undefined,
         schemas,
+        omitted,
       )
     }
 
@@ -599,8 +639,9 @@ export const SearchExtraToolsTool = buildTool({
       .filter(name => deferredToolNames.has(name))
       .map(name => findToolByName(deferredTools, name))
       .filter((t): t is Tool => t !== undefined)
-    const keywordSchemas = await Promise.all(
-      deferredMatchedTools.map(t => buildSchemaEntry(t, tools)),
+    const { schemas: keywordSchemas, omitted } = await buildSchemaEntries(
+      deferredMatchedTools,
+      tools,
     )
 
     return buildSearchResult(
@@ -610,6 +651,7 @@ export const SearchExtraToolsTool = buildTool({
       undefined,
       alreadyLoaded.length > 0 ? alreadyLoaded : undefined,
       keywordSchemas,
+      omitted,
     )
   },
   renderToolUseMessage(input: Partial<{ query: string; max_results: number }>) {
@@ -688,6 +730,12 @@ export const SearchExtraToolsTool = buildTool({
           })}</function>`,
       )
       parts.push(`<functions>\n${lines.join('\n')}\n</functions>`)
+    }
+
+    if (content.schemas_omitted && content.schemas_omitted.length > 0) {
+      parts.push(
+        `Schema omitted for ${content.schemas_omitted.length} tool(s) to stay under the result-size limit: ${content.schemas_omitted.join(', ')}. Select them individually with "select:<name>" to load their schema.`,
+      )
     }
 
     const text = parts.join('\n')

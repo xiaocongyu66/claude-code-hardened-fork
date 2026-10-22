@@ -36,8 +36,9 @@ export type PowerShellSandboxInput = {
  * error with the shared refusal texts (SANDBOX_REFUSAL_MESSAGES). */
 export function evaluateSandboxDecisionForPowerShell(
   input: PowerShellSandboxInput,
+  userTypedShellDispatch = false,
 ): SandboxDecision {
-  return evaluateSandboxDecision(input)
+  return evaluateSandboxDecision(input, userTypedShellDispatch)
 }
 
 export function shouldUseSandboxForPowerShell(

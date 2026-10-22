@@ -79,7 +79,6 @@ import {
   FILE_READ_TOOL_NAME,
   FILE_UNCHANGED_STUB,
   LINE_FORMAT_INSTRUCTION,
-  MAX_LINES_TO_READ,
   OFFSET_INSTRUCTION_DEFAULT,
   OFFSET_INSTRUCTION_TARGETED,
   renderPromptTemplate,
@@ -510,15 +509,11 @@ export const FileReadTool = buildTool({
     return { result: true }
   },
   async call(
-    { file_path, offset = 1, limit: explicitLimit = undefined, pages },
+    { file_path, offset = 1, limit = undefined, pages },
     context,
     _canUseTool?,
     parentMessage?,
   ) {
-    // Official contract (prompt: "reads up to 2000 lines by default"): the
-    // default is enforced here, not just documented — without it a no-limit
-    // Read streams the whole file up to the 256KB cap.
-    const limit = explicitLimit ?? MAX_LINES_TO_READ
     const { readFileState, fileReadingLimits } = context
 
     const defaults = getDefaultFileReadingLimits()
@@ -620,7 +615,6 @@ export const FileReadTool = buildTool({
         limit,
         pages,
         maxSizeBytes,
-        explicitLimit === undefined,
         maxTokens,
         readFileState,
         context,
@@ -644,7 +638,6 @@ export const FileReadTool = buildTool({
               limit,
               pages,
               maxSizeBytes,
-              explicitLimit === undefined,
               maxTokens,
               readFileState,
               context,
@@ -826,10 +819,6 @@ async function callInner(
   limit: number | undefined,
   pages: string | undefined,
   maxSizeBytes: number,
-  /** True when the caller did not pass an explicit limit (default-read path):
-   *  the total-file byte cap applies; explicit-limit reads intentionally skip
-   *  it (see limits.ts). */
-  applyByteCap: boolean,
   maxTokens: number,
   readFileState: ToolUseContext['readFileState'],
   context: ToolUseContext,
@@ -1043,7 +1032,7 @@ async function callInner(
       resolvedFilePath,
       lineOffset,
       limit,
-      applyByteCap ? maxSizeBytes : undefined,
+      limit === undefined ? maxSizeBytes : undefined,
       context.abortController.signal,
     )
 

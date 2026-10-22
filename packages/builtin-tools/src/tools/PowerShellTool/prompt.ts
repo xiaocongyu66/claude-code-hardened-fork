@@ -111,8 +111,9 @@ Command sandbox:
    - When the sandbox is enabled, commands run inside it by default: filesystem writes and network access outside the allowed directories/hosts are blocked.
    - Default to the sandbox. Set \`dangerouslyDisableSandbox: true\` only when the user explicitly asks, or a command just failed with evidence of sandbox restrictions ("Access is denied" on paths outside allowed directories, connection failures to non-whitelisted hosts). Retry that one command with the override — it prompts the user for permission. Future commands go back to the sandbox.
    - If policy enforces the sandbox (override disabled), commands cannot run outside it at all; work with the user to adjust sandbox settings instead.
-   - On Windows, PowerShell commands run unsandboxed (the sandbox applies to POSIX shells only), so no override is needed there.
-   - For temporary files use \`$env:TMPDIR\` (set to the sandbox-writable directory in sandbox mode); do not hardcode \`/tmp\` or \`C:\\Temp\`.
+   - On native Windows the sandbox is unavailable. If policy requires sandboxing and disallows unsandboxed commands, execution is refused outright (errorCode 11) — report it instead of retrying with an override.
+   - On Linux/macOS/WSL2, pwsh runs under the same sandbox as bash.
+   - For temporary files use \`$env:TMPDIR\` in sandbox mode (POSIX); on native Windows use \`$env:TEMP\`. Do not hardcode \`/tmp\` or \`C:\\Temp\`.
 
 Passing multiline strings (commit messages, file content) to native executables:
    - Use a single-quoted here-string so PowerShell does not expand \`$\` or backticks inside. The closing \`'@\` MUST be at column 0 (no leading whitespace) on its own line — indenting it is a parse error:

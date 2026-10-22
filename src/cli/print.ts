@@ -388,7 +388,7 @@ const SHUTDOWN_TEAM_PROMPT = `<system-reminder>
 You are running in non-interactive mode and cannot return a response to the user until your team is shut down.
 
 You MUST shut down your team before preparing your final response:
-1. Use requestShutdown to ask each team member to shut down gracefully
+1. Send each team member a shutdown_request via SendMessage to ask them to shut down gracefully
 2. Wait for shutdown approvals
 3. Use the cleanup operation to clean up the team
 4. Only then provide your final response to the user

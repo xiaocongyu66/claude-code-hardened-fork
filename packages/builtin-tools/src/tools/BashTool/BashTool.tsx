@@ -790,6 +790,7 @@ export const BashTool = buildTool({
     _canUseTool?: CanUseToolFn,
     parentMessage?: AssistantMessage,
     onProgress?: ToolCallProgress<BashProgress>,
+    userTypedShellDispatch = false,
   ) {
     // Handle simulated sed edit - apply directly instead of running sed
     // This ensures what the user previewed is exactly what gets written
@@ -823,6 +824,7 @@ export const BashTool = buildTool({
         isMainThread,
         toolUseId: toolUseContext.toolUseId,
         agentId: toolUseContext.agentId,
+        userTypedShellDispatch,
       });
 
       // Consume the generator and capture the return value
@@ -1015,6 +1017,7 @@ async function* runShellCommand({
   isMainThread,
   toolUseId,
   agentId,
+  userTypedShellDispatch = false,
 }: {
   input: BashToolInput;
   abortController: AbortController;
@@ -1024,6 +1027,9 @@ async function* runShellCommand({
   isMainThread?: boolean;
   toolUseId?: string;
   agentId?: AgentId;
+  /** User-typed `!` shell dispatch: official tn() exempts it from the strict
+   *  sandbox refusal (the third `r` argument). */
+  userTypedShellDispatch?: boolean;
 }): AsyncGenerator<
   {
     type: 'progress';
@@ -1044,7 +1050,7 @@ async function* runShellCommand({
   // calls BashTool.call() directly, bypassing validateInput. Without this,
   // a strict/closed sandbox policy that cannot provide the sandbox would
   // run the command bare. Mirrors PowerShellTool.call's guard.
-  const sandboxDecision = evaluateSandboxDecision(input);
+  const sandboxDecision = evaluateSandboxDecision(input, userTypedShellDispatch);
   if (sandboxDecision.mode === 'refuse' && sandboxDecision.reason) {
     throw new Error(SANDBOX_REFUSAL_MESSAGES[sandboxDecision.reason]);
   }

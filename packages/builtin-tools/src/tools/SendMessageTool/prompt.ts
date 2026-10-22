@@ -34,7 +34,7 @@ Send a message to another agent.
 | \`"*"\` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |${udsRow}
 
 Inputs:
-- summary (REQUIRED whenever \`message\` is a plain string): a 5-10 word preview shown in the UI. Omitting it fails validation.
+- summary (REQUIRED for plain-string messages to a teammate name or \`"*"\`): a 5-10 word preview shown in the UI. Cross-session/bridge/uds/tcp plain-text targets do not require it.
 - to: a teammate name or \`"*"\`. Names containing \`@\` are rejected (they look like cross-session addresses); cross-session targets use the address forms in the table above and only accept plain-text messages.
 - message: plain string, or a structured object for protocol responses (\`shutdown_response\` / \`plan_approval_response\`). Structured messages cannot be broadcast and cannot be sent cross-session.
 

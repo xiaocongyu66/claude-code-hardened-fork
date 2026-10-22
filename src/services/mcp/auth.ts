@@ -1530,7 +1530,9 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           serverUrl: this.serverConfig.url,
           clientId: clientInformation.client_id,
           clientSecret: clientInformation.client_secret,
-          issuer: clientInformation.issuer,
+          issuer:
+            clientInformation.issuer ??
+            existingData.mcpOAuth?.[serverKey]?.issuer,
           // Provide default values for required fields if not present
           accessToken: existingData.mcpOAuth?.[serverKey]?.accessToken || '',
           expiresAt: existingData.mcpOAuth?.[serverKey]?.expiresAt || 0,
@@ -1674,7 +1676,12 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
         const refreshed = await this._refreshInProgress
         if (refreshed) {
           logMCPDebug(this.serverName, `Token refreshed successfully`)
-          return refreshed
+          // Refresh responses omit issuer; keep the stored binding so the SDK
+          // does not fall back to the unbound legacy path.
+          return {
+            ...refreshed,
+            issuer: refreshed.issuer ?? tokenData.issuer,
+          }
         }
         logMCPDebug(
           this.serverName,
@@ -1729,7 +1736,8 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           refreshToken: tokens.refresh_token,
           expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
           scope: tokens.scope,
-          issuer: tokens.issuer,
+          // Refresh responses carry no issuer; preserve the stored binding.
+          issuer: tokens.issuer ?? existingData.mcpOAuth?.[serverKey]?.issuer,
         },
       },
     }
@@ -2161,6 +2169,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
             expires_in: expiresIn,
             scope: tokenData.scope,
             token_type: 'Bearer',
+            issuer: tokenData.issuer,
           }
         }
         // Use the freshest refresh token from storage
@@ -2284,7 +2293,10 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           logMCPDebug(this.serverName, `Token refresh successful`)
           await this.saveTokens(newTokens)
           emitRefreshEvent('success')
-          return newTokens
+          return {
+            ...newTokens,
+            issuer: newTokens.issuer ?? tokenData?.issuer,
+          }
         }
 
         logMCPDebug(this.serverName, `Token refresh returned no tokens`)
@@ -2319,6 +2331,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
                 expires_in: expiresIn,
                 scope: tokenData.scope,
                 token_type: 'Bearer',
+                issuer: tokenData.issuer,
               }
             }
           }

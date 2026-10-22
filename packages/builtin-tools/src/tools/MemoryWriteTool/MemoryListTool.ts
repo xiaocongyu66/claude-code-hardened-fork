@@ -72,7 +72,7 @@ export const MemoryListTool = buildTool({
 
 Usage:
 - store: defaults to the project-scoped store.
-- Results are capped at 1024 documents — if the list is truncated, read documents by path instead.`
+- Results are capped at 1024 documents and there is no pagination — when truncated, only paths you already know can be read.`
   },
   get inputSchema(): InputSchema {
     return inputSchema()

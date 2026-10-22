@@ -14,7 +14,7 @@ export const workflowInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Path to an existing script file — absolute, or relative to the session cwd',
+      'Path to an existing script file — absolute or relative to the session cwd; the resolved path must stay within the session cwd',
     ),
   args: z
     .unknown()
