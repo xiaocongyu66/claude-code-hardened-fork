@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import type { CompactionContext, CompactionSettings } from '../contracts.js'
 import {
   evaluatePayloadGuard,

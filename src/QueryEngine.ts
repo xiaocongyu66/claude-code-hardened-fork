@@ -421,28 +421,32 @@ export class QueryEngine {
     // Default settings keep idleEnabled off, so this is a no-op unless a
     // caller opts in; the legacy path is untouched when the flag is off.
     if (feature('COMPACTION_V2')) {
-      /* eslint-disable @typescript-eslint/no-require-imports */
-      const { runIdleCompactionV2 } =
-        require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
-      /* eslint-enable @typescript-eslint/no-require-imports */
-      const idle = await runIdleCompactionV2({
-        messages: this.mutableMessages,
-        model: initialMainLoopModel,
-        toolUseContext: processUserInputContext,
-        cacheSafeParams: {
-          systemPrompt,
-          userContext,
-          systemContext,
+      // Idle maintenance is opt-in. Without this gate every submit would run
+      // a full-context token scan for a trigger that defaults to disabled.
+      if (process.env.CCH_COMPACTION_IDLE === '1') {
+        /* eslint-disable @typescript-eslint/no-require-imports */
+        const { runIdleCompactionV2 } =
+          require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+        /* eslint-enable @typescript-eslint/no-require-imports */
+        const idle = await runIdleCompactionV2({
+          messages: this.mutableMessages,
+          model: initialMainLoopModel,
           toolUseContext: processUserInputContext,
-          forkContextMessages: this.mutableMessages,
-        },
-        querySource: 'sdk',
-        lastActivityAt: this.lastActivityAt ?? Date.now(),
-      })
-      if (idle.compacted && idle.messages) {
-        this.mutableMessages = idle.messages
+          cacheSafeParams: {
+            systemPrompt,
+            userContext,
+            systemContext,
+            toolUseContext: processUserInputContext,
+            forkContextMessages: this.mutableMessages,
+          },
+          querySource: 'sdk',
+          lastActivityAt: this.lastActivityAt ?? Date.now(),
+        })
+        if (idle.compacted && idle.messages) {
+          this.mutableMessages = idle.messages
+        }
+        this.lastActivityAt = Date.now()
       }
-      this.lastActivityAt = Date.now()
     }
 
     // Handle orphaned permission (only once per engine lifetime)

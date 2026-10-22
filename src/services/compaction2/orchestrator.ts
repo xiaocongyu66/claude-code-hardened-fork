@@ -62,6 +62,7 @@ export interface DecisionTraceEntry {
   reason: string
   tokensSaved?: number
   headroomTokens?: number
+  warning?: string
   at: number
 }
 
@@ -344,7 +345,11 @@ export async function runCompactionV2(
             headroomTokens: outcome.headroomTokens,
           }
     const headroomTokens = progress.headroomTokens ?? outcome.headroomTokens
-    if (!progress.ok) {
+    // A reduced outcome has no side effects yet, so a failed guard can simply
+    // fall through. A compacted outcome has already committed (soft summary +
+    // cleanup); discarding it would lose those effects, so keep it and surface
+    // the guard warning instead.
+    if (!progress.ok && outcome.kind === 'reduced') {
       record({
         method: name,
         outcome: 'guard-blocked',
@@ -354,6 +359,22 @@ export async function runCompactionV2(
       })
       continue
     }
+    // Remote/snapcompact can produce a compacted outcome we cannot yet turn
+    // into the legacy CompactionResult. Fall through to the next method
+    // (soft) instead of returning a no-op.
+    if (outcome.kind === 'compacted' && !getLegacyCompactionResult(outcome)) {
+      record({
+        method: name,
+        outcome: 'skipped',
+        reason: 'unrenderable-compacted-outcome',
+        tokensSaved: outcome.tokensSaved,
+        headroomTokens,
+      })
+      continue
+    }
+    if (!progress.ok && outcome.kind === 'compacted') {
+      outcome.warning = progress.reason ?? 'progress-guard'
+    }
 
     record({
       method: name,
@@ -361,6 +382,7 @@ export async function runCompactionV2(
       reason: outcome.kind === 'compacted' ? 'compacted' : 'reduced',
       tokensSaved: outcome.tokensSaved,
       headroomTokens,
+      warning: outcome.warning,
     })
     result.outcome = outcome
     return result
@@ -401,6 +423,8 @@ export interface CompactionV2QueryResult {
   wasCompacted: boolean
   compactionResult?: CompactionResult
   consecutiveFailures?: number
+  /** Mechanical reduction (shake/prune) to use for this request only. */
+  reducedMessages?: Message[]
 }
 
 /**
@@ -411,8 +435,22 @@ export interface CompactionV2QueryResult {
 export async function runCompactionV2ForQuery(
   request: CompactionV2QueryRequest,
 ): Promise<CompactionV2QueryResult> {
-  const { getEffectiveContextWindowSize, getAutoCompactThreshold } =
-    loadAutoCompact()
+  const {
+    getEffectiveContextWindowSize,
+    getAutoCompactThreshold,
+    isAutoCompactEnabled,
+  } = loadAutoCompact()
+  // Same guards as legacy shouldAutoCompact: never compact inside the compact
+  // or session-memory forks (the compact fork runs query() with
+  // querySource='compact' and would otherwise re-enter this branch forever),
+  // and honor DISABLE_COMPACT / DISABLE_AUTO_COMPACT / autoCompactEnabled.
+  if (!isAutoCompactEnabled()) return { wasCompacted: false }
+  if (
+    request.querySource === 'compact' ||
+    request.querySource === 'session_memory'
+  ) {
+    return { wasCompacted: false }
+  }
   const windowTokens = getEffectiveContextWindowSize(request.model)
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
 
@@ -445,6 +483,12 @@ export async function runCompactionV2ForQuery(
     },
   )
 
+  if (result.outcome?.kind === 'reduced') {
+    return {
+      wasCompacted: false,
+      reducedMessages: result.outcome.messages,
+    }
+  }
   const legacyResult = getLegacyCompactionResult(result.outcome)
   if (legacyResult) {
     return { wasCompacted: true, compactionResult: legacyResult }

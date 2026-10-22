@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 // Tokenizer data-directory registry.
 //
 // Vocabularies are never bundled: they are loaded from `CCH_TOKENIZER_DIR`

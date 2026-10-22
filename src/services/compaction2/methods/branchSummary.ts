@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import type { Message } from '../../../types/message.js'
 import type { EntryView } from '../contracts.js'
 

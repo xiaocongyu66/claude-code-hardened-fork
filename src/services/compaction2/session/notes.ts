@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 /**
  * Persistent context notes (`context_notes`) and rollover requests
  * (`new_context`) — storage and injection interfaces only.

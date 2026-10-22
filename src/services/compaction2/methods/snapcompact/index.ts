@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 /**
  * Snapcompact compaction method (W4): archive discarded history onto bitmap
  * PNG frames that a vision model reads back. The pass is local and
@@ -154,6 +155,41 @@ function selectCut(ctx: CompactionContext): number {
   return Math.min(low, messages.length - 1)
 }
 
+/** True when a kept user message starts with tool_result blocks. */
+function isToolResultUserMessage(message: Message | undefined): boolean {
+  if (message?.type !== 'user') return false
+  const content = message.message?.content
+  return (
+    Array.isArray(content) &&
+    content.some(block => block?.type === 'tool_result')
+  )
+}
+
+/**
+ * Move the cut backwards until the kept side no longer starts with an orphan
+ * tool_result: the paired tool_use must stay on the kept side too.
+ */
+function alignCutForToolPairs(
+  messages: readonly Message[],
+  cut: number,
+): number {
+  let aligned = cut
+  while (aligned > 0 && isToolResultUserMessage(messages[aligned])) {
+    aligned--
+  }
+  return aligned
+}
+
+/** ASCII-only font: refuse to archive text it would corrupt to '?'. */
+function nonAsciiRatio(text: string): number {
+  if (text.length === 0) return 0
+  let nonAscii = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 0x7f) nonAscii++
+  }
+  return nonAscii / text.length
+}
+
 function createBoundaryMessage(
   trigger: CompactionContext['trigger'],
   preTokens: number,
@@ -300,7 +336,7 @@ export function createSnapcompactMethod(
       }
 
       try {
-        const cut = selectCut(ctx)
+        const cut = alignCutForToolPairs(ctx.messages, selectCut(ctx))
         if (cut <= 0) {
           return {
             kind: 'skipped',
@@ -314,6 +350,15 @@ export function createSnapcompactMethod(
           archived,
           deps.serializeOptions,
         )
+        // The bundled 5x8 bitmap font is ASCII-only; rendering CJK/emoji
+        // would silently turn the archive into '?' noise. Skip instead.
+        if (nonAsciiRatio(serialized) > 0.05) {
+          return {
+            kind: 'skipped',
+            method: 'snapcompact',
+            reason: 'snapcompact-non-ascii-unsupported',
+          }
+        }
         const normalized = normalizeForFrame(serialized)
         if (normalized.length === 0) {
           return {

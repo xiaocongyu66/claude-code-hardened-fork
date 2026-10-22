@@ -19,4 +19,9 @@ describe('resolveReserveTokens', () => {
     expect(resolveReserveTokens(200_000, 8_192)).toBe(30_000)
     expect(resolveReserveTokens(200_000, 50_000)).toBe(50_000)
   })
+
+  test('tiny windows fall back to half the window', () => {
+    expect(resolveReserveTokens(16_000)).toBe(8_000)
+    expect(resolveReserveTokens(20_000)).toBe(16_384)
+  })
 })

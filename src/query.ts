@@ -699,7 +699,7 @@ async function* queryLoop(
       const { runCompactionV2ForQuery } =
         require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
       /* eslint-enable @typescript-eslint/no-require-imports */
-      autoCompactOutcome = await runCompactionV2ForQuery({
+      const v2Result = await runCompactionV2ForQuery({
         messages: messagesForQuery,
         model: toolUseContext.options.mainLoopModel,
         trigger: 'threshold',
@@ -710,6 +710,10 @@ async function* queryLoop(
         querySource,
         tracking,
       })
+      autoCompactOutcome = v2Result
+      if (v2Result.reducedMessages) {
+        messagesForQuery = v2Result.reducedMessages
+      }
     } else {
       autoCompactOutcome = await deps.autocompact(
         messagesForQuery,

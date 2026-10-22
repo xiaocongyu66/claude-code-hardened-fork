@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 // Tokenizer manifest and data-driven family selection.
 //
 // A tokenizer data directory (`CCH_TOKENIZER_DIR`) contains `manifest.json`

@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 // HuggingFace `tokenizer.json` BPE tokenizers (DeepSeek, GLM, Qwen, ...).
 //
 // Supported shape: `model.type === "BPE"` with byte-level vocabulary keys,

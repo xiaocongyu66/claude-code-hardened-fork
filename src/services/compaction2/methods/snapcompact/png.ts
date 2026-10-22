@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 /**
  * Minimal PNG encoder/decoder for snapcompact frames.
  *

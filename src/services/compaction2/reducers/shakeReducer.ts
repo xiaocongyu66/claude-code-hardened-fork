@@ -58,9 +58,9 @@ async function defaultOffload(
   const id = `shake-${ctx.agentId ?? 'main'}-${region.messageIndex}-${region.blockIndex}-${ctx.now()}`
   const persisted = await persistToolResult(region.originalText, id)
   if ('error' in persisted) {
-    // Persisting failed: keep a short marker rather than dropping the text
-    // silently. The caller still counts the real token delta.
-    return `[Shaken: ${region.label} content elided (offload failed)]`
+    // Let shakeMessages skip this region: never replace recoverable content
+    // with a marker that has no target.
+    throw new Error(`shake offload failed: ${persisted.error}`)
   }
   return `[Shaken: ${region.label} content moved to ${persisted.filepath}]`
 }

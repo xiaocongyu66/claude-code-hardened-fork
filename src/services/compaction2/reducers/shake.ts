@@ -449,7 +449,14 @@ export async function shakeMessages(
   const applied: AppliedShakeRegion[] = []
   let tokensSaved = 0
   for (const region of regions) {
-    const replacement = await offload(region)
+    let replacement: string
+    try {
+      replacement = await offload(region)
+    } catch {
+      // Offload failed: keep the original region. Replacing it with a marker
+      // whose target does not exist would lose data and overstate savings.
+      continue
+    }
     const replacementTokens = countTokens(replacement)
     tokensSaved += Math.max(0, region.tokens - replacementTokens)
     applied.push({ region, replacement, replacementTokens })

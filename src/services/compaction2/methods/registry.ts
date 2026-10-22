@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import type { CompactionMethod, CompactionMethodName } from '../contracts.js'
 
 /** Default fallback order: server-native first, portable summary last. */

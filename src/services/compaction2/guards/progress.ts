@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import { PROGRESS_HEADROOM_RATIO, type GuardResult } from '../contracts.js'
 
 /**

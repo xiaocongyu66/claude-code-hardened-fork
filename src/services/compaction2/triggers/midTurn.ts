@@ -1,3 +1,4 @@
+// Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import { evaluateThresholdTrigger } from './threshold.js'
 import type { ThresholdInput, TriggerDecision } from './types.js'
 
