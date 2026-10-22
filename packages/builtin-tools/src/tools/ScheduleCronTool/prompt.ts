@@ -104,6 +104,10 @@ Only use minute 0 or 30 when the user names that exact time and clearly means it
 
 ${durabilitySection}
 
+## Limits
+- At most 50 scheduled jobs per session; cancel one with CronDelete before adding more.
+- durable: true is rejected for teammates (teammates do not persist across sessions).
+
 ## Runtime behavior
 
 Jobs only fire while the REPL is idle (not mid-query). ${durableRuntimeNote}The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.

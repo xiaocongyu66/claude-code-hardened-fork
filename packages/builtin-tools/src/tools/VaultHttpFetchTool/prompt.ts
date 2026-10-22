@@ -4,9 +4,10 @@ export const DESCRIPTION =
   'key NAME — never the secret value. The tool framework injects the secret ' +
   'directly into a request header and the secret is NEVER returned in tool_result, ' +
   'NEVER logged, NEVER passed to a shell. ' +
-  'Each vault key requires user pre-approval via permissions.allow: ' +
-  "['VaultHttpFetch(key-name)']. Whole-tool allow ('VaultHttpFetch' without " +
-  'parentheses) is rejected at settings parse time.'
+  'Each vault key requires user pre-approval via permissions.allow using the ' +
+  "host-bound form: ['VaultHttpFetch(key-name@host)'] (or 'key@*'). A bare " +
+  "key ('VaultHttpFetch(key-name)') and whole-tool allow ('VaultHttpFetch' " +
+  'without parentheses) are rejected at settings parse time.'
 
 export const PROMPT = `VaultHttpFetch — authenticated HTTPS request with a vault-stored secret.
 
@@ -31,7 +32,8 @@ Response: { status, statusText, responseHeaders (sensitive headers redacted),
 
 Permission model:
   Default: ask (user prompt). Approving once for a key sets a per-key allow
-  the user can persist via the prompt UI. Whole-tool allow is forbidden.
+  bound to the request host (key@host), which the user can persist via the
+  prompt UI. A bare key or whole-tool allow is rejected at settings parse.
 
 Always pass \`reason\` truthfully. The secret never appears in your context;
 the URL, method, key NAME, and reason all do appear in the transcript.

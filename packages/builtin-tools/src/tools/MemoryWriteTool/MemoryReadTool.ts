@@ -87,7 +87,7 @@ export const MemoryReadTool = buildTool({
     return `Read one memory document by relative .md path.
 
 Usage:
-- store: defaults to the project-scoped store. Only stores in the session allowlist are readable; an unknown store is refused ("Memory store ... not found").
+- store: defaults to the project-scoped store. Only stores in the session allowlist are readable; an unknown store is refused ("No memory store ... is available in this session. Available stores: ...").
 - Content is capped at 50KB and flagged truncated beyond that.
 - To see which documents exist, load and call MemoryList first (it is a deferred tool: SearchExtraTools "select:memory_list").`
   },

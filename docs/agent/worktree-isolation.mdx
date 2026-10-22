@@ -176,7 +176,7 @@ Agent 工具（`AgentTool`）的 `isolation` 参数决定子 Agent 是否在 wor
 }
 ```
 
-这使得 session 恢复（`--resume`）时能正确还原 worktree 上下文——即使进程重启，`getCurrentWorktreeSession()` 从项目配置中读取状态。
+这使得 session 恢复（`--resume`）时能正确还原 worktree 上下文——`getCurrentWorktreeSession()` 读取的是进程内内存变量（`worktree.ts`），重启后的状态由持久化的 session 文件还原。
 
 ## Sparse Checkout 优化
 

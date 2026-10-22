@@ -115,7 +115,9 @@ Guidelines:
       }
     }
 
-    const delivered = !appState.replBridgeEnabled || Boolean(fileUuid)
+    // "sent" means delivered to the user's device via the bridge. Without an
+    // upload the file only exists locally — do not report a false success.
+    const delivered = Boolean(fileUuid)
     return {
       data: {
         sent: delivered,
@@ -123,7 +125,11 @@ Guidelines:
         size: fileSize,
         ...(fileUuid ? { file_uuid: fileUuid } : {}),
         ...(!delivered
-          ? { error: 'Bridge upload failed. File available at local path.' }
+          ? {
+              error: appState.replBridgeEnabled
+                ? 'Bridge upload failed. File available at local path.'
+                : 'Bridge is not enabled. File available at local path.',
+            }
           : {}),
       },
     }

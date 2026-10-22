@@ -34,9 +34,9 @@ export const SubscribePRTool = buildTool({
     return 'Subscribe to pull request events via GitHub webhooks'
   },
   async prompt() {
-    return `Subscribe to events on a GitHub pull request. You'll receive notifications when selected events occur (comments, reviews, CI status changes, merge, close).
+    return `Subscribe to events on a GitHub pull request.
 
-Use this to monitor PRs you've created or are reviewing. Events are delivered as messages you can act on.`
+This build does NOT ship the KAIROS GitHub webhook subsystem: calls return { subscribed: false } with an error and no events are delivered. The tool is only usable when that runtime is present.`
   },
 
   isConcurrencySafe() {

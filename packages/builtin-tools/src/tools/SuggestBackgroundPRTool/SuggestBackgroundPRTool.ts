@@ -36,9 +36,9 @@ export const SuggestBackgroundPRTool = buildTool({
     return 'Suggest creating a background PR for follow-up changes'
   },
   async prompt() {
-    return `Suggest creating a pull request in the background for follow-up work. Use this when you identify improvements or cleanup that should be done but aren't part of the current task.
+    return `Suggest creating a pull request in the background for follow-up work.
 
-The suggestion is presented to the user who can approve or dismiss it. If approved, a background agent creates the PR.`
+This build does NOT ship the KAIROS runtime: calls return { suggested: false } with an error and no suggestion is recorded. The tool is only usable when that runtime is present.`
   },
 
   isConcurrencySafe() {

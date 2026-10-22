@@ -31,6 +31,8 @@ This tool takes a query, matches it against the deferred tool list, and returns 
 
 Result format: each matched tool appears as one <function>{"description": "...", "name": "...", "parameters": {...}}</function> line inside the <functions> block — the same encoding as the tool list at the top of this prompt. Read the exact parameter names from it; never guess.
 
+Result budget: schema entries are capped at ~40k characters per result. Tools whose schema would overflow are listed in \`schemas_omitted\` — fetch those individually with "select:<name>".
+
 ## Query forms
 - "select:CronCreate" — fetch these exact tools by name (fastest)
 - "select:CronCreate,CronList" — comma-separated multi-select

@@ -45,7 +45,7 @@ ToolSearch 采用 **延迟加载（Deferred Loading）** 模式：
 | 代码智能 | LSP |
 | 技能 | Skill |
 | 调度/监控 | Sleep |
-| 工具发现 | SearchExtraTools, ExecuteExtraTool, SyntheticOutput |
+| 工具发现 | SearchExtraTools, ExecuteExtraTool, StructuredOutput |
 
 **isDeferredTool 判定逻辑**（`packages/builtin-tools/src/tools/SearchExtraToolsTool/prompt.ts`）：
 
@@ -84,10 +84,12 @@ SearchExtraToolsTool 支持四种查询模式：
 
 | 模式 | 语法 | 行为 | 返回 |
 |------|------|------|------|
-| **Select** | `select:CronCreate,Snip` | 按名称直接获取，逗号分隔多选 | 精确匹配列表 |
-| **Discover** | `discover:schedule cron job` | 纯发现模式，返回描述+schema | 工具信息文本 |
-| **Keyword** | `notebook jupyter` | 关键词搜索 | 按相关性排序 |
-| **Required** | `+slack send` | `+` 前缀强制包含 | 包含必选词的结果 |
+| **Select** | `select:CronCreate,Snip` | 按名称直接获取，逗号分隔多选 | 完整 JSONSchema（`<functions>` 块） |
+| **Discover** | `discover:schedule cron job` | CCH 扩展：纯发现模式 | 完整 JSONSchema（同 select:） |
+| **Keyword** | `notebook jupyter` | 关键词搜索 | 完整 JSONSchema（按相关性排序） |
+| **Required** | `+slack send` | `+` 前缀强制包含 | 完整 JSONSchema（含必选词的结果） |
+
+> 单次结果总预算约 40k 字符；超出的工具列入 `schemas_omitted`，需单独 select。
 
 **混合搜索算法**：
 
@@ -121,7 +123,7 @@ ExecuteTool.call() 在全局工具注册表中查找 CronCreate
 返回结果（包装为 ExecuteExtraTool 的 output schema）
 ```
 
-关键设计：ExecuteExtraTool 的 `checkPermissions()` 返回 `passthrough`，将权限决策完全委托给目标工具。它本身不引入额外的权限层。
+关键设计：ExecuteExtraTool 自身不引入额外的权限层，但仍会调用目标工具的 `canUseTool` 权限门（见 `ExecuteTool.ts` 的 `checkPermissions` 路径），因此目标工具的 ask/deny 规则依然生效。
 
 ### 3.5 Prompt Cache 稳定性策略（v3 关键修复）
 

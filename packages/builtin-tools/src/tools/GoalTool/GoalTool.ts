@@ -40,7 +40,9 @@ const inputSchema = lazySchema(() =>
     reason: z
       .string()
       .optional()
-      .describe('Explanation for the status change. Required for "update".'),
+      .describe(
+        'Explanation for the status change. Used for "blocked"; optional for "complete".',
+      ),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>

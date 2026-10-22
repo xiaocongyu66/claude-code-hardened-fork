@@ -15,8 +15,7 @@ Transition the goal to a terminal status. Only two values are accepted:
 - **complete** — All requirements are verified (see Completion Audit below).
 - **blocked** — An insurmountable obstacle has persisted for 3+ consecutive turns (see Blocked Audit below).
 
-When marking complete, provide a brief \`reason\` summarising what was achieved.
-When marking blocked, provide a \`reason\` describing the specific blocker.
+When marking blocked, provide a \`reason\` describing the specific blocker (defaults to "unspecified blocker" if omitted). A \`reason\` on \`complete\` is accepted but not currently included in the completion report.
 
 ## Completion Audit (required before marking complete)
 1. Derive concrete requirements from the objective.

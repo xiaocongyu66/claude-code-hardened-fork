@@ -289,14 +289,10 @@ const VerifyPlanExecutionToolLoader =
           require('@claude-code-hardened/builtin-tools/tools/VerifyPlanExecutionTool/VerifyPlanExecutionTool.js') as typeof import('@claude-code-hardened/builtin-tools/tools/VerifyPlanExecutionTool/VerifyPlanExecutionTool.js')
         ).VerifyPlanExecutionTool
     : null
-// Dead code elimination: conditional import for OVERFLOW_TEST_TOOL.
-// No `typeof import` cast here: the module is a stub that only exports
-// OVERFLOW_TEST_TOOL_NAME, so the original untyped require semantics are kept.
-const OverflowTestToolLoader = feature('OVERFLOW_TEST_TOOL')
-  ? () =>
-      require('@claude-code-hardened/builtin-tools/tools/OverflowTestTool/OverflowTestTool.js')
-        .OverflowTestTool
-  : null
+// The module is a stub that only exports OVERFLOW_TEST_TOOL_NAME — requiring
+// `.OverflowTestTool` would push undefined into the tool list. Keep it
+// unregistered until a real implementation exists.
+const OverflowTestToolLoader = null
 const CtxInspectToolLoader = feature('CONTEXT_COLLAPSE')
   ? () =>
       (

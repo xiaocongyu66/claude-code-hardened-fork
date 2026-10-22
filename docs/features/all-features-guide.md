@@ -494,22 +494,22 @@ AI 也可通过 `SnipTool` 自动截断过长的对话：
 
 ---
 
-## 18. 其他恢复的工具
+## 18. 其他工具状态
 
-以下工具从 stub 恢复为完整实现：
+以下工具为恢复实现或仍为 stub（已标注）：
 
-| 工具 | 说明 | 使用 |
+| 工具 | 说明 | 状态 |
 |------|------|------|
-| `SleepTool` | 暂停执行指定时间 | AI 在轮询场景自动调用 |
-| `WebBrowserTool` | 终端内网页交互 | AI 需要查看网页时调用 |
-| `SubscribePRTool` | 订阅 GitHub PR 变更 | `/subscribe-pr` 或 AI 调用 |
-| `PushNotificationTool` | 推送桌面通知 | AI 在长任务完成时调用 |
-| `CtxInspectTool` | 检查上下文窗口使用 | AI 判断上下文剩余空间 |
-| `TerminalCaptureTool` | 截取终端屏幕 | AI 需要看终端输出时调用 |
-| `SendUserFileTool` | 向用户发送文件 | AI 导出文件时调用 |
-| `REPLTool` | 启动子 REPL 会话 | AI 需要独立交互环境时调用 |
-| `VerifyPlanExecutionTool` | 验证执行计划完成度 | AI 完成计划后自动验证 |
-| `SuggestBackgroundPRTool` | 建议创建后台 PR | AI 发现可独立的变更时提议 |
+| `SleepTool` | 暂停执行指定时间 | 完整实现 |
+| `WebBrowserTool` | 终端内网页交互 | 完整实现 |
+| `SubscribePRTool` | 订阅 GitHub PR 变更 | **stub**：本构建无 KAIROS webhook，恒返回 `subscribed:false` |
+| `PushNotificationTool` | 推送桌面通知 | 完整实现（需 Remote Control） |
+| `CtxInspectTool` | 检查上下文窗口使用 | 完整实现 |
+| `TerminalCaptureTool` | 截取终端屏幕 | **stub**：无 TERMINAL_PANEL runtime，返回空内容 |
+| `SendUserFileTool` | 向用户发送文件 | 完整实现（需 bridge 上传才标记 sent） |
+| `REPLTool` | 启动子 REPL 会话 | **stub**：无 ant-native runtime，调用返回不可用 |
+| `VerifyPlanExecutionTool` | 验证执行计划完成度 | 完整实现 |
+| `SuggestBackgroundPRTool` | 建议创建后台 PR | **stub**：无 KAIROS runtime，恒返回 `suggested:false` |
 | `ListPeersTool` | 列出已发现的 peer | AI 查询多实例状态时调用 |
 
 ---

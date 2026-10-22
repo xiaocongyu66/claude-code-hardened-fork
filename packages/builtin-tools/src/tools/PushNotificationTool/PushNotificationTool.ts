@@ -46,7 +46,7 @@ Use this when:
 - A permission prompt is waiting and you need user input
 - Something urgent requires the user's attention
 
-Requires Remote Control to be configured. Respects user notification settings (taskCompleteNotifEnabled, inputNeededNotifEnabled, agentPushNotifEnabled).`
+Requires Remote Control to be configured.`
   },
 
   isEnabled() {

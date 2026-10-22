@@ -25,9 +25,9 @@ keywords: ["Ant 特权", "USER_TYPE", "身份门控", "内部功能", "Anthropic
 
 | 工具 | 代码位置 | 用途 |
 |------|---------|------|
-| **REPLTool** | `packages/builtin-tools/src/tools/REPLTool/` | 高级 REPL 模式——在 VM 中包装 Bash/Read/Edit/Glob/Grep/Agent 等工具 |
-| **SuggestBackgroundPRTool** | `packages/builtin-tools/src/tools/SuggestBackgroundPRTool/` | 建议在后台创建 PR |
-| **ConfigTool** | `packages/builtin-tools/src/tools/ConfigTool/` | 交互式配置编辑器，包含 Gates 标签页用于覆盖 GrowthBook flags |
+| **REPLTool** | `packages/builtin-tools/src/tools/REPLTool/` | 高级 REPL 模式（反编译版中已 stub，调用返回不可用） |
+| **SuggestBackgroundPRTool** | `packages/builtin-tools/src/tools/SuggestBackgroundPRTool/` | 建议在后台创建 PR（反编译版中已 stub，恒返回 `suggested:false`） |
+| **ConfigTool** | `packages/builtin-tools/src/tools/ConfigTool/` | 交互式配置编辑器（反编译版中无 Gates 标签页） |
 | **TungstenTool** | `packages/builtin-tools/src/tools/TungstenTool/` | 基于 tmux 的终端面板工具（反编译版中已 stub） |
 
 ```typescript
