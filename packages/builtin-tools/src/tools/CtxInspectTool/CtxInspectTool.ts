@@ -48,7 +48,7 @@ export const CtxInspectTool = buildTool({
     return 'Inspect the current context window contents and token usage'
   },
   async prompt() {
-    return `Inspect the current conversation context. Shows token usage, message count, and a breakdown of what's consuming context space.
+    return `Inspect the current conversation context. Shows token usage, message count, and context flags/summary (no per-component breakdown).
 
 Use this to understand your context budget before deciding whether to snip old messages or adjust your approach.`
   },

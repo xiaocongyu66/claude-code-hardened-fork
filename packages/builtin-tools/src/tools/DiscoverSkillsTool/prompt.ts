@@ -10,7 +10,7 @@ Use this when:
 - You're pivoting to a different kind of work mid-conversation
 - You want to find specialized skills for an unusual workflow
 
-The search uses TF-IDF keyword matching against all registered skills (bundled, user-defined, and MCP-provided). Results include skill name, description, and relevance score.
+The search uses TF-IDF keyword matching against registered skills (bundled and user-defined; MCP-provided skills are not indexed). Results include skill name, description, and relevance score.
 
 Inputs:
 - description (required, string): what you want to do — be specific, e.g. "deploy a Next.js app to Cloudflare Workers" rather than "deploy".

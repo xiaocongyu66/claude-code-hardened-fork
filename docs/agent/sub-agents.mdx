@@ -380,7 +380,7 @@ runAsyncAgentLifecycle()
 | `name` | `Agent({ name, ... })` 注册到 `agentNameRegistry` | 先解析成 agentId，再发送 |
 | raw `agentId` | `async_launched` 或 `completed` tool result 中返回 | 直接定位对应 task 或 transcript |
 
-发送 plain text message 时必须提供 `summary`，因为 UI 和权限摘要需要一个短描述。`to: "*"` 表示广播给 teammate team；结构化消息不能广播。
+发送 plain text message 时必须提供 `summary`（跨会话 `uds/bridge/tcp` 明文目标除外），因为 UI 和权限摘要需要一个短描述。`to: "*"` 表示广播给 teammate team；结构化消息不能广播。
 
 `SendMessage` 对本地后台 agent 的行为分三种：
 

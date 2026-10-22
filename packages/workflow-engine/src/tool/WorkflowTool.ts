@@ -39,7 +39,7 @@ export type WorkflowToolDescriptor = {
 
 const WORKFLOW_TOOL_PROMPT = `Use the Workflow tool to execute a workflow script that orchestrates multiple subagents deterministically. The script runs in the background; you receive a run_id immediately and are notified on completion.
 
-Provide the script inline via "script", or reference a named workflow via "name" (resolved from .claude/workflows/), or an existing file via "scriptPath". Pass "args" as a real JSON value (object/array/string), not a stringified string.
+Provide the script inline via "script", or reference a named workflow via "name" (resolved from .claude/workflows/), or an existing file via "scriptPath" (absolute or relative to the session cwd; the resolved path must stay within the cwd). Pass "args" as a real JSON value (object/array/string), not a stringified string.
 
 Use "resumeFromRunId" to resume a prior run — completed agent() calls replay from the journal instantly.
 
@@ -50,6 +50,7 @@ Script execution model (common pitfalls — getting these wrong is the #1 cause 
 - Do NOT use TS type annotations, \`interface\`, \`enum\`, \`as\`, or generics — the engine does not transpile, so even a .ts file with type syntax fails to parse.
 - Keep EXACTLY ONE \`export const meta = {...}\` (plain literal) and remove every other \`export\` / \`export default\`.
 - Return the result with a top-level \`return\`.
+- Determinism: \`Date.now()\`, \`new Date()\`, and \`Math.random()\` are blocked — the script must be deterministic.
 Prefer .js / .mjs. See /ultracode for the full playbook and quality patterns.`
 
 export function createWorkflowTool(

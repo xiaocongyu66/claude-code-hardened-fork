@@ -81,7 +81,7 @@ export async function getPrompt(
 
 ## When to fork
 
-When you need to delegate work that benefits from full conversation context (e.g., continuing a multi-file refactor where the child needs the same system prompt and history), use \`fork: true\`. For most tasks, prefer specialized agent types (Explore, Plan, general-purpose).
+When you need to delegate work that benefits from full conversation context (e.g., continuing a multi-file refactor where the child needs the same system prompt and history), omit \`subagent_type\` — the call forks from the parent conversation. For most tasks, prefer specialized agent types (Explore, Plan, general-purpose) by specifying \`subagent_type\`.
 
 **Don't peek.** The tool result includes an \`output_file\` path — do not Read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it.
 
@@ -95,7 +95,7 @@ When you need to delegate work that benefits from full conversation context (e.g
 
 ## Writing the prompt
 
-${forkEnabled ? 'When spawning an agent without `fork: true`, it starts with zero context. ' : ''}Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
+${forkEnabled ? 'When spawning a typed agent (with `subagent_type`), it starts with zero context. ' : ''}Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
 - Explain what you're trying to accomplish and why, what you've already learned or ruled out, and enough context for the agent to make judgment calls.
 - If you need a short response, say so ("report in under 200 words").
 - Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
@@ -123,7 +123,7 @@ The ${AGENT_TOOL_NAME} tool launches specialized agents (subprocesses) that auto
 
 ${agentListSection}
 
-When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.${forkEnabled ? ` Set \`fork: true\` to fork from the parent conversation context, inheriting full history and model.` : ''}`
+When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. ${forkEnabled ? 'If omitted, the agent forks from the parent conversation, inheriting full history and model. Specify subagent_type to spawn a typed agent with zero context.' : 'If omitted, the general-purpose agent is used.'}`
 
   // Coordinator mode gets the slim prompt -- the coordinator system prompt
   // already covers usage notes, examples, and when-not-to-use guidance.

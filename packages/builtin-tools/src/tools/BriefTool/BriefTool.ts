@@ -150,7 +150,7 @@ export const BriefTool = buildTool({
     return outputSchema()
   },
   isEnabled() {
-    return isBridgeEnabled()
+    return isBriefEnabled()
   },
   isConcurrencySafe() {
     return true
