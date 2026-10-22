@@ -2293,9 +2293,15 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           logMCPDebug(this.serverName, `Token refresh successful`)
           await this.saveTokens(newTokens)
           emitRefreshEvent('success')
+          // Refresh responses carry no issuer; read back the binding that
+          // saveTokens just preserved from the previous record.
+          const storedIssuer =
+            getSecureStorage().read()?.mcpOAuth?.[
+              getServerKey(this.serverName, this.serverConfig)
+            ]?.issuer
           return {
             ...newTokens,
-            issuer: newTokens.issuer ?? tokenData?.issuer,
+            issuer: newTokens.issuer ?? storedIssuer,
           }
         }
 
