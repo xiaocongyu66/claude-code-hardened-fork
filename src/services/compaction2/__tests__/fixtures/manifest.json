@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "tokenizers": [
+    {
+      "id": "mini-cl100k",
+      "format": "tiktoken",
+      "file": "mini-cl100k.tiktoken",
+      "pretokenizer": "cl100k",
+      "models": ["mini/cl100k-*"]
+    },
+    {
+      "id": "mini-kimi",
+      "format": "tiktoken",
+      "file": "mini-cl100k.tiktoken",
+      "pretokenizer": "kimi",
+      "models": ["mini/kimi-*"]
+    },
+    {
+      "id": "mini-hf",
+      "format": "hf",
+      "file": "mini-hf.tokenizer.json",
+      "models": ["mini/hf-basic-*"]
+    },
+    {
+      "id": "mini-hf-ignore",
+      "format": "hf",
+      "file": "mini-hf-ignore.tokenizer.json",
+      "models": ["mini/hf-ignore-*"]
+    },
+    {
+      "id": "mini-hf-nfc",
+      "format": "hf",
+      "file": "mini-hf-nfc.tokenizer.json",
+      "models": ["mini/hf-nfc-*"]
+    },
+    {
+      "id": "mini-hf-deepseek",
+      "format": "hf",
+      "file": "mini-hf-deepseek.tokenizer.json",
+      "models": ["mini/hf-deepseek-*"]
+    },
+    {
+      "id": "mini-hf-main",
+      "format": "hf",
+      "file": "mini-hf-main-only.tokenizer.json",
+      "models": ["mini/hf-main-*"]
+    },
+    {
+      "id": "missing",
+      "format": "tiktoken",
+      "file": "does-not-exist.tiktoken",
+      "pretokenizer": "cl100k",
+      "models": ["mini/missing-*"]
+    }
+  ]
+}
