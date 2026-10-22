@@ -94,6 +94,8 @@ export interface CompactionV2Options {
   estimateEntryTokens?: (entry: EntryView) => number
   now?: () => number
   onTrace?: (entry: DecisionTraceEntry) => void
+  /** Reject a compacted outcome the caller cannot render (e.g. no legacy result). */
+  canAcceptOutcome?: (outcome: CompactionOutcome) => boolean
 }
 
 export interface CompactionV2Result {
@@ -346,10 +348,15 @@ export async function runCompactionV2(
           }
     const headroomTokens = progress.headroomTokens ?? outcome.headroomTokens
     // A reduced outcome has no side effects yet, so a failed guard can simply
-    // fall through. A compacted outcome has already committed (soft summary +
-    // cleanup); discarding it would lose those effects, so keep it and surface
-    // the guard warning instead.
-    if (!progress.ok && outcome.kind === 'reduced') {
+    // fall through. A non-soft compacted method can also fall through: it has
+    // not committed the legacy summary. Soft is the exception — its summary
+    // and cleanup already ran, so discarding it would lose those effects; keep
+    // it and surface the guard warning instead.
+    if (
+      !progress.ok &&
+      (outcome.kind === 'reduced' ||
+        (outcome.kind === 'compacted' && outcome.method !== 'soft'))
+    ) {
       record({
         method: name,
         outcome: 'guard-blocked',
@@ -359,10 +366,14 @@ export async function runCompactionV2(
       })
       continue
     }
-    // Remote/snapcompact can produce a compacted outcome we cannot yet turn
-    // into the legacy CompactionResult. Fall through to the next method
-    // (soft) instead of returning a no-op.
-    if (outcome.kind === 'compacted' && !getLegacyCompactionResult(outcome)) {
+    // Callers that can only consume the legacy CompactionResult pass
+    // `canAcceptOutcome`; an unrenderable compacted outcome then falls
+    // through to the next method (soft) instead of returning a no-op.
+    if (
+      outcome.kind === 'compacted' &&
+      options.canAcceptOutcome &&
+      !options.canAcceptOutcome(outcome)
+    ) {
       record({
         method: name,
         outcome: 'skipped',
@@ -479,6 +490,11 @@ export async function runCompactionV2ForQuery(
         tracking: request.tracking,
       }),
       shake: createShakeReducer(),
+      // The query loop only understands the legacy CompactionResult; let an
+      // unrenderable remote/snapcompact outcome fall through to soft.
+      canAcceptOutcome: outcome =>
+        outcome.kind !== 'compacted' ||
+        getLegacyCompactionResult(outcome) !== undefined,
       resolveWindowTokens: getEffectiveContextWindowSize,
     },
   )
