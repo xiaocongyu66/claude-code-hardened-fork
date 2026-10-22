@@ -39,12 +39,9 @@ export const TerminalCaptureTool = buildTool({
     return 'Capture output from a terminal panel'
   },
   async prompt() {
-    return `Capture the current content of a terminal panel. Use this to read output from terminal sessions running in the terminal panel UI.
+    return `Capture output from a terminal panel when the TERMINAL_PANEL runtime is available.
 
-Guidelines:
-- Specify the number of lines to capture (default 50)
-- Optionally target a specific panel by ID
-- Content is returned as plain text`
+This build does NOT ship that runtime: calls return empty content (line_count 0). The tool is not registered unless the TERMINAL_PANEL feature is enabled. Use Bash/REPL background tasks to inspect running commands instead.`
   },
 
   isConcurrencySafe() {

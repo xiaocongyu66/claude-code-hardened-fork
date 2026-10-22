@@ -13,7 +13,7 @@ Usage notes:
   - The URL must be a fully-formed valid URL
   - HTTP URLs will be automatically upgraded to HTTPS
   - The prompt should describe what information you want to extract from the page
-  - This tool is read-only and does not modify any files
+  - This tool is read-only: it does not modify project files. Binary responses may be persisted under the tool-results directory.
   - When the Tavily extraction backend is configured, the requested URL is sent off-device to a third-party proxy for server-side extraction; treat sensitive URLs accordingly
   - Results may be summarized if the content is very large
   - Includes a self-cleaning 15-minute cache for faster responses when repeatedly accessing the same URL

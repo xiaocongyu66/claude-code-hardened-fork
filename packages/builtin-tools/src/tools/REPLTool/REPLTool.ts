@@ -32,15 +32,9 @@ export const REPLTool = buildTool({
     return 'Execute code in the REPL environment with access to all primitive tools'
   },
   async prompt() {
-    return `Execute code in the REPL — a sandboxed environment with direct access to primitive tools (Read, Write, Edit, Glob, Grep, Bash, NotebookEdit, Agent).
+    return `Execute code in the REPL environment when the REPL execution engine is available.
 
-When REPL mode is active, primitive tools are only accessible through this tool. Use REPL for:
-- Batch operations across many files
-- Complex multi-step file transformations
-- Operations that benefit from programmatic control flow
-- Combining search results with edits in a single turn
-
-The REPL runs in a VM context with tool APIs available as functions. Results from each tool call are collected and returned together.`
+This build does NOT ship the ant-native REPL runtime: calls return an error ("REPL tool is not available in this build"). The tool is only registered for internal (USER_TYPE=ant) sessions or when CLAUDE_REPL_MODE=1, and is not usable for normal model work. Use the primitive tools (Read, Write, Edit, Glob, Grep, Bash, NotebookEdit, Agent) directly instead.`
   },
 
   isConcurrencySafe() {

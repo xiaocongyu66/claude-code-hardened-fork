@@ -38,17 +38,18 @@ export const SnipTool = buildTool({
     return 'Snip messages from conversation history to free up context'
   },
   async prompt() {
-    return `Snip messages from your conversation history to free up context window space. Snipped messages are replaced with a compact summary so you retain awareness of what happened without the full content.
+    return `Record a request to snip messages from conversation history to free context window space.
 
-Use this when:
+This tool records the intent and returns the selected message count plus a summary line. It does NOT rewrite the transcript by itself: an actual snip boundary is applied by the /force-snip flow. Once a boundary is applied, the original content is gone from context.
+
+Use it when:
 - Your context is getting full and you need to make room
 - Earlier messages contain large tool outputs you no longer need in full
-- You want to compact a long exploration sequence into a summary
+- You want to flag a long exploration sequence for compaction
 
 Guidelines:
-- Only snip messages you're confident you won't need verbatim again
-- The summary replacement preserves key facts (file paths, decisions, errors found)
-- You cannot un-snip — the original content is gone from context`
+- Only select messages you're confident you won't need verbatim again
+- Summaries preserve key facts (file paths, decisions, errors found) as text, not as a real projection`
   },
 
   isConcurrencySafe() {

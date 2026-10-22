@@ -509,11 +509,14 @@ export const FileReadTool = buildTool({
     return { result: true }
   },
   async call(
-    { file_path, offset = 1, limit = undefined, pages },
+    { file_path, offset: rawOffset = 1, limit = undefined, pages },
     context,
     _canUseTool?,
     parentMessage?,
   ) {
+    // Line numbers are 1-based; offset=0 would otherwise report the first
+    // line as line 0 (schema allows 0).
+    const offset = Math.max(1, rawOffset)
     const { readFileState, fileReadingLimits } = context
 
     const defaults = getDefaultFileReadingLimits()
