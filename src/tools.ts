@@ -289,10 +289,9 @@ const VerifyPlanExecutionToolLoader =
           require('@claude-code-hardened/builtin-tools/tools/VerifyPlanExecutionTool/VerifyPlanExecutionTool.js') as typeof import('@claude-code-hardened/builtin-tools/tools/VerifyPlanExecutionTool/VerifyPlanExecutionTool.js')
         ).VerifyPlanExecutionTool
     : null
-// The module is a stub that only exports OVERFLOW_TEST_TOOL_NAME — requiring
-// `.OverflowTestTool` would push undefined into the tool list. Keep it
-// unregistered until a real implementation exists.
-const OverflowTestToolLoader = null
+// OverflowTestTool is a stub that only exports OVERFLOW_TEST_TOOL_NAME —
+// requiring `.OverflowTestTool` would push undefined into the tool list, so it
+// is intentionally not registered until a real implementation exists.
 const CtxInspectToolLoader = feature('CONTEXT_COLLAPSE')
   ? () =>
       (
@@ -433,7 +432,7 @@ export function getAllBaseTools(): Tools {
           getTaskListTool(),
         ]
       : []),
-    ...(OverflowTestToolLoader ? [OverflowTestToolLoader()] : []),
+    // OverflowTestTool is a stub with no export — never registered.
     ...(CtxInspectToolLoader ? [CtxInspectToolLoader()] : []),
     ...(TerminalCaptureToolLoader ? [TerminalCaptureToolLoader()] : []),
     ...(isEnvTruthy(process.env.ENABLE_LSP_TOOL) ? [getLSPTool()] : []),
