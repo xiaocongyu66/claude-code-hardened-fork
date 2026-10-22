@@ -7,14 +7,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const promptSource = readFileSync(join(__dirname, '..', 'prompt.ts'), 'utf-8')
 
 describe('prompt.ts fork-related text verification', () => {
-  test('does not contain "omit `subagent_type`" guidance', () => {
-    expect(promptSource).not.toMatch(/omit.*subagent_type/)
+  test('describes fork as omitting subagent_type', () => {
+    expect(promptSource).toMatch(/omit.*subagent_type/i)
   })
 
-  test('contains `fork: true` in at least 3 locations (shared + whenToFork + forkExamples)', () => {
-    const matches = promptSource.match(/fork: true/g)
-    expect(matches).not.toBeNull()
-    expect(matches!.length).toBeGreaterThanOrEqual(3)
+  test('does not advertise a `fork: true` parameter (absent from the schema)', () => {
+    expect(promptSource).not.toMatch(/fork:\s*true/)
   })
 
   test('all forkEnabled references are ternary conditions, not negated', () => {
