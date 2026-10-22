@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import * as path from 'path';
 import * as React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { getSessionId } from 'src/bootstrap/state.js';
 import { useNotifications } from 'src/context/notifications.js';
 import { useCommandQueue } from 'src/hooks/useCommandQueue.js';
 import { type IDEAtMentioned, useIdeAtMentioned } from 'src/hooks/useIdeAtMentioned.js';
@@ -224,6 +225,26 @@ type Props = {
 // Bottom slot has maxHeight="50%"; reserve lines for footer, border, status.
 const PROMPT_FOOTER_LINES = 5;
 const MIN_INPUT_VIEWPORT_LINES = 3;
+
+/**
+ * Session-scoped task paths look like:
+ *   /tmp/claude-0/<cwd-slug>/<session-uuid>/tasks/<id>.output
+ *
+ * A terminal-level paste (clipboard sync, selection paste, another pane's
+ * screen) can carry these paths into this session. Detect it at the paste
+ * boundary so another session's transcript never becomes model input.
+ */
+const CROSS_SESSION_PASTE_RE =
+  /\/tmp\/claude-[^/\s]+\/[^/\s]+\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//g;
+
+function foreignSessionIdInPaste(text: string): string | null {
+  if (process.env.CLAUDE_CODE_ALLOW_CROSS_SESSION_INPUT === '1') return null;
+  const currentSessionId = getSessionId();
+  for (const match of text.matchAll(CROSS_SESSION_PASTE_RE)) {
+    if (match[1] && match[1] !== currentSessionId) return match[1];
+  }
+  return null;
+}
 
 function PromptInput({
   debug,
@@ -1385,6 +1406,17 @@ function PromptInput({
     pendingSpaceAfterPillRef.current = false;
     // Clean up pasted text - strip ANSI escape codes and normalize line endings and tabs
     let text = stripAnsi(rawText).replace(/\r/g, '\n').replaceAll('\t', '    ');
+
+    const foreignSessionId = foreignSessionIdInPaste(text);
+    if (foreignSessionId) {
+      addNotification({
+        key: 'cross-session-paste',
+        text: `Ignored pasted content from another session (${foreignSessionId.slice(0, 8)}…)`,
+        priority: 'immediate',
+        timeoutMs: 5000,
+      });
+      return;
+    }
 
     // Match typed/auto-suggest: `!cmd` pasted into empty input enters bash mode.
     if (input.length === 0) {
