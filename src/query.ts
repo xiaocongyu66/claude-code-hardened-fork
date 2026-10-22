@@ -686,6 +686,39 @@ async function* queryLoop(
     )
 
     queryCheckpoint('query_autocompact_start')
+    const autoCompactCacheSafeParams = {
+      systemPrompt,
+      userContext,
+      systemContext,
+      toolUseContext,
+      forkContextMessages: messagesForQuery,
+    }
+    let autoCompactOutcome: Awaited<ReturnType<typeof deps.autocompact>>
+    if (feature('COMPACTION_V2')) {
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const { runCompactionV2ForQuery } =
+        require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      autoCompactOutcome = await runCompactionV2ForQuery({
+        messages: messagesForQuery,
+        model: toolUseContext.options.mainLoopModel,
+        trigger: 'threshold',
+        tokenCount: tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+        toolUseContext,
+        cacheSafeParams: autoCompactCacheSafeParams,
+        querySource,
+        tracking,
+      })
+    } else {
+      autoCompactOutcome = await deps.autocompact(
+        messagesForQuery,
+        toolUseContext,
+        autoCompactCacheSafeParams,
+        querySource,
+        tracking,
+        snipTokensFreed,
+      )
+    }
     const {
       compactionResult,
       consecutiveFailures,
@@ -695,20 +728,7 @@ async function* queryLoop(
       // under the AUTO_COMPACT_BREAKER feature flag.
       consecutiveRapidRefills,
       rapidRefillBreaker,
-    } = await deps.autocompact(
-      messagesForQuery,
-      toolUseContext,
-      {
-        systemPrompt,
-        userContext,
-        systemContext,
-        toolUseContext,
-        forkContextMessages: messagesForQuery,
-      },
-      querySource,
-      tracking,
-      snipTokensFreed,
-    )
+    } = autoCompactOutcome
     queryCheckpoint('query_autocompact_end')
 
     if (compactionResult) {
