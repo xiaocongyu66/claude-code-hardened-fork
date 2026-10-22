@@ -215,6 +215,8 @@ export class QueryEngine {
   // many turns in SDK mode.
   private discoveredSkillNames = new Set<string>()
   private loadedNestedMemoryPaths = new Set<string>()
+  /** COMPACTION_V2 idle-trigger clock (time of the previous submit start). */
+  private lastActivityAt: number | undefined
 
   constructor(config: QueryEngineConfig) {
     this.config = config
@@ -413,6 +415,34 @@ export class QueryEngine {
         })
       },
       setSDKStatus,
+    }
+
+    // COMPACTION_V2: idle maintenance runs before the new input is appended.
+    // Default settings keep idleEnabled off, so this is a no-op unless a
+    // caller opts in; the legacy path is untouched when the flag is off.
+    if (feature('COMPACTION_V2')) {
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const { runIdleCompactionV2 } =
+        require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      const idle = await runIdleCompactionV2({
+        messages: this.mutableMessages,
+        model: initialMainLoopModel,
+        toolUseContext: processUserInputContext,
+        cacheSafeParams: {
+          systemPrompt,
+          userContext,
+          systemContext,
+          toolUseContext: processUserInputContext,
+          forkContextMessages: this.mutableMessages,
+        },
+        querySource: 'sdk',
+        lastActivityAt: this.lastActivityAt ?? Date.now(),
+      })
+      if (idle.compacted && idle.messages) {
+        this.mutableMessages = idle.messages
+      }
+      this.lastActivityAt = Date.now()
     }
 
     // Handle orphaned permission (only once per engine lifetime)
