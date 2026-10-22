@@ -199,8 +199,10 @@ describe('V1 lane', () => {
       ),
     )
     expect('summary' in result).toBe(true)
-    expect(calls[0]?.url).toBe('https://api.openai.com/v1/responses/compact')
-    expect((calls[0]?.body as { input: unknown[] }).input).toHaveLength(1)
+    const firstCall = calls[0]
+    if (!firstCall) throw new Error('expected one OpenAI compaction call')
+    expect(firstCall.url).toBe('https://api.openai.com/v1/responses/compact')
+    expect((firstCall.body as { input: unknown[] }).input).toHaveLength(1)
     if (!('preserveData' in result)) return
     const preserved = getPreservedOpenAiRemoteCompactionData(
       result.preserveData,
