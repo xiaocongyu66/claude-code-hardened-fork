@@ -14,6 +14,7 @@ import type {
   SystemCompactBoundaryMessage,
   UserMessage,
 } from '../../../types/message.js'
+import { createCompactionBoundaryMessage } from './display.js'
 import {
   isCompactionSessionEntry,
   type CompactionSessionEntry,
@@ -158,22 +159,17 @@ export function rebuildMessagesFromEntries(
     .filter(isMessageEntry)
     .at(-1)
 
-  // Constructed inline (rather than via utils/messages helpers) so this
-  // module stays a pure rebuild primitive with no transcript dependency
-  // chain — matching the legacy marker/user-summary shape exactly.
+  // Built through the display constructor (crypto-only, no transcript chain)
+  // so resume renders the same marker as the live turn — including the method
+  // that survives only in the journal row.
   const timestamp = new Date().toISOString()
   const boundary: SystemCompactBoundaryMessage = {
-    type: 'system',
-    subtype: 'compact_boundary',
-    content: 'Conversation compacted',
-    isMeta: false,
-    timestamp,
-    uuid: randomUUID(),
-    level: 'info',
-    compactMetadata: {
+    ...createCompactionBoundaryMessage({
+      method: latest.entry.method,
       trigger: 'auto',
       preTokens: latest.entry.tokensBefore,
-    },
+      timestamp,
+    }),
     ...(lastSummarized?.uuid && { logicalParentUuid: lastSummarized.uuid }),
   }
   const summary: UserMessage = {

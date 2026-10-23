@@ -14,6 +14,7 @@ import {
   type AutoCompactTrackingState,
 } from './services/compact/autoCompact.js'
 import { buildPostCompactMessages } from './services/compact/compact.js'
+import type { CompactionMethodName } from './services/compaction2/contracts.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const reactiveCompact = feature('REACTIVE_COMPACT')
   ? (require('./services/compact/reactiveCompact.js') as typeof import('./services/compact/reactiveCompact.js'))
@@ -36,6 +37,7 @@ import type {
   Message,
   RequestStartEvent,
   StreamEvent,
+  SystemInformationalMessage,
   ToolUseSummaryMessage,
   UserMessage,
   TombstoneMessage,
@@ -459,8 +461,32 @@ async function* queryLoop(
   const compactionV2LoopModule = feature('COMPACTION_V2')
     ? (require('./services/compaction2/triggers/loop.js') as typeof import('./services/compaction2/triggers/loop.js'))
     : null
+  // Display-only state: at most one "context reduced" notice per turn, even
+  // when threshold, mid-turn, and overflow passes all reduce in one loop.
+  const compactionV2Display = feature('COMPACTION_V2')
+    ? (require('./services/compaction2/session/display.js') as typeof import('./services/compaction2/session/display.js'))
+    : null
   /* eslint-enable @typescript-eslint/no-require-imports */
   const compactionV2Loop = compactionV2LoopModule?.createLoopCompactionState()
+  const compactionV2ReducedNotice =
+    compactionV2Display?.createReducedNoticeState()
+  const reducedNoticeFor = (result: {
+    reducedTokensSaved?: number
+    reducedMethod?: CompactionMethodName
+  }): SystemInformationalMessage | undefined => {
+    if (
+      !compactionV2Display ||
+      !compactionV2ReducedNotice ||
+      result.reducedTokensSaved === undefined ||
+      !result.reducedMethod
+    ) {
+      return undefined
+    }
+    return compactionV2Display.takeReducedNotice(compactionV2ReducedNotice, {
+      method: result.reducedMethod,
+      tokensSaved: result.reducedTokensSaved,
+    })
+  }
 
   // COMPACTION_V2 context promotion is single-shot per query: the overflow
   // path may switch to a larger-window model once and retry the same turn.
@@ -768,6 +794,8 @@ async function* queryLoop(
             typeof countTokensPreciseForMessages
           >[0],
         )
+        const notice = reducedNoticeFor(v2Result)
+        if (notice) yield notice
       }
     } else {
       autoCompactOutcome = await deps.autocompact(
@@ -1814,6 +1842,8 @@ async function* queryLoop(
               continue
             }
             if (overflowResult.reducedMessages) {
+              const notice = reducedNoticeFor(overflowResult)
+              if (notice) yield notice
               state = {
                 messages: overflowResult.reducedMessages,
                 toolUseContext,
@@ -2065,6 +2095,8 @@ async function* queryLoop(
             continue
           }
           if (incompleteResult.reducedMessages) {
+            const notice = reducedNoticeFor(incompleteResult)
+            if (notice) yield notice
             state = {
               messages: incompleteResult.reducedMessages,
               toolUseContext,
@@ -2637,6 +2669,8 @@ async function* queryLoop(
         }
         if (midTurnResult.reducedMessages) {
           nextMessages = midTurnResult.reducedMessages
+          const notice = reducedNoticeFor(midTurnResult)
+          if (notice) yield notice
         } else if (midTurnResult.compactionResult) {
           const postCompactMessages = buildPostCompactMessages(
             midTurnResult.compactionResult,
