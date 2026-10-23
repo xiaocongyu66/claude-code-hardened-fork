@@ -815,6 +815,16 @@ export function getInitialSettings(): SettingsJson {
 }
 
 /**
+ * Get the user-configured V2 compaction policy (`settings.compaction`), if
+ * any. Returns undefined when no settings source defines a `compaction`
+ * object. Values are already sanitized by CompactionSettingsSchema; invalid
+ * fields are dropped rather than rejecting the settings file.
+ */
+export function getCompactionSettings(): SettingsJson['compaction'] {
+  return getInitialSettings().compaction
+}
+
+/**
  * @deprecated Use getInitialSettings() instead. This alias exists for backwards compatibility.
  */
 export const getSettings_DEPRECATED = getInitialSettings
