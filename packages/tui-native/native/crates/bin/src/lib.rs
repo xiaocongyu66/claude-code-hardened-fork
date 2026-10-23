@@ -234,7 +234,13 @@ pub fn run_with_deadline(
                 session.draw_transcript_with_permission(&view, &mut transcript, open)?
             }
             (Some(open), false) => session.draw_with_permission(&view, open)?,
-            (None, true) => session.draw_transcript(&view, &mut transcript)?,
+            (None, true) => {
+                if panel.is_empty() {
+                    session.draw_transcript(&view, &mut transcript)?
+                } else {
+                    session.draw_transcript_with_panel(&view, &mut transcript, &panel)?
+                }
+            }
             (None, false) => session.draw(&view)?,
         }
 

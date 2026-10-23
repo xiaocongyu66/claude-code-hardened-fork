@@ -254,6 +254,7 @@ dependencies = [
  "cch-tui-fullscreen",
  "cch-tui-highlight",
  "cch-tui-markdown",
+ "cch-tui-panel",
  "cch-tui-proto",
  "cch-tui-theme",
  "cch-tui-ui",

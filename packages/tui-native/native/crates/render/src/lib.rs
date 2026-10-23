@@ -134,6 +134,45 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Fullscreen frame with a task/agent sidebar on the right.
+    pub fn draw_transcript_with_panel(
+        &mut self,
+        view: &ChatView,
+        model: &mut cch_tui_fullscreen::TranscriptModel,
+        panel: &cch_tui_panel::TaskPanel,
+    ) -> io::Result<()> {
+        let theme = self.theme;
+        let size = self.terminal.size()?;
+        let width = size.width.max(1) as usize;
+        let reserved = input_height(&view.input) as usize + 1;
+        let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
+        // The sidebar takes ~30% and is only drawn when it has content.
+        let sidebar_width = (width / 3).clamp(18, 44);
+        let main_width = width.saturating_sub(sidebar_width + 1).max(1);
+        let lines = transcript_lines(model, transcript_height, main_width, &theme);
+        let panel_lines = panel_lines(panel, sidebar_width.saturating_sub(2), &theme);
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(input_height(&view.input)),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            let content =
+                Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_width as u16)])
+                    .split(chunks[0]);
+            frame.render_widget(Paragraph::new(lines.clone()), content[0]);
+            let block = ratatui::widgets::Block::bordered()
+                .title(" Tasks ")
+                .border_style(Style::default().fg(theme.palette.border));
+            frame.render_widget(Paragraph::new(panel_lines).block(block), content[1]);
+            draw_prompt(frame, view, chunks[1]);
+            draw_status(frame, view, chunks[2], &theme);
+        })?;
+        Ok(())
+    }
+
     pub fn is_fullscreen(&self) -> bool {
         self.fullscreen
     }
@@ -317,6 +356,16 @@ pub fn diff_to_lines(rows: &[cch_tui_diff::DiffRow]) -> Vec<Line<'static>> {
             Line::from(Span::styled(format!("{prefix}{}", row.text), style))
         })
         .collect()
+}
+
+/// Rows for the task sidebar.
+pub fn panel_lines(
+    panel: &cch_tui_panel::TaskPanel,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let rows = panel.rows(width);
+    rows_to_lines(&rows, width, theme)
 }
 
 fn row_style(style: RowStyle, theme: &Theme) -> Style {
@@ -657,6 +706,24 @@ mod tests {
             "top not visible: {texts:?}"
         );
         assert!(!model.is_following());
+    }
+
+    #[test]
+    fn task_panel_lines_show_titles() {
+        let mut panel = cch_tui_panel::TaskPanel::new();
+        panel.apply_engine_event(
+            &parse_line(
+                r#"{"type":"system","subtype":"task_started","task_id":"t1","task_type":"local_bash","description":"run tests","status":"running"}"#,
+            )
+            .unwrap(),
+        );
+        let lines = panel_lines(&panel, 30, &Theme::dark());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("run tests")),
+            "{lines:?}"
+        );
     }
 
     #[test]
