@@ -117,7 +117,20 @@ impl Drop for TerminalSession {
 /// everything else (user input, tool output, errors) is wrapped verbatim.
 fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for row in rows {
+    let mut index = 0;
+    while index < rows.len() {
+        let row = &rows[index];
+        // Consecutive code-block rows are highlighted as one unit so the
+        // language fence applies to the whole block.
+        if row.style == RowStyle::CodeBlock {
+            let start = index;
+            while index < rows.len() && rows[index].style == RowStyle::CodeBlock {
+                index += 1;
+            }
+            lines.extend(code_block_lines(&rows[start..index]));
+            continue;
+        }
+        index += 1;
         let styled_rows = match row.style {
             RowStyle::Assistant => cch_tui_markdown::render_markdown(&row.text, width),
             _ => wrap_text(&row.text, width)
@@ -133,6 +146,83 @@ fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// Highlight a fenced (or indented) code block. Fence lines are dropped; the
+/// inner code keeps one terminal line per source line so highlighting stays
+/// aligned with line numbers.
+fn code_block_lines(block: &[Row]) -> Vec<Line<'static>> {
+    let mut inner = block;
+    let mut language: Option<&str> = None;
+    if let Some(first) = block.first() {
+        let fence = first.text.trim_start();
+        if let Some(rest) = fence.strip_prefix("```") {
+            language = Some(rest.trim()).filter(|value| !value.is_empty());
+            inner = &block[1..];
+            if let Some(last) = inner.last()
+                && last.text.trim() == "```"
+            {
+                inner = &inner[..inner.len() - 1];
+            }
+        }
+    }
+
+    let code = inner
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let highlighted = cch_tui_highlight::highlight_lines(&code, language);
+    if highlighted.is_empty() {
+        return Vec::new();
+    }
+    highlighted
+        .iter()
+        .map(|line| {
+            let spans: Vec<Span<'static>> = line
+                .spans
+                .iter()
+                .map(|span| Span::styled(span.text.clone(), token_style(span.kind)))
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn token_style(kind: cch_tui_highlight::TokenKind) -> Style {
+    use cch_tui_highlight::TokenKind;
+    match kind {
+        TokenKind::Keyword => Style::default().fg(Color::Magenta),
+        TokenKind::String => Style::default().fg(Color::Green),
+        TokenKind::Comment => Style::default().fg(Color::DarkGray),
+        TokenKind::Number => Style::default().fg(Color::Cyan),
+        TokenKind::Function => Style::default().fg(Color::Blue),
+        TokenKind::Type => Style::default().fg(Color::Yellow),
+        TokenKind::Variable => Style::default(),
+        TokenKind::Punctuation => Style::default().fg(Color::DarkGray),
+        TokenKind::Plain => Style::default().fg(Color::Green),
+    }
+}
+
+/// Render diff rows with `+`/`-` prefixes and the usual colors.
+pub fn diff_to_lines(rows: &[cch_tui_diff::DiffRow]) -> Vec<Line<'static>> {
+    use cch_tui_diff::DiffKind;
+    rows.iter()
+        .map(|row| {
+            if row.is_marker() {
+                return Line::from(Span::styled(
+                    row.text.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let (prefix, style) = match row.kind {
+                DiffKind::Added => ("+ ", Style::default().fg(Color::Green)),
+                DiffKind::Removed => ("- ", Style::default().fg(Color::Red)),
+                DiffKind::Context => ("  ", Style::default()),
+            };
+            Line::from(Span::styled(format!("{prefix}{}", row.text), style))
+        })
+        .collect()
 }
 
 fn row_style(style: RowStyle) -> Style {
@@ -281,6 +371,42 @@ mod tests {
         assert_eq!(input_height(""), 1);
         assert_eq!(input_height("a\nb\nc"), 3);
         assert_eq!(input_height(&"x\n".repeat(20)), MAX_INPUT_LINES);
+    }
+
+    #[test]
+    fn fenced_code_blocks_are_highlighted_without_fence_lines() {
+        let rows = vec![
+            Row::new(RowStyle::CodeBlock, "```rust"),
+            Row::new(RowStyle::CodeBlock, "let x = 1;"),
+            Row::new(RowStyle::CodeBlock, "```"),
+        ];
+        let lines = rows_to_lines(&rows, 40);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "let x = 1;");
+        assert!(lines[0].spans.len() > 1, "expected highlighted spans");
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("let") && s.style.fg == Some(Color::Magenta)),
+            "keyword should be magenta"
+        );
+    }
+
+    #[test]
+    fn diff_rows_get_prefixes_and_colors() {
+        let rows = cch_tui_diff::diff_lines("a\nb", "a\nc");
+        let lines = diff_to_lines(&rows);
+        let texts: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert!(texts.iter().any(|t| t == "  a"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "- b"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "+ c"), "{texts:?}");
+        let removed = lines
+            .iter()
+            .find(|l| l.to_string().starts_with("- "))
+            .expect("removed line");
+        assert_eq!(removed.spans[0].style.fg, Some(Color::Red));
     }
 
     #[test]

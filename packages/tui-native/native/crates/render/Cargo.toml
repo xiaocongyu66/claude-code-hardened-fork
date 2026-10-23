@@ -10,5 +10,7 @@ cch-tui-core = { path = "../core" }
 cch-tui-ui = { path = "../ui" }
 cch-tui-proto = { path = "../proto" }
 cch-tui-markdown = { path = "../markdown" }
+cch-tui-highlight = { path = "../highlight" }
+cch-tui-diff = { path = "../diff" }
 ratatui = "0.30"
 unicode-width = "0.2"
