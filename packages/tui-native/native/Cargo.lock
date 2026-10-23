@@ -274,6 +274,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cch-tui-search"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-ui",
+]
+
+[[package]]
 name = "cch-tui-theme"
 version = "0.1.0"
 dependencies = [
