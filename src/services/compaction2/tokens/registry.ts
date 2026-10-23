@@ -6,7 +6,7 @@
 // the directory, the manifest, the matching entry, or the file is missing
 // (or the file is malformed), resolution returns `null` and the caller falls
 // back to the cl100k native counter / content-adaptive estimate.
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { type HfTokenizer, createHfTokenizer } from './hfTokenizer.js'
 import {
@@ -78,12 +78,21 @@ function loadEntry(dir: string, entry: ManifestEntry): LoadedTokenizer | null {
   try {
     // Manifest paths are untrusted input; never read outside the data dir.
     const root = resolve(dir)
+    const rootPrefix = root.endsWith(sep) ? root : root + sep
     const filePath = resolve(dir, entry.file)
-    if (filePath !== root && !filePath.startsWith(root + sep)) {
+    if (filePath !== root && !filePath.startsWith(rootPrefix)) {
       tokenizerCache.set(cacheKey, null)
       return null
     }
-    const content = readFileSync(filePath, 'utf8')
+    // Resolve symlinks and re-check, so a linked vocab cannot escape either.
+    const realRoot = realpathSync(root)
+    const realPrefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep
+    const realFile = realpathSync(filePath)
+    if (realFile !== realRoot && !realFile.startsWith(realPrefix)) {
+      tokenizerCache.set(cacheKey, null)
+      return null
+    }
+    const content = readFileSync(realFile, 'utf8')
     if (entry.format === 'hf') {
       const tokenizer = createHfTokenizer(entry.id, content)
       loaded = tokenizer

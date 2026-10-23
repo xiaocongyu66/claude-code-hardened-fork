@@ -438,6 +438,8 @@ export interface CompactionV2QueryResult {
   consecutiveFailures?: number
   /** Mechanical reduction (shake) to use for this request only. */
   reducedMessages?: Message[]
+  /** Tokens removed by that reduction (for the legacy predictive call). */
+  tokensSaved?: number
 }
 
 /**
@@ -539,6 +541,7 @@ export async function runCompactionV2ForQuery(
     return {
       wasCompacted: false,
       reducedMessages: result.outcome.messages,
+      tokensSaved: result.outcome.tokensSaved,
     }
   }
   const legacyResult = getLegacyCompactionResult(result.outcome)

@@ -4,6 +4,7 @@
 // Offloaded text is persisted through CCH's existing tool-result storage and
 // replaced with a short recoverable path reference, so a shaken region can be
 // read back with the normal Read tool. Nothing here calls a model.
+import { createHash } from 'node:crypto'
 import type { CompactionContext } from '../contracts.js'
 import type { ShakeReducer, ShakeReduction } from '../methods/shake.js'
 import { estimateTokens } from '../tokens/index.js'
@@ -58,7 +59,16 @@ async function defaultOffload(
     require('../../../utils/toolResultStorage.js') as typeof import('../../../utils/toolResultStorage.js')
   /* eslint-enable @typescript-eslint/no-require-imports */
 
-  const id = `shake-${ctx.agentId ?? 'main'}-${region.messageIndex}-${region.blockIndex}-${ctx.now()}`
+  // Deterministic id: re-shaking the same source must reuse the existing
+  // artifact instead of minting a new file every turn.
+  const stableKey =
+    region.kind === 'toolResult'
+      ? region.toolUseId
+      : `${region.messageIndex}-${region.blockIndex}-${createHash('sha1')
+          .update(region.originalText)
+          .digest('hex')
+          .slice(0, 16)}`
+  const id = `shake-${stableKey}`
   const persisted = await persistToolResult(region.originalText, id)
   if ('error' in persisted) {
     // Let shakeMessages skip this region: never replace recoverable content

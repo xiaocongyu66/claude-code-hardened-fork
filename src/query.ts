@@ -605,6 +605,7 @@ async function* queryLoop(
     // reports the pre-reduction size. When a reduction lands, measure the
     // reduced array directly for this turn's blocking/predictive checks.
     let compactionV2TokenOverride: number | undefined
+    let compactionV2SavingsForLegacy = 0
     if (feature('HISTORY_SNIP')) {
       queryCheckpoint('query_snip_start')
       const snipResult = snipModule!.snipCompactIfNeeded(messagesForQuery)
@@ -722,7 +723,10 @@ async function* queryLoop(
         // The v2 chain must never take down the query loop; legacy
         // autoCompactIfNeeded swallows its own failures.
         logError(error)
-        v2Result = { wasCompacted: false }
+        v2Result = {
+          wasCompacted: false,
+          consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
+        }
       }
       autoCompactOutcome = v2Result
       if (v2Result.reducedMessages) {
@@ -732,6 +736,7 @@ async function* queryLoop(
             typeof countTokensPreciseForMessages
           >[0],
         )
+        compactionV2SavingsForLegacy = v2Result.tokensSaved ?? 0
       }
     } else {
       autoCompactOutcome = await deps.autocompact(
@@ -996,7 +1001,10 @@ async function* queryLoop(
           },
           querySource,
           tracking,
-          snipTokensFreed,
+          // The legacy threshold check re-estimates from the usage anchor,
+          // which shake cannot change; include its savings so a just-reduced
+          // context is not compacted again this turn.
+          snipTokensFreed + compactionV2SavingsForLegacy,
         )
         if (predictiveResult.rapidRefillBreaker) {
           // 2.9: identical trip semantics to the main call above (official
