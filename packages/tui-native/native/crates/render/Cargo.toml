@@ -1,0 +1,9 @@
+[package]
+name = "cch-tui-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cch-tui-core = { path = "../core" }
