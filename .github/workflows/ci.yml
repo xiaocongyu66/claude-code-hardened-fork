@@ -167,8 +167,14 @@ jobs:
         working-directory: packages/tui-native/native
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Build (tui-napi)
+        if: hashFiles('packages/tui-native/native/Cargo.toml') != ''
+        working-directory: packages/tui-native/native
+        run: cargo build --locked --release --target ${{ matrix.target }} -p cch-tui-napi
+
       # 统一整理产物到 vendor 布局：vendor/<name>/<triple>/<name>.node
-      # TUI bin 单独走 stage/tui/<triple>/cch-tui[.exe]（+ .sha256）
+      # TUI bin 单独走 stage/tui/<triple>/cch-tui[.exe]（+ .sha256）；
+      # napi cdylib 走 stage/tui/<triple>/tui.node（与 vendor 布局一致）
       - name: Stage artifacts (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -195,6 +201,18 @@ jobs:
             exit 1
           fi
           cp "$tui_bin" "stage/tui/${{ matrix.target }}/cch-tui"
+          tui_node=""
+          for ext in so dylib; do
+            if [ -f "packages/tui-native/native/target/${{ matrix.target }}/release/libcch_tui.$ext" ]; then
+              tui_node="packages/tui-native/native/target/${{ matrix.target }}/release/libcch_tui.$ext"
+              break
+            fi
+          done
+          if [ -z "$tui_node" ]; then
+            echo "::error::tui napi artifact missing: libcch_tui.{so,dylib} (${{ matrix.target }}) — build failed or output renamed"
+            exit 1
+          fi
+          cp "$tui_node" "stage/tui/${{ matrix.target }}/tui.node"
           if command -v sha256sum >/dev/null 2>&1; then
             hash=$(sha256sum "$tui_bin" | awk '{print $1}')
           else
@@ -223,6 +241,12 @@ jobs:
             exit 1
           }
           Copy-Item $tuiBin "stage/tui/${{ matrix.target }}/cch-tui.exe"
+          $tuiNode = "packages/tui-native/native/target/${{ matrix.target }}/release/cch_tui.dll"
+          if (-not (Test-Path $tuiNode)) {
+            Write-Output "::error::tui napi artifact missing: $tuiNode — build failed or output renamed"
+            exit 1
+          }
+          Copy-Item $tuiNode "stage/tui/${{ matrix.target }}/tui.node"
           $hash = (Get-FileHash -Algorithm SHA256 $tuiBin).Hash.ToLower()
           Set-Content -NoNewline -Path "stage/tui/${{ matrix.target }}/cch-tui.exe.sha256" -Value "$hash  cch-tui.exe`n"
 
