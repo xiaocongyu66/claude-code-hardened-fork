@@ -9,12 +9,12 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use cch_tui_actions::{ExpandLimits, ExpandState, project};
-use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer};
+use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer, VimState};
 use cch_tui_dialog::PermissionDialog;
 use cch_tui_fullscreen::TranscriptModel;
 use cch_tui_keymap::{
     Action, Context, ContextStack, Key, KeyCode as KmKeyCode, Keymap, Modifiers as KmModifiers,
-    Resolution, Resolver,
+    Resolution, Resolver, VimAction, keymap_with_vim, vim_context,
 };
 use cch_tui_panel::TaskPanel;
 use cch_tui_proto::{ControlRequest, EngineEvent, parse_line};
@@ -129,10 +129,20 @@ pub fn run_with_deadline(
         }
     };
 
-    let keymap = Keymap::default();
+    // `CCH_TUI_VIM=1` opts into the vim prompt, matching Ink's insert-mode
+    // start and Esc-driven normal mode.
+    let mut vim = VimState::new(std::env::var("CCH_TUI_VIM").is_ok_and(|value| value == "1"));
+    let keymap = if vim.is_enabled() {
+        keymap_with_vim()
+    } else {
+        Keymap::default()
+    };
     let mut contexts = ContextStack::new();
     contexts.push(Context::GLOBAL);
     contexts.push(Context::PROMPT);
+    if vim.is_enabled() {
+        contexts.push(vim_context(vim));
+    }
     let mut resolver = Resolver::new(keymap.bindings(), &contexts, 800);
     let mut buffer = TextBuffer::new();
     let mut history = PromptHistory::default();
@@ -238,6 +248,7 @@ pub fn run_with_deadline(
             next_context_poll = Instant::now() + Duration::from_secs(5);
         }
         view.input = buffer.text().to_string();
+        view.vim_mode = vim.status_indicator().map(str::to_owned);
 
         match (dialog.as_ref(), fullscreen) {
             (Some(open), true) => {
@@ -354,7 +365,11 @@ pub fn run_with_deadline(
                     continue;
                 }
 
-                if engine_closed && buffer.is_empty() && key.code == KeyCode::Esc {
+                if engine_closed
+                    && buffer.is_empty()
+                    && key.code == KeyCode::Esc
+                    && !vim.is_enabled()
+                {
                     break;
                 }
 
@@ -382,10 +397,14 @@ pub fn run_with_deadline(
                 }
 
                 clock_ms = clock_ms.saturating_add(33);
+                let mut vim_mode_changed = false;
                 match resolver.resolve(to_key(&key), clock_ms) {
                     Resolution::Pending => {}
                     Resolution::Ignored => {
-                        if let KeyCode::Char(ch) = key.code
+                        // In vim normal mode an unbound printable key is a
+                        // no-op, not text to insert.
+                        if !vim.is_normal()
+                            && let KeyCode::Char(ch) = key.code
                             && !key.modifiers.contains(KeyModifiers::CONTROL)
                             && !key.modifiers.contains(KeyModifiers::ALT)
                         {
@@ -401,7 +420,13 @@ pub fn run_with_deadline(
                                 break;
                             }
                         } else if action == Action::PROMPT_ESCAPE || action == Action::APP_ESCAPE {
-                            buffer.set_text("");
+                            if vim.is_normal() {
+                                // Esc in normal mode only cancels pending
+                                // state; it never clears the prompt.
+                                resolver.reset();
+                            } else {
+                                buffer.set_text("");
+                            }
                         } else if action == Action::PROMPT_SUBMIT {
                             submit(
                                 &mut view,
@@ -485,8 +510,19 @@ pub fn run_with_deadline(
                                 candidates,
                             ));
                             view.status = Some("search: (0/0)".into());
+                        } else if let Some(intent) = vim_intent(action) {
+                            vim_mode_changed = apply_vim_intent(intent, &mut vim, &mut buffer);
                         }
                     }
+                }
+
+                if vim_mode_changed {
+                    // The resolver borrows the context stack, so rebuild both
+                    // after a mode switch. A pending chord belonged to the old
+                    // mode and is discarded.
+                    drop(resolver);
+                    sync_vim_contexts(&mut contexts, &vim);
+                    resolver = Resolver::new(keymap.bindings(), &contexts, 800);
                 }
             }
             _ => {}
@@ -494,6 +530,59 @@ pub fn run_with_deadline(
     }
 
     Ok(())
+}
+
+/// What a resolved [`Action::VIM_*`](VimAction) asks the event loop to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimIntent {
+    /// Apply the buffer edit and stay in normal mode.
+    Edit(VimAction),
+    /// Apply the buffer edit, then enter insert mode (`i`/`a`/`o`).
+    EnterInsert(VimAction),
+    /// Leave insert mode without touching the buffer (`Esc`).
+    EnterNormal,
+}
+
+/// Map a keymap action to a vim transition, if it is one.
+///
+/// Pure so the action wiring can be tested without a terminal.
+fn vim_intent(action: Action) -> Option<VimIntent> {
+    let vim_action = VimAction::from_action(action)?;
+    Some(match vim_action {
+        VimAction::Insert | VimAction::Append | VimAction::OpenLine => {
+            VimIntent::EnterInsert(vim_action)
+        }
+        VimAction::NormalMode => VimIntent::EnterNormal,
+        other => VimIntent::Edit(other),
+    })
+}
+
+/// Apply `intent`; returns whether the vim mode changed.
+fn apply_vim_intent(intent: VimIntent, vim: &mut VimState, buffer: &mut TextBuffer) -> bool {
+    match intent {
+        VimIntent::Edit(action) => {
+            action.apply(buffer);
+            false
+        }
+        VimIntent::EnterInsert(action) => {
+            action.apply(buffer);
+            vim.enter_insert();
+            true
+        }
+        VimIntent::EnterNormal => {
+            vim.enter_normal();
+            true
+        }
+    }
+}
+
+/// Swap the mode-specific vim context for the one matching `vim`.
+fn sync_vim_contexts(contexts: &mut ContextStack, vim: &VimState) {
+    contexts.pop(Context::VIM_NORMAL);
+    contexts.pop(Context::VIM_INSERT);
+    if vim.is_enabled() {
+        contexts.push(vim_context(*vim));
+    }
 }
 
 fn answer_permission(
@@ -638,6 +727,96 @@ fn to_key(key: &ratatui::crossterm::event::KeyEvent) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vim_intent_maps_actions_to_transitions() {
+        assert_eq!(
+            vim_intent(Action::VIM_INSERT),
+            Some(VimIntent::EnterInsert(VimAction::Insert))
+        );
+        assert_eq!(
+            vim_intent(Action::VIM_APPEND),
+            Some(VimIntent::EnterInsert(VimAction::Append))
+        );
+        assert_eq!(
+            vim_intent(Action::VIM_OPEN_LINE),
+            Some(VimIntent::EnterInsert(VimAction::OpenLine))
+        );
+        assert_eq!(vim_intent(Action::VIM_NORMAL), Some(VimIntent::EnterNormal));
+        assert_eq!(
+            vim_intent(Action::VIM_LEFT),
+            Some(VimIntent::Edit(VimAction::Left))
+        );
+        assert_eq!(
+            vim_intent(Action::VIM_DELETE_LINE),
+            Some(VimIntent::Edit(VimAction::DeleteLine))
+        );
+
+        // Non-vim actions are untouched.
+        for action in [
+            Action::PROMPT_SUBMIT,
+            Action::EDIT_BACKSPACE,
+            Action::APP_INTERRUPT,
+        ] {
+            assert_eq!(vim_intent(action), None, "{action}");
+        }
+    }
+
+    #[test]
+    fn vim_intents_drive_the_mode_state_machine() {
+        let mut vim = VimState::enabled();
+        let mut buffer = TextBuffer::from_text("abc");
+        buffer.set_cursor(0);
+
+        // `a` moves past the cursor and enters insert mode.
+        assert!(apply_vim_intent(
+            VimIntent::EnterInsert(VimAction::Append),
+            &mut vim,
+            &mut buffer
+        ));
+        assert!(vim.is_insert());
+        assert_eq!(buffer.cursor(), 1);
+
+        // Esc leaves insert without touching the text.
+        assert!(apply_vim_intent(
+            VimIntent::EnterNormal,
+            &mut vim,
+            &mut buffer
+        ));
+        assert!(vim.is_normal());
+        assert_eq!(buffer.text(), "abc");
+
+        // Motions apply but keep normal mode.
+        assert!(!apply_vim_intent(
+            VimIntent::Edit(VimAction::LineEnd),
+            &mut vim,
+            &mut buffer
+        ));
+        assert!(vim.is_normal());
+        assert_eq!(buffer.cursor(), 3);
+    }
+
+    #[test]
+    fn sync_vim_contexts_swaps_the_mode_context() {
+        let mut contexts = ContextStack::new();
+        contexts.push(Context::PROMPT);
+        let mut vim = VimState::enabled();
+
+        sync_vim_contexts(&mut contexts, &vim);
+        assert!(contexts.contains(Context::VIM_INSERT));
+        assert!(!contexts.contains(Context::VIM_NORMAL));
+
+        vim.enter_normal();
+        sync_vim_contexts(&mut contexts, &vim);
+        assert!(contexts.contains(Context::VIM_NORMAL));
+        assert!(!contexts.contains(Context::VIM_INSERT));
+
+        vim.toggle();
+        sync_vim_contexts(&mut contexts, &vim);
+        assert!(!contexts.contains(Context::VIM_NORMAL));
+        assert!(!contexts.contains(Context::VIM_INSERT));
+        assert!(contexts.contains(Context::PROMPT));
+    }
 
     #[test]
     fn history_walks_older_then_newer_and_resets() {

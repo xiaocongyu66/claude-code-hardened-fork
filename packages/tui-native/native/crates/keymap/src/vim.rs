@@ -6,9 +6,33 @@
 //! (`i`/`a`/`o` emit [`Action::VIM_INSERT`], `Esc` in insert mode emits
 //! [`Action::VIM_NORMAL`]); [`VimAction::apply`] covers the buffer edits.
 
-use cch_tui_core::TextBuffer;
+use cch_tui_core::{TextBuffer, VimMode, VimState};
 
-use crate::{Action, BindingSpec, Context, Key};
+use crate::{Action, BindingSpec, Context, Key, Keymap};
+
+/// Context to push on top of [`Context::PROMPT`] for `state`.
+///
+/// Vim off collapses to the base prompt context, so a caller can always push
+/// this and get the non-vim behaviour. While enabled, insert mode adds
+/// [`Context::VIM_INSERT`] (only `Esc` is bound there, everything else falls
+/// through to the prompt) and normal mode adds [`Context::VIM_NORMAL`].
+pub fn vim_context(state: VimState) -> Context {
+    if !state.is_enabled() {
+        return Context::PROMPT;
+    }
+    match state.mode() {
+        VimMode::Insert => Context::VIM_INSERT,
+        VimMode::Normal => Context::VIM_NORMAL,
+    }
+}
+
+/// The base keymap plus [`VIM_SPECS`].
+///
+/// The vim tables are inert until a vim context is pushed, so this is safe to
+/// use unconditionally.
+pub fn keymap_with_vim() -> Keymap {
+    Keymap::with_extensions(&[VIM_SPECS])
+}
 
 /// Normal-mode motions/edits plus the insert-mode escape.
 pub const VIM_SPECS: &[BindingSpec] = &[
@@ -236,6 +260,65 @@ mod tests {
             Resolution::Action(action) => Some(action),
             _ => None,
         }
+    }
+
+    #[test]
+    fn vim_context_follows_the_mode_and_collapses_when_disabled() {
+        assert_eq!(vim_context(VimState::default()), Context::PROMPT);
+
+        let mut state = VimState::enabled();
+        assert_eq!(vim_context(state), Context::VIM_INSERT);
+
+        state.enter_normal();
+        assert_eq!(vim_context(state), Context::VIM_NORMAL);
+
+        state.enter_insert();
+        assert_eq!(vim_context(state), Context::VIM_INSERT);
+
+        state.toggle();
+        assert_eq!(vim_context(state), Context::PROMPT);
+    }
+
+    #[test]
+    fn keymap_with_vim_keeps_prompt_editing_in_insert_mode() {
+        let keymap = keymap_with_vim();
+        let mut stack = ContextStack::new();
+        stack.push(Context::PROMPT);
+        stack.push(vim_context(VimState::enabled()));
+
+        // Prompt editing still resolves beneath VIM_INSERT...
+        assert_eq!(
+            action_of(&keymap, &stack, Key::enter()),
+            Some(Action::PROMPT_SUBMIT)
+        );
+        assert_eq!(
+            action_of(&keymap, &stack, Key::backspace()),
+            Some(Action::EDIT_BACKSPACE)
+        );
+        // ...plain characters stay unbound so they are inserted as text.
+        assert_eq!(action_of(&keymap, &stack, Key::char('h')), None);
+        // Esc leaves insert mode instead of clearing the prompt.
+        assert_eq!(
+            action_of(&keymap, &stack, Key::esc()),
+            Some(Action::VIM_NORMAL)
+        );
+    }
+
+    #[test]
+    fn disabled_vim_context_ignores_the_vim_table() {
+        let keymap = keymap_with_vim();
+        let mut stack = ContextStack::new();
+        stack.push(Context::PROMPT);
+        stack.push(vim_context(VimState::default()));
+
+        assert_eq!(
+            keymap.resolve_once(&stack, Key::char('h'), 0),
+            Resolution::Ignored
+        );
+        assert_eq!(
+            action_of(&keymap, &stack, Key::esc()),
+            Some(Action::PROMPT_ESCAPE)
+        );
     }
 
     #[test]
