@@ -83,6 +83,13 @@ impl TranscriptSearch {
         self.current.map(|index| self.matches[index])
     }
 
+    /// Zero-based index of [`current`](Self::current) within [`matches`].
+    ///
+    /// [`matches`]: Self::matches
+    pub fn current_index(&self) -> Option<usize> {
+        self.current
+    }
+
     /// Select the next match, wrapping from the last to the first.
     ///
     /// Returns the newly selected match, or `None` when the query has no
@@ -424,6 +431,24 @@ mod tests {
         assert_eq!(search.next().map(|m| offsets(&m)), Some((0, 3)));
         assert_eq!(search.prev().map(|m| offsets(&m)), Some((8, 11)));
         assert_eq!(search.prev().map(|m| offsets(&m)), Some((4, 7)));
+    }
+
+    #[test]
+    fn current_index_tracks_navigation() {
+        let rows = [row("foo"), row("foo foo")];
+        let mut search = TranscriptSearch::new(&rows);
+        search.set_query("foo");
+        assert_eq!(search.current_index(), Some(0));
+
+        search.next();
+        assert_eq!(search.current_index(), Some(1));
+        search.prev();
+        assert_eq!(search.current_index(), Some(0));
+        search.prev();
+        assert_eq!(search.current_index(), Some(2));
+
+        search.set_query("missing");
+        assert_eq!(search.current_index(), None);
     }
 
     #[test]

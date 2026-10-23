@@ -16,9 +16,11 @@ use cch_tui_keymap::{
     Action, Context, ContextStack, Key, KeyCode as KmKeyCode, Keymap, Modifiers as KmModifiers,
     Resolution, Resolver, VimAction, keymap_with_vim, vim_context,
 };
+use cch_tui_palette::{CommandPalette, CommandSpec};
 use cch_tui_panel::TaskPanel;
 use cch_tui_proto::{ControlRequest, EngineEvent, parse_line};
-use cch_tui_render::{DEFAULT_INLINE_HEIGHT, TerminalSession};
+use cch_tui_render::{DEFAULT_INLINE_HEIGHT, Overlay, TerminalSession};
+use cch_tui_search::TranscriptSearch;
 use cch_tui_ui::{ChatView, Row, RowStyle, SessionView};
 use engine::{EngineMessage, EngineProcess};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -149,6 +151,15 @@ pub fn run_with_deadline(
     let mut transcript = TranscriptModel::new();
     let mut dialog: Option<PermissionDialog> = None;
     let mut search: Option<HistorySearch> = None;
+    // Slash palette and transcript search share the overlay slot; the palette
+    // is driven by the input line, the transcript search owns a modal loop.
+    let mut palette = CommandPalette::new(Vec::new());
+    let mut palette_seen = String::new();
+    let mut transcript_search: Option<TranscriptSearch> = None;
+    let mut search_navigating = false;
+    // After accepting a command, hide the palette while the input still starts
+    // with the inserted text so arguments can be typed without a popup.
+    let mut palette_accept_prefix: Option<String> = None;
     let mut panel = TaskPanel::new();
     let mut expand = ExpandState::default();
     let mut all_expanded = false;
@@ -174,6 +185,12 @@ pub fn run_with_deadline(
                         view.busy = false;
                     }
                     match &event {
+                        EngineEvent::System { subtype, extra } if subtype == "init" => {
+                            palette = CommandPalette::new(command_specs_from_init(extra));
+                            palette.set_query(buffer.text());
+                            palette_seen.clear();
+                            palette_seen.push_str(buffer.text());
+                        }
                         EngineEvent::ControlRequest {
                             request_id,
                             request: ControlRequest::CanUseTool(permission),
@@ -264,22 +281,45 @@ pub fn run_with_deadline(
             }
             next_context_poll = Instant::now() + Duration::from_secs(5);
         }
+        sync_palette(&mut palette, buffer.text(), &mut palette_seen);
+        if palette_accept_prefix
+            .as_deref()
+            .is_some_and(|prefix| !buffer.text().starts_with(prefix))
+        {
+            palette_accept_prefix = None;
+        }
         view.input = buffer.text().to_string();
         view.vim_mode = vim.status_indicator().map(str::to_owned);
+
+        // Search replaces the palette when both could be visible; the palette
+        // stays open (possibly empty) for any `/`-prefixed input, except while
+        // the user is editing the arguments of an accepted command.
+        let palette_hidden = palette_accept_prefix.is_some();
+        let overlay = transcript_search.as_ref().map(search_overlay).or_else(|| {
+            (!palette_hidden)
+                .then(|| palette_overlay(&palette))
+                .flatten()
+        });
 
         match (dialog.as_ref(), fullscreen) {
             (Some(open), true) => {
                 session.draw_transcript_with_permission(&view, &mut transcript, open)?
             }
             (Some(open), false) => session.draw_with_permission(&view, open)?,
-            (None, true) => {
-                if panel.is_empty() {
-                    session.draw_transcript(&view, &mut transcript)?
-                } else {
-                    session.draw_transcript_with_panel(&view, &mut transcript, &panel)?
-                }
-            }
-            (None, false) => session.draw(&view)?,
+            (None, true) => match overlay.as_ref() {
+                Some(overlay) => session.draw_transcript_with_overlay(
+                    &view,
+                    &mut transcript,
+                    (!panel.is_empty()).then_some(&panel),
+                    overlay,
+                )?,
+                None if panel.is_empty() => session.draw_transcript(&view, &mut transcript)?,
+                None => session.draw_transcript_with_panel(&view, &mut transcript, &panel)?,
+            },
+            (None, false) => match overlay.as_ref() {
+                Some(overlay) => session.draw_with_overlay(&view, overlay)?,
+                None => session.draw(&view)?,
+            },
         }
 
         if !event::poll(Duration::from_millis(33))? {
@@ -344,6 +384,54 @@ pub fn run_with_deadline(
                     continue;
                 }
 
+                // Transcript search owns the keyboard while it is open.
+                if transcript_search.is_some() {
+                    let command = search_command(&key, search_navigating);
+                    let mut close = false;
+                    if let Some(active) = transcript_search.as_mut() {
+                        match command {
+                            SearchCommand::Close => close = true,
+                            SearchCommand::Jump => {
+                                search_navigating = true;
+                                jump_to_match(&mut transcript, fullscreen, active);
+                            }
+                            SearchCommand::Next => {
+                                search_navigating = true;
+                                if active.next().is_some() {
+                                    jump_to_match(&mut transcript, fullscreen, active);
+                                }
+                            }
+                            SearchCommand::Prev => {
+                                search_navigating = true;
+                                if active.prev().is_some() {
+                                    jump_to_match(&mut transcript, fullscreen, active);
+                                }
+                            }
+                            SearchCommand::Backspace => {
+                                let mut query = active.query().to_string();
+                                query.pop();
+                                active.set_query(query);
+                                search_navigating = false;
+                            }
+                            SearchCommand::Insert(ch) => {
+                                let mut query = active.query().to_string();
+                                query.push(ch);
+                                active.set_query(query);
+                                search_navigating = false;
+                            }
+                            SearchCommand::Ignore => {}
+                        }
+                    }
+                    if close {
+                        transcript_search = None;
+                        search_navigating = false;
+                        view.status = None;
+                    } else if !fullscreen && let Some(active) = transcript_search.as_ref() {
+                        view.status = Some(search_status(active));
+                    }
+                    continue;
+                }
+
                 // A permission dialog owns the keyboard while it is open.
                 if dialog.is_some() {
                     let mut answer: Option<(String, String, serde_json::Value)> = None;
@@ -378,6 +466,42 @@ pub fn run_with_deadline(
                             &tool_name,
                             response,
                         )?;
+                    }
+                    continue;
+                }
+
+                // Ctrl+F opens transcript search. It overrides the prompt's
+                // forward-char binding; Right still moves the cursor.
+                if key.code == KeyCode::Char('f')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    transcript_search =
+                        Some(begin_transcript_search(&view, &transcript, fullscreen));
+                    search_navigating = false;
+                    view.status = (!fullscreen).then(|| "match 0/0".to_string());
+                    continue;
+                }
+
+                // The slash palette intercepts navigation and acceptance
+                // while it has a visible row; Esc closes it even when empty.
+                let palette_open = !palette_hidden
+                    && palette.is_active()
+                    && (!palette.matching().is_empty() || key.code == KeyCode::Esc);
+                if let Some(command) = palette_command(key.code, palette_open) {
+                    match command {
+                        PaletteCommand::Previous => palette.prev(),
+                        PaletteCommand::Next => palette.next(),
+                        PaletteCommand::Accept => {
+                            palette_accept_prefix =
+                                accept_palette(&mut palette, &mut buffer, &mut palette_seen);
+                        }
+                        PaletteCommand::Dismiss => {
+                            palette.dismiss();
+                            palette_accept_prefix = None;
+                            palette_seen.clear();
+                            palette_seen.push_str(buffer.text());
+                        }
                     }
                     continue;
                 }
@@ -619,6 +743,222 @@ fn sync_vim_contexts(contexts: &mut ContextStack, vim: &VimState) {
     if vim.is_enabled() {
         contexts.push(vim_context(*vim));
     }
+}
+
+/// What a key asks the slash palette to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteCommand {
+    Previous,
+    Next,
+    Accept,
+    Dismiss,
+}
+
+/// Map a key to a palette action; `open` means the palette owns the key.
+fn palette_command(code: KeyCode, open: bool) -> Option<PaletteCommand> {
+    if !open {
+        return None;
+    }
+    match code {
+        KeyCode::Up => Some(PaletteCommand::Previous),
+        KeyCode::Down => Some(PaletteCommand::Next),
+        KeyCode::Tab | KeyCode::Enter => Some(PaletteCommand::Accept),
+        KeyCode::Esc => Some(PaletteCommand::Dismiss),
+        _ => None,
+    }
+}
+
+/// What a key asks the transcript search modal to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchCommand {
+    Close,
+    Jump,
+    Next,
+    Prev,
+    Backspace,
+    Insert(char),
+    Ignore,
+}
+
+/// Map a key to a transcript-search action.
+///
+/// `navigating` becomes true after Enter jumps to a match; from then on `n`/`N`
+/// cycle matches instead of editing the query (like a vim search).
+fn search_command(key: &ratatui::crossterm::event::KeyEvent, navigating: bool) -> SearchCommand {
+    match key.code {
+        KeyCode::Esc => return SearchCommand::Close,
+        KeyCode::Enter => return SearchCommand::Jump,
+        KeyCode::Backspace => return SearchCommand::Backspace,
+        _ => {}
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return SearchCommand::Ignore;
+    }
+    match key.code {
+        KeyCode::Up => SearchCommand::Prev,
+        KeyCode::Down => SearchCommand::Next,
+        KeyCode::Char('n') if navigating => SearchCommand::Next,
+        KeyCode::Char('N') if navigating => SearchCommand::Prev,
+        KeyCode::Char(ch) => SearchCommand::Insert(ch),
+        _ => SearchCommand::Ignore,
+    }
+}
+
+/// Feed the current input to the palette only when the text actually changed,
+/// so Up/Down navigation is not reset on every frame and a dismissed palette
+/// stays dismissed until the user edits again.
+fn sync_palette(palette: &mut CommandPalette, text: &str, seen: &mut String) {
+    if text != seen {
+        palette.set_query(text);
+        seen.clear();
+        seen.push_str(text);
+    }
+}
+
+/// Accept the selected palette row into `buffer`, returning the inserted text.
+fn accept_palette(
+    palette: &mut CommandPalette,
+    buffer: &mut TextBuffer,
+    seen: &mut String,
+) -> Option<String> {
+    let accepted = palette.accept()?;
+    buffer.set_text(accepted.clone());
+    seen.clear();
+    seen.push_str(buffer.text());
+    Some(accepted)
+}
+
+/// Extract palette commands from an init frame, tolerating missing fields.
+///
+/// `slash_commands` is an array of names in the SDK schema; objects with
+/// `name`/`description`/`argumentHint` are accepted too so richer engines can
+/// keep working. Anything else is skipped.
+fn command_specs_from_init(extra: &serde_json::Map<String, serde_json::Value>) -> Vec<CommandSpec> {
+    let Some(commands) = extra
+        .get("slash_commands")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    commands
+        .iter()
+        .filter_map(command_spec_from_value)
+        .collect()
+}
+
+fn command_spec_from_value(value: &serde_json::Value) -> Option<CommandSpec> {
+    match value {
+        serde_json::Value::String(name) => command_spec_from_name(name),
+        serde_json::Value::Object(fields) => {
+            let name = fields
+                .get("name")
+                .or_else(|| fields.get("command"))?
+                .as_str()?;
+            let mut spec = command_spec_from_name(name)?;
+            if let Some(description) = fields
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+            {
+                spec = spec.with_description(description);
+            }
+            let hint = fields
+                .get("argumentHint")
+                .or_else(|| fields.get("argument_hint"))
+                .and_then(serde_json::Value::as_str);
+            if let Some(hint) = hint {
+                spec = spec.with_argument_hint(hint);
+            }
+            let hidden = fields
+                .get("isHidden")
+                .or_else(|| fields.get("hidden"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if hidden {
+                spec = spec.hide();
+            }
+            Some(spec)
+        }
+        _ => None,
+    }
+}
+
+fn command_spec_from_name(name: &str) -> Option<CommandSpec> {
+    let name = name.trim().trim_start_matches('/');
+    (!name.is_empty()).then(|| CommandSpec::new(name))
+}
+
+/// The palette overlay while the input line starts with `/`.
+///
+/// The overlay is shown even when there are no matches (or no commands were
+/// announced in the init frame); it is then just an empty titled box.
+fn palette_overlay(palette: &CommandPalette) -> Option<Overlay> {
+    if !palette.is_active() {
+        return None;
+    }
+    let lines: Vec<String> = palette.rows(76).into_iter().map(|row| row.text).collect();
+    let selected = lines.iter().position(|line| line.starts_with('>'));
+    Some(Overlay::new(" Commands ", lines, selected))
+}
+
+/// The transcript-search overlay with up to [`MAX_SEARCH_ROWS`] results.
+fn search_overlay(search: &TranscriptSearch) -> Overlay {
+    let lines = search.rows(search.query(), 76, MAX_SEARCH_ROWS);
+    let selected = search
+        .current_index()
+        .map(|index| index.min(lines.len().saturating_sub(1)));
+    Overlay::new(format!(" Search: {} ", search.query()), lines, selected).centered()
+}
+
+/// Visible result rows in the transcript-search overlay.
+const MAX_SEARCH_ROWS: usize = 8;
+
+/// Status-line text for inline search: `match i/n` (zero when no matches).
+fn search_status(search: &TranscriptSearch) -> String {
+    let index = search.current_index().map_or(0, |index| index + 1);
+    format!("match {index}/{}", search.count())
+}
+
+/// Snapshot the rows the search should scan for the current mode.
+fn begin_transcript_search(
+    view: &ChatView,
+    transcript: &TranscriptModel,
+    fullscreen: bool,
+) -> TranscriptSearch {
+    let rows: Vec<Row> = if fullscreen {
+        transcript.rows().to_vec()
+    } else {
+        view.completed.clone()
+    };
+    TranscriptSearch::new(&rows)
+}
+
+/// Jump to the current search match. Inline mode has no transcript to scroll,
+/// so the status line is the only feedback (updated by the caller).
+fn jump_to_match(transcript: &mut TranscriptModel, fullscreen: bool, search: &TranscriptSearch) {
+    if !fullscreen {
+        return;
+    }
+    let Some(found) = search.current() else {
+        return;
+    };
+    scroll_to_row(transcript, found.row_index);
+}
+
+/// Scroll the transcript so `row` is near the middle of the viewport.
+///
+/// Rows map to display lines through the cached heights; the target is the
+/// first display line of the row, centred by half a viewport.
+fn scroll_to_row(transcript: &mut TranscriptModel, row: usize) {
+    let mut start = 0usize;
+    for index in 0..row {
+        let Some(height) = transcript.row_height(index) else {
+            return;
+        };
+        start += height;
+    }
+    let target = start.saturating_sub(transcript.viewport_height() / 2);
+    let delta = target as isize - transcript.offset() as isize;
+    transcript.scroll_by(delta);
 }
 
 fn answer_permission(
@@ -911,6 +1251,201 @@ mod tests {
             state: KeyEventState::NONE,
         };
         assert_eq!(to_key(&f1), Key::char('\0'));
+    }
+
+    #[test]
+    fn palette_accept_inserts_text_and_closes() {
+        let mut palette = CommandPalette::new(vec![
+            CommandSpec::new("compact"),
+            CommandSpec::new("diff").with_argument_hint("<file>"),
+        ]);
+        palette.set_query("/di");
+        let mut buffer = TextBuffer::new();
+        let mut seen = "/di".to_string();
+
+        assert_eq!(
+            accept_palette(&mut palette, &mut buffer, &mut seen),
+            Some("/diff <file>".to_string())
+        );
+        assert_eq!(buffer.text(), "/diff <file>");
+        assert_eq!(buffer.cursor(), buffer.len());
+        assert!(!palette.is_active());
+        assert_eq!(seen, "/diff <file>");
+    }
+
+    #[test]
+    fn palette_command_closes_on_escape_and_accepts_on_enter() {
+        assert_eq!(
+            palette_command(KeyCode::Esc, true),
+            Some(PaletteCommand::Dismiss)
+        );
+        assert_eq!(
+            palette_command(KeyCode::Enter, true),
+            Some(PaletteCommand::Accept)
+        );
+        assert_eq!(
+            palette_command(KeyCode::Tab, true),
+            Some(PaletteCommand::Accept)
+        );
+        assert_eq!(
+            palette_command(KeyCode::Up, true),
+            Some(PaletteCommand::Previous)
+        );
+        assert_eq!(
+            palette_command(KeyCode::Down, true),
+            Some(PaletteCommand::Next)
+        );
+        // A closed palette leaves the keys to prompt history/editing.
+        assert_eq!(palette_command(KeyCode::Enter, false), None);
+        assert_eq!(palette_command(KeyCode::Char('x'), true), None);
+    }
+
+    #[test]
+    fn search_command_routes_keys_and_escape_closes() {
+        use ratatui::crossterm::event::KeyEvent;
+
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let plain = KeyModifiers::NONE;
+        assert_eq!(
+            search_command(&key(KeyCode::Esc, plain), false),
+            SearchCommand::Close
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Enter, plain), false),
+            SearchCommand::Jump
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Backspace, plain), false),
+            SearchCommand::Backspace
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('a'), plain), false),
+            SearchCommand::Insert('a')
+        );
+        // `n` edits the query until Enter starts navigation.
+        assert_eq!(
+            search_command(&key(KeyCode::Char('n'), plain), false),
+            SearchCommand::Insert('n')
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('n'), plain), true),
+            SearchCommand::Next
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('N'), plain), true),
+            SearchCommand::Prev
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Up, plain), false),
+            SearchCommand::Prev
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('f'), KeyModifiers::CONTROL), false),
+            SearchCommand::Ignore
+        );
+    }
+
+    #[test]
+    fn search_status_counts_matches_and_navigation() {
+        let rows = vec![
+            Row::new(RowStyle::Assistant, "alpha"),
+            Row::new(RowStyle::Assistant, "beta alpha"),
+        ];
+        let mut search = TranscriptSearch::new(&rows);
+        search.set_query("alpha");
+        assert_eq!(search_status(&search), "match 1/2");
+        search.next();
+        assert_eq!(search_status(&search), "match 2/2");
+        search.next();
+        assert_eq!(search_status(&search), "match 1/2");
+        search.set_query("zzz");
+        assert_eq!(search_status(&search), "match 0/0");
+    }
+
+    #[test]
+    fn search_overlay_lists_matches_and_marks_the_current_one() {
+        let rows = vec![
+            Row::new(RowStyle::Assistant, "alpha"),
+            Row::new(RowStyle::Assistant, "alpha again"),
+        ];
+        let mut search = TranscriptSearch::new(&rows);
+        search.set_query("alpha");
+        let overlay = search_overlay(&search);
+        assert_eq!(overlay.title, " Search: alpha ");
+        assert_eq!(overlay.lines, vec!["1/2  alpha", "2/2  alpha again"]);
+        assert_eq!(overlay.selected, Some(0));
+        assert_eq!(
+            overlay.placement,
+            cch_tui_render::OverlayPlacement::Centered
+        );
+    }
+
+    #[test]
+    fn scroll_to_row_centers_the_matched_row() {
+        let rows: Vec<Row> = (0..20)
+            .map(|index| Row::new(RowStyle::Assistant, format!("row {index}")))
+            .collect();
+        let mut model = TranscriptModel::new();
+        model.set_rows(rows);
+        model.window(4, 40);
+        assert_eq!(model.offset(), 16);
+
+        scroll_to_row(&mut model, 0);
+        assert_eq!(model.offset(), 0);
+        scroll_to_row(&mut model, 10);
+        assert_eq!(model.offset(), 8);
+        assert!(!model.is_following());
+    }
+
+    #[test]
+    fn init_slash_commands_are_parsed_tolerantly() {
+        let extra = serde_json::Map::from_iter([(
+            "slash_commands".to_string(),
+            serde_json::json!([
+                "compact",
+                "/diff",
+                42,
+                {"name": "help", "description": "Show help", "argumentHint": "<topic>"},
+                {"command": "/hidden", "isHidden": true}
+            ]),
+        )]);
+        let specs = command_specs_from_init(&extra);
+        let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
+        assert_eq!(names, ["compact", "diff", "help", "hidden"]);
+        assert_eq!(specs[2].description.as_deref(), Some("Show help"));
+        assert_eq!(specs[2].argument_hint.as_deref(), Some("<topic>"));
+        assert!(specs[3].hidden);
+
+        // Missing/blank input yields an empty (but usable) palette.
+        assert!(command_specs_from_init(&serde_json::Map::new()).is_empty());
+        let blank =
+            serde_json::Map::from_iter([("slash_commands".to_string(), serde_json::json!([]))]);
+        assert!(command_specs_from_init(&blank).is_empty());
+    }
+
+    #[test]
+    fn palette_overlay_only_appears_for_slash_input_with_matches() {
+        let mut palette = CommandPalette::new(vec![CommandSpec::new("compact")]);
+        assert!(palette_overlay(&palette).is_none());
+
+        palette.set_query("/");
+        let overlay = palette_overlay(&palette).expect("visible palette");
+        assert_eq!(overlay.lines, vec!["> /compact"]);
+        assert_eq!(overlay.selected, Some(0));
+        assert_eq!(
+            overlay.placement,
+            cch_tui_render::OverlayPlacement::AboveInput
+        );
+
+        // No match still opens an empty panel, so the user can keep editing.
+        palette.set_query("/zzz");
+        let empty = palette_overlay(&palette).expect("empty palette stays open");
+        assert!(empty.lines.is_empty());
+        assert_eq!(empty.selected, None);
+
+        // ...but a non-slash input closes it entirely.
+        palette.set_query("zzz");
+        assert!(palette_overlay(&palette).is_none());
     }
 
     #[test]

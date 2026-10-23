@@ -20,12 +20,50 @@ use ratatui::crossterm::terminal::{
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Cells the inline viewport reserves below frozen scrollback.
 pub const DEFAULT_INLINE_HEIGHT: u16 = 12;
+
+/// Where an overlay is anchored inside the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayPlacement {
+    /// Immediately above the prompt and status region (slash-command menu).
+    AboveInput,
+    /// Centered on the screen (transcript search).
+    Centered,
+}
+
+/// A list overlay drawn on top of the live view.
+///
+/// `lines` are plain display rows; `selected` indexes into the visible window
+/// and is rendered with emphasis. The overlay is painted with a border and
+/// clears the cells underneath, matching the permission dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlay {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub selected: Option<usize>,
+    pub placement: OverlayPlacement,
+}
+
+impl Overlay {
+    pub fn new(title: impl Into<String>, lines: Vec<String>, selected: Option<usize>) -> Self {
+        Self {
+            title: title.into(),
+            lines,
+            selected,
+            placement: OverlayPlacement::AboveInput,
+        }
+    }
+
+    pub fn centered(mut self) -> Self {
+        self.placement = OverlayPlacement::Centered;
+        self
+    }
+}
 
 /// Live terminal bound to an inline viewport.
 pub struct TerminalSession {
@@ -121,6 +159,17 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Inline frame with a list overlay (slash palette or transcript search).
+    pub fn draw_with_overlay(&mut self, view: &ChatView, overlay: &Overlay) -> io::Result<()> {
+        let theme = self.theme;
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            draw_view(frame, view, &theme);
+            draw_overlay(frame, area, &view.input, overlay, &theme);
+        })?;
+        Ok(())
+    }
+
     /// Fullscreen frame: the transcript window above the prompt and status.
     pub fn draw_transcript(
         &mut self,
@@ -193,6 +242,65 @@ impl TerminalSession {
             frame.render_widget(Paragraph::new(panel_lines).block(block), content[1]);
             draw_prompt(frame, view, chunks[1]);
             draw_status(frame, view, chunks[2], &theme);
+        })?;
+        Ok(())
+    }
+
+    /// Fullscreen frame with an optional task panel and a list overlay.
+    ///
+    /// The overlay is painted last so it sits on top of the transcript, prompt
+    /// and sidebar without changing their layout.
+    pub fn draw_transcript_with_overlay(
+        &mut self,
+        view: &ChatView,
+        model: &mut cch_tui_fullscreen::TranscriptModel,
+        panel: Option<&cch_tui_panel::TaskPanel>,
+        overlay: &Overlay,
+    ) -> io::Result<()> {
+        let theme = self.theme;
+        let sticky = self.sticky_prompt.clone();
+        let size = self.terminal.size()?;
+        let width = size.width.max(1) as usize;
+        let reserved = input_height(&view.input) as usize + 1;
+        let sticky_height = usize::from(sticky.is_some());
+        let transcript_height = (size.height as usize)
+            .saturating_sub(reserved + sticky_height)
+            .max(1);
+        let sidebar_width = (width / 3).clamp(18, 44);
+        let main_width = if panel.is_some() {
+            width.saturating_sub(sidebar_width + 1).max(1)
+        } else {
+            width
+        };
+        let lines = transcript_lines(model, transcript_height, main_width, &theme);
+        let unseen = model.unseen_count();
+        let panel_lines =
+            panel.map(|panel| panel_lines(panel, sidebar_width.saturating_sub(2), &theme));
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(input_height(&view.input)),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            if let Some(panel_lines) = panel_lines {
+                let content = Layout::horizontal([
+                    Constraint::Min(1),
+                    Constraint::Length(sidebar_width as u16),
+                ])
+                .split(chunks[0]);
+                draw_transcript_region(frame, content[0], lines, &theme, sticky.as_deref(), unseen);
+                let block = Block::bordered()
+                    .title(" Tasks ")
+                    .border_style(Style::default().fg(theme.palette.border));
+                frame.render_widget(Paragraph::new(panel_lines).block(block), content[1]);
+            } else {
+                draw_transcript_region(frame, chunks[0], lines, &theme, sticky.as_deref(), unseen);
+            }
+            draw_prompt(frame, view, chunks[1]);
+            draw_status(frame, view, chunks[2], &theme);
+            draw_overlay(frame, area, &view.input, overlay, &theme);
         })?;
         Ok(())
     }
@@ -539,6 +647,104 @@ fn draw_prompt(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) 
 fn draw_status(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect, theme: &Theme) {
     let status = Paragraph::new(view.status_line()).style(Style::default().fg(theme.palette.dim));
     frame.render_widget(status, area);
+}
+
+/// Draw a bordered, cleared list overlay.
+///
+/// `lines` are fitted horizontally; the row at `selected` is emphasised. The
+/// widget matches the permission dialog's frame (border + [`Clear`]) so both
+/// overlays look alike. Theme-independent; the session methods use the active
+/// theme's border and accent colours.
+pub fn draw_overlay_list(
+    frame: &mut Frame,
+    rect: Rect,
+    title: &str,
+    lines: &[String],
+    selected: Option<usize>,
+) {
+    draw_overlay_list_styled(
+        frame,
+        rect,
+        title,
+        lines,
+        selected,
+        Style::default(),
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+}
+
+fn draw_overlay_list_styled(
+    frame: &mut Frame,
+    rect: Rect,
+    title: &str,
+    lines: &[String],
+    selected: Option<usize>,
+    border: Style,
+    selected_style: Style,
+) {
+    if rect.width < 2 || rect.height < 2 {
+        return;
+    }
+    let inner_width = rect.width.saturating_sub(2) as usize;
+    let visible = rect.height.saturating_sub(2) as usize;
+    let rows: Vec<Line<'static>> = lines
+        .iter()
+        .take(visible)
+        .enumerate()
+        .map(|(index, text)| {
+            let style = if Some(index) == selected {
+                selected_style
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(truncate_to_width(text, inner_width), style))
+        })
+        .collect();
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(title).border_style(border);
+    frame.render_widget(Paragraph::new(rows).block(block), rect);
+}
+
+/// Paint `overlay` on top of the current frame.
+fn draw_overlay(frame: &mut Frame, area: Rect, input: &str, overlay: &Overlay, theme: &Theme) {
+    let rect = overlay_rect(area, input, overlay);
+    draw_overlay_list_styled(
+        frame,
+        rect,
+        &overlay.title,
+        &overlay.lines,
+        overlay.selected,
+        Style::default().fg(theme.palette.border),
+        Style::default()
+            .fg(theme.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+}
+
+/// Place an overlay inside `area`.
+///
+/// `AboveInput` sits immediately above the prompt (and status) region, which
+/// is how the slash palette hangs off the input line. `Centered` is used for
+/// the transcript search box.
+fn overlay_rect(area: Rect, input: &str, overlay: &Overlay) -> Rect {
+    let width = area
+        .width
+        .saturating_mul(7)
+        .saturating_div(10)
+        .clamp(20, 78)
+        .min(area.width);
+    let height = (overlay.lines.len() as u16 + 2).min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = match overlay.placement {
+        OverlayPlacement::Centered => area.y + area.height.saturating_sub(height) / 2,
+        OverlayPlacement::AboveInput => {
+            let bottom = area
+                .bottom()
+                .saturating_sub(input_height(input).saturating_add(1));
+            bottom.saturating_sub(height).max(area.y)
+        }
+    };
+    Rect::new(x, y, width, height)
 }
 
 /// Plan-approval options, verbatim from the official Ink component
@@ -1223,5 +1429,70 @@ mod tests {
         assert_eq!(truncate_to_width("你好", 3), "你");
         assert_eq!(truncate_to_width("你好", 4), "你好");
         assert_eq!(truncate_to_width("abc", 10), "abc");
+    }
+
+    #[test]
+    fn overlay_list_renders_a_cleared_bordered_window() {
+        let backend = ratatui::backend::TestBackend::new(24, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let lines = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        terminal
+            .draw(|frame| {
+                draw_overlay_list(frame, Rect::new(2, 1, 20, 5), " Commands ", &lines, Some(1));
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, 1)].symbol(), "┌");
+        assert_eq!(buffer[(21, 1)].symbol(), "┐");
+        assert_eq!(buffer[(2, 5)].symbol(), "└");
+        assert_eq!(buffer[(21, 5)].symbol(), "┘");
+        // The selected row (beta) is bold; the rows around it are not.
+        assert!(buffer[(3, 3)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(3, 2)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(3, 4)].modifier.contains(Modifier::BOLD));
+        let screen = buffer_screen(&terminal);
+        assert!(screen.contains("Commands"), "screen: {screen}");
+        for line in ["alpha", "beta", "gamma"] {
+            assert!(screen.contains(line), "missing {line}: {screen}");
+        }
+        // Cells outside the overlay keep the cleared background.
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn above_input_overlay_sits_above_prompt_and_status() {
+        let area = Rect::new(0, 0, 40, 12);
+        let overlay = Overlay::new("title", vec!["a".into(), "b".into()], None);
+        let rect = overlay_rect(area, "input", &overlay);
+        assert_eq!(rect.height, 4);
+        // 12 rows - 1 status - 1 input = row 10.
+        assert_eq!(rect.bottom(), 10);
+        assert_eq!(rect.y, 6);
+
+        let centered = overlay_rect(area, "input", &overlay.clone().centered());
+        assert_eq!(centered.y, 4);
+    }
+
+    #[test]
+    fn overlay_lines_are_clipped_to_the_inner_width() {
+        let backend = ratatui::backend::TestBackend::new(12, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw_overlay_list(
+                    frame,
+                    Rect::new(0, 0, 12, 3),
+                    " T ",
+                    &["x".repeat(40)],
+                    None,
+                );
+            })
+            .expect("draw");
+        let screen = buffer_screen(&terminal);
+        for line in screen.lines() {
+            assert!(line.chars().count() <= 12, "line too wide: {line:?}");
+        }
+        assert!(!screen.contains(&"x".repeat(11)), "screen: {screen}");
     }
 }

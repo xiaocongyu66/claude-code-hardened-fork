@@ -19,6 +19,8 @@ cch-tui-dialog = { path = "../dialog" }
 cch-tui-fullscreen = { path = "../fullscreen" }
 cch-tui-panel = { path = "../panel" }
 cch-tui-actions = { path = "../actions" }
+cch-tui-palette = { path = "../palette" }
+cch-tui-search = { path = "../search" }
 ratatui = "0.30"
 serde_json.workspace = true
 
