@@ -201,6 +201,53 @@ mod tests {
     }
 
     #[test]
+    fn permission_decisions_round_trip_over_the_control_channel() {
+        // The script emits one permission request, reads one line (our
+        // decision), and echoes it back so we can assert the wire shape.
+        let script = concat!(
+            r#"printf '%s\n' '{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"t1","input":{}}}'"#,
+            "; read line; printf '%s\n' \"$line\"",
+        );
+        let (mut process, rx) =
+            EngineProcess::spawn("sh", &["-c".into(), script.into()]).expect("spawn");
+
+        let request = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(EngineMessage::Event(event)) => event,
+            other => panic!("expected request, got {other:?}"),
+        };
+        let EngineEvent::ControlRequest { request_id, .. } = request else {
+            panic!("expected control_request");
+        };
+        process
+            .send_control_response(
+                &request_id,
+                serde_json::json!({"behavior": "allow", "updatedInput": {}}),
+            )
+            .expect("send decision");
+
+        let echoed = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(EngineMessage::Event(event)) => event,
+            other => panic!("expected echo, got {other:?}"),
+        };
+        let EngineEvent::ControlResponse { response } = echoed else {
+            panic!("expected control_response");
+        };
+        match response {
+            cch_tui_proto::ControlResponse::Success {
+                request_id,
+                response: Some(payload),
+            } => {
+                assert_eq!(request_id, "r1");
+                assert_eq!(
+                    payload.get("behavior").and_then(|v| v.as_str()),
+                    Some("allow")
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
     fn sends_prompts_as_stream_json_user_messages() {
         // `cat` echoes our prompt back, which we parse as a user event.
         let (mut process, rx) = EngineProcess::spawn("cat", &[]).expect("spawn");
