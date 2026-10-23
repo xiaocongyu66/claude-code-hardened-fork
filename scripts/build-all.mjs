@@ -7,7 +7,16 @@
 //   node scripts/build-all.mjs --platforms <t1,t2,...>  # 指定 triple（默认全部）
 //   node scripts/build-all.mjs --skip-pack              # 只出 dist，不打 tgz
 import { spawnSync } from 'node:child_process'
-import { cp, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  cp,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const args = process.argv.slice(2)
@@ -46,10 +55,19 @@ const CRATES = [
   { pkg: 'search-napi', crate: 'search_napi', name: 'search' },
 ]
 
+// TUI 是独立 bin（不是 cdylib）：Cargo workspace 在 packages/tui-native/native，
+// 产物按 triple 落到 vendor/tui/<triple>/，供 npm 平台包 @cch/tui-<platform>-<arch> 取用。
+const TUI_NATIVE_DIR = join('packages', 'tui-native', 'native')
+const TUI_BIN = 'cch-tui'
+
 function artifactName(crate, platform) {
   if (platform.endsWith('-windows-msvc')) return `${crate}.dll`
   if (platform.endsWith('-apple-darwin')) return `lib${crate}.dylib`
   return `lib${crate}.so`
+}
+
+function tuiBinaryName(platform) {
+  return platform.endsWith('-windows-msvc') ? `${TUI_BIN}.exe` : TUI_BIN
 }
 
 function run(cmd, cmdArgs, opts = {}) {
@@ -107,6 +125,29 @@ if (!SKIP_NATIVE) {
       console.log(`→ ${dest}/${name}.node`)
     }
   }
+
+  // TUI bin：每个 triple 编译一次，连同 sha256 sidecar 落到 vendor/tui/<triple>/。
+  if (existsSync(join(TUI_NATIVE_DIR, 'Cargo.toml'))) {
+    for (const platform of platforms) {
+      run('cargo', ['build', '--release', '--target', platform], {
+        cwd: TUI_NATIVE_DIR,
+      })
+      const binName = tuiBinaryName(platform)
+      const src = join(TUI_NATIVE_DIR, 'target', platform, 'release', binName)
+      if (!existsSync(src)) {
+        console.error(`MISSING artifact: ${src}`)
+        process.exit(1)
+      }
+      const dest = join('vendor', 'tui', platform)
+      mkdirSync(dest, { recursive: true })
+      cp(src, join(dest, binName))
+      const digest = createHash('sha256')
+        .update(readFileSync(src))
+        .digest('hex')
+      writeFileSync(join(dest, `${binName}.sha256`), `${digest}  ${binName}\n`)
+      console.log(`→ ${dest}/${binName} (+ .sha256)`)
+    }
+  }
 } else {
   console.log('step 1 (rust native): skipped')
 }
@@ -131,16 +172,23 @@ for (const platform of platforms) {
 }
 
 console.log('\n=== Step 3: Verify binaries ===')
+let missingBinaries = 0
 for (const platform of platforms) {
   const target = tripleToTarget(platform)
   if (!target) continue
-  const outfile = `dist/cch-${target.replace(/^bun-/, '')}${target.endsWith('windows-x64') ? '.exe' : ''}`
+  // Bun appends .exe for every windows-* target (x64 and arm64).
+  const outfile = `dist/cch-${target.replace(/^bun-/, '')}${target.startsWith('bun-windows-') ? '.exe' : ''}`
   if (existsSync(outfile)) {
     const stats = statSync(outfile)
     console.log(`  ✓ ${outfile} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`)
   } else {
-    console.log(`  ✗ ${outfile} NOT FOUND`)
+    console.error(`  ✗ ${outfile} NOT FOUND`)
+    missingBinaries++
   }
+}
+if (missingBinaries > 0) {
+  console.error(`Step 3 failed: ${missingBinaries} binary/binaries missing`)
+  process.exit(1)
 }
 
 // ── Step 4: npm tarball ──

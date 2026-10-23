@@ -32,7 +32,8 @@
   "workspaces": [
     "packages/*",
     "packages/@ant/*",
-    "packages/@anthropic-ai/*"
+    "packages/@anthropic-ai/*",
+    "packages/tui-native/platforms/*"
   ],
   "files": [
     "dist",
@@ -216,7 +217,14 @@
     "yaml": "^2.8.3",
     "zod": "^4.6.5"
   },
+  "//tuiPlatformPackages": "Prebuilt cch-tui binaries ship as @cch/tui-<platform>-<arch> optional dependencies, one per host (see docs/tui-packaging.md and packages/tui-native/package.json). workspace:* is a publish-time placeholder: bun publish resolves it to the packaged version; with npm publish, first replace each entry with the released platform-package version (must match this package's version).",
   "optionalDependencies": {
+    "@cch/tui-linux-x64": "workspace:*",
+    "@cch/tui-linux-arm64": "workspace:*",
+    "@cch/tui-darwin-x64": "workspace:*",
+    "@cch/tui-darwin-arm64": "workspace:*",
+    "@cch/tui-windows-x64": "workspace:*",
+    "@cch/tui-windows-arm64": "workspace:*",
     "doubaoime-asr": "^0.1.0"
   },
   "overrides": {
