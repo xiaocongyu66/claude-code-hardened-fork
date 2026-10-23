@@ -9,12 +9,14 @@ use std::collections::HashMap;
 
 pub mod history;
 pub mod text;
+pub mod vim;
 
 pub use history::{HistoryScope, HistorySearch};
 pub use text::{
     KillDirection, KillRing, PASTE_FOLD_MAX_LINE_BREAKS, PASTE_FOLD_THRESHOLD, PastedContent,
     TextBuffer, format_pasted_text_ref, should_fold_paste,
 };
+pub use vim::{VimMode, VimState};
 
 /// Stable identity supplied by the caller (list key, message id, ...).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]

@@ -57,4 +57,4 @@ pub use keymap::{
     MODAL_SPECS, PROMPT_SPECS,
 };
 pub use resolver::{Resolution, Resolver};
-pub use vim::{VIM_SPECS, VimAction};
+pub use vim::{VIM_SPECS, VimAction, keymap_with_vim, vim_context};

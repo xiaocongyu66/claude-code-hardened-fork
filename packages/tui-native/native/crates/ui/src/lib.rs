@@ -69,6 +69,8 @@ pub struct ChatView {
     pub completed: Vec<Row>,
     /// Transient status, e.g. "waiting for permission".
     pub status: Option<String>,
+    /// Vim mode indicator (`-- INSERT --` / `-- NORMAL --`), when enabled.
+    pub vim_mode: Option<String>,
     /// One-line task/agent summary appended to the status line.
     pub panel_summary: Option<String>,
     /// Context-window usage in percent, when the engine reported it.
@@ -155,21 +157,30 @@ impl ChatView {
     }
 
     /// Status line content.
+    ///
+    /// A transient status, when present, replaces the model/session summary.
+    /// The vim mode indicator is appended in both cases.
     pub fn status_line(&self) -> String {
-        if let Some(status) = &self.status {
-            return status.clone();
-        }
-        let model = self.session.model.as_deref().unwrap_or("unknown model");
-        let session = self.session.session_id.as_deref().unwrap_or("-");
-        let mut line = format!("{model} · session {session}");
-        if let Some(percent) = self.context_percent {
-            line.push_str(&format!(" · {percent:.0}% ctx"));
-        }
-        if let Some(summary) = &self.panel_summary
-            && !summary.is_empty()
-        {
+        let mut line = if let Some(status) = &self.status {
+            status.clone()
+        } else {
+            let model = self.session.model.as_deref().unwrap_or("unknown model");
+            let session = self.session.session_id.as_deref().unwrap_or("-");
+            let mut line = format!("{model} · session {session}");
+            if let Some(percent) = self.context_percent {
+                line.push_str(&format!(" · {percent:.0}% ctx"));
+            }
+            if let Some(summary) = &self.panel_summary
+                && !summary.is_empty()
+            {
+                line.push_str(" · ");
+                line.push_str(summary);
+            }
+            line
+        };
+        if let Some(vim) = &self.vim_mode {
             line.push_str(" · ");
-            line.push_str(summary);
+            line.push_str(vim);
         }
         line
     }
@@ -396,6 +407,25 @@ mod tests {
         // An explicit transient status wins over the summary.
         view.status = Some("search: x (1/2)".into());
         assert_eq!(view.status_line(), "search: x (1/2)");
+    }
+
+    #[test]
+    fn status_line_appends_the_vim_mode_indicator() {
+        let mut view = ChatView::new();
+        view.session.model = Some("m1".into());
+        view.session.session_id = Some("s1".into());
+        view.vim_mode = Some("-- INSERT --".into());
+        assert_eq!(view.status_line(), "m1 · session s1 · -- INSERT --");
+
+        view.status = Some("sent".into());
+        assert_eq!(view.status_line(), "sent · -- INSERT --");
+
+        view.vim_mode = Some("-- NORMAL --".into());
+        assert_eq!(view.status_line(), "sent · -- NORMAL --");
+
+        // Non-vim callers are unchanged.
+        view.vim_mode = None;
+        assert_eq!(view.status_line(), "sent");
     }
 
     #[test]
