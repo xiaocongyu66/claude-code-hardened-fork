@@ -152,6 +152,7 @@ pub fn run_with_deadline(
     let mut panel = TaskPanel::new();
     let mut expand = ExpandState::default();
     let mut all_expanded = false;
+    let mut queued_prompts: Vec<String> = Vec::new();
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
     let mut next_context_poll = Instant::now() + Duration::from_secs(2);
@@ -169,6 +170,9 @@ pub fn run_with_deadline(
         loop {
             match rx.try_recv() {
                 Ok(EngineMessage::Event(event)) => {
+                    if matches!(event, EngineEvent::Result { .. }) {
+                        view.busy = false;
+                    }
                     match &event {
                         EngineEvent::ControlRequest {
                             request_id,
@@ -231,6 +235,19 @@ pub fn run_with_deadline(
         }
         if engine_closed {
             view.status = Some("engine exited — press q".into());
+        }
+        // The turn ended: send the next queued prompt, if any.
+        if !view.busy
+            && let Some(process) = engine.as_mut()
+            && let Some(next) = queued_prompts.first().cloned()
+        {
+            queued_prompts.remove(0);
+            process.send_prompt(next.trim())?;
+            view.busy = true;
+        }
+        view.queued = queued_prompts.len();
+        if view.busy {
+            view.spinner_frame = (started.elapsed().as_millis() / 100) as usize;
         }
         view.panel_summary = Some(panel.summary_line()).filter(|line| !line.is_empty());
         if let Some(process) = engine.as_mut()
@@ -436,6 +453,7 @@ pub fn run_with_deadline(
                                 fullscreen,
                                 engine.as_mut(),
                                 &mut history,
+                                &mut queued_prompts,
                             )?;
                         } else if action == Action::PROMPT_NEWLINE {
                             buffer.insert_str("\n");
@@ -627,6 +645,7 @@ fn submit(
     fullscreen: bool,
     engine: Option<&mut EngineProcess>,
     history: &mut PromptHistory,
+    queued_prompts: &mut Vec<String>,
 ) -> io::Result<()> {
     let draft = buffer.expand_pastes();
     if !draft.trim().is_empty() {
@@ -635,8 +654,14 @@ fn submit(
         view.completed.push(row);
         history.push(draft.clone());
         if let Some(process) = engine {
-            process.send_prompt(draft.trim())?;
-            view.status = Some("sent".into());
+            if view.busy {
+                queued_prompts.push(draft.clone());
+                view.status = Some("queued".into());
+            } else {
+                process.send_prompt(draft.trim())?;
+                view.busy = true;
+                view.status = Some("sent".into());
+            }
         }
     }
     buffer.set_text("");

@@ -79,6 +79,12 @@ pub struct ChatView {
     pub panel_summary: Option<String>,
     /// Context-window usage in percent, when the engine reported it.
     pub context_percent: Option<f64>,
+    /// True while a turn is in flight (drives the spinner).
+    pub busy: bool,
+    /// Monotonic tick used to pick a spinner frame.
+    pub spinner_frame: usize,
+    /// Prompts waiting for the current turn to finish.
+    pub queued: usize,
 }
 
 impl ChatView {
@@ -388,6 +394,17 @@ mod tests {
         // The result frame flushed the streamed text into a frozen row.
         assert!(view.completed.iter().any(|row| row.text == "more"));
         assert!(view.live_text.is_empty());
+    }
+
+    #[test]
+    fn status_line_shows_spinner_and_queue_depth() {
+        let mut view = ChatView::new();
+        view.busy = true;
+        view.spinner_frame = 0;
+        view.queued = 2;
+        let line = view.status_line();
+        assert!(line.starts_with('⠋'), "{line}");
+        assert!(line.contains("queued 2"), "{line}");
     }
 
     #[test]
