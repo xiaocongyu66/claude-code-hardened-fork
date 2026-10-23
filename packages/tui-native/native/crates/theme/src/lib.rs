@@ -77,6 +77,33 @@ impl Default for Theme {
     }
 }
 
+/// How the user wants the theme chosen.
+///
+/// Mirrors Ink's `THEME_SETTINGS`: `auto` resolves against the terminal,
+/// while `dark` / `light` pin a palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeSetting {
+    /// Follow the detected terminal background.
+    #[default]
+    Auto,
+    /// Always use [`Theme::dark`].
+    Dark,
+    /// Always use [`Theme::light`].
+    Light,
+}
+
+impl ThemeSetting {
+    /// Parse a setting name (`dark`, `light`, `auto`). Unknown values fall
+    /// back to [`ThemeSetting::Auto`], matching Ink's picker behavior.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "dark" => Self::Dark,
+            "light" => Self::Light,
+            _ => Self::Auto,
+        }
+    }
+}
+
 impl Theme {
     /// The default palette, matching Claude Code's `darkTheme`.
     pub fn dark() -> Self {
@@ -175,6 +202,57 @@ impl Theme {
             _ => Self::dark(),
         }
     }
+
+    /// Resolve the effective theme the way Ink's `auto` setting does.
+    ///
+    /// Priority:
+    /// 1. `CCH_THEME` — `dark` / `light` force a palette; `auto` (or an
+    ///    unset variable) continues detection; anything else falls back to
+    ///    dark.
+    /// 2. `$COLORFGBG` background index — the last segment (e.g. the `0` in
+    ///    `15;0`); indices `0..8` are dark, `8..=15` light.
+    /// 3. `platform_dark` supplied by the caller (OS appearance).
+    /// 4. Dark, as the conservative default.
+    ///
+    /// `env` is injected so callers (and tests) do not need to touch the
+    /// process environment.
+    pub fn detect(env: &dyn Fn(&str) -> Option<String>, platform_dark: Option<bool>) -> Self {
+        match env("CCH_THEME").as_deref() {
+            Some("dark") => Self::dark(),
+            Some("light") => Self::light(),
+            Some("auto") | None => Self::detect_auto(env, platform_dark),
+            Some(_) => Self::dark(),
+        }
+    }
+
+    /// Detection used by `auto`: `$COLORFGBG`, then the platform hint, then
+    /// dark.
+    fn detect_auto(env: &dyn Fn(&str) -> Option<String>, platform_dark: Option<bool>) -> Self {
+        let dark = env("COLORFGBG")
+            .as_deref()
+            .and_then(colorfgbg_background_is_dark)
+            .or(platform_dark)
+            .unwrap_or(true);
+        if dark { Self::dark() } else { Self::light() }
+    }
+}
+
+/// Interpret the background ANSI index in a `$COLORFGBG` value such as
+/// `15;0` (foreground;background) or `0;default;15`.
+///
+/// Returns `None` when the value is missing, malformed, out of the ANSI
+/// 0–15 range, or has no background segment.
+fn colorfgbg_background_is_dark(value: &str) -> Option<bool> {
+    let parts: Vec<&str> = value.split(';').collect();
+    let background = *parts.last()?;
+    if parts.len() < 2 || background.is_empty() {
+        return None;
+    }
+    let index: u8 = background.parse().ok()?;
+    if index > 15 {
+        return None;
+    }
+    Some(index < 8)
 }
 
 #[cfg(test)]
@@ -235,5 +313,103 @@ mod tests {
         assert_eq!(palette.user_message_bg, Color::Rgb(240, 240, 240));
         assert_eq!(palette.diff_added_bg, Color::Rgb(199, 225, 203));
         assert_eq!(palette.diff_removed_bg, Color::Rgb(253, 210, 216));
+    }
+
+    /// Build an env lookup from constant `(name, value)` pairs.
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    fn no_env() -> impl Fn(&str) -> Option<String> {
+        |_| None
+    }
+
+    #[test]
+    fn theme_setting_parse_known_and_unknown() {
+        assert_eq!(ThemeSetting::parse("auto"), ThemeSetting::Auto);
+        assert_eq!(ThemeSetting::parse("dark"), ThemeSetting::Dark);
+        assert_eq!(ThemeSetting::parse("light"), ThemeSetting::Light);
+        assert_eq!(ThemeSetting::parse("solarized"), ThemeSetting::Auto);
+        assert_eq!(ThemeSetting::parse(""), ThemeSetting::Auto);
+        assert_eq!(ThemeSetting::default(), ThemeSetting::Auto);
+    }
+
+    #[test]
+    fn cch_theme_forces_palette_over_detection() {
+        let forced_dark = env(&[("CCH_THEME", "dark"), ("COLORFGBG", "15;15")]);
+        assert_eq!(Theme::detect(&forced_dark, Some(false)), Theme::dark());
+
+        let forced_light = env(&[("CCH_THEME", "light"), ("COLORFGBG", "15;0")]);
+        assert_eq!(Theme::detect(&forced_light, Some(true)), Theme::light());
+    }
+
+    #[test]
+    fn colorfgbg_background_selects_palette() {
+        // Background indices 0 and 7 are dark, 8 and 15 are light.
+        for (value, expected) in [
+            ("15;0", Theme::dark()),
+            ("15;7", Theme::dark()),
+            ("15;8", Theme::light()),
+            ("15;15", Theme::light()),
+        ] {
+            let lookup = |name: &str| -> Option<String> {
+                match name {
+                    "CCH_THEME" => Some("auto".to_owned()),
+                    "COLORFGBG" => Some(value.to_owned()),
+                    _ => None,
+                }
+            };
+            assert_eq!(Theme::detect(&lookup, None), expected, "COLORFGBG={value}");
+        }
+    }
+
+    #[test]
+    fn missing_env_uses_platform_dark() {
+        let dark = no_env();
+        assert_eq!(Theme::detect(&dark, Some(true)), Theme::dark());
+
+        let light = no_env();
+        assert_eq!(Theme::detect(&light, Some(false)), Theme::light());
+    }
+
+    #[test]
+    fn platform_dark_is_ignored_when_colorfgbg_is_valid() {
+        let env = env(&[("COLORFGBG", "15;15")]);
+        assert_eq!(Theme::detect(&env, Some(true)), Theme::light());
+    }
+
+    #[test]
+    fn invalid_cch_theme_falls_back_to_dark() {
+        // Unknown CCH_THEME wins over every other hint and yields dark.
+        let invalid_setting = env(&[("CCH_THEME", "solarized"), ("COLORFGBG", "15;15")]);
+        assert_eq!(Theme::detect(&invalid_setting, Some(false)), Theme::dark());
+    }
+
+    #[test]
+    fn malformed_colorfgbg_falls_through_to_platform() {
+        // Malformed COLORFGBG is ignored and detection continues.
+        let invalid_colorfgbg = env(&[("COLORFGBG", "not-a-color")]);
+        assert_eq!(
+            Theme::detect(&invalid_colorfgbg, Some(false)),
+            Theme::light()
+        );
+
+        // Out-of-range indices are also ignored.
+        let out_of_range = env(&[("COLORFGBG", "15;42")]);
+        assert_eq!(Theme::detect(&out_of_range, Some(true)), Theme::dark());
+    }
+
+    #[test]
+    fn auto_defaults_to_dark_without_hints() {
+        let env = env(&[("CCH_THEME", "auto")]);
+        assert_eq!(Theme::detect(&env, None), Theme::dark());
+
+        let empty = no_env();
+        assert_eq!(Theme::detect(&empty, None), Theme::dark());
     }
 }
