@@ -59,16 +59,18 @@ async function defaultOffload(
     require('../../../utils/toolResultStorage.js') as typeof import('../../../utils/toolResultStorage.js')
   /* eslint-enable @typescript-eslint/no-require-imports */
 
-  // Deterministic id: re-shaking the same source must reuse the existing
-  // artifact instead of minting a new file every turn.
+  // Deterministic id: re-shaking the same source reuses the existing artifact.
+  // Include a content hash (a tool_use_id can be reused by a third-party
+  // provider) and sanitize it before it becomes a file name.
+  const contentHash = createHash('sha1')
+    .update(region.originalText)
+    .digest('hex')
+    .slice(0, 16)
   const stableKey =
     region.kind === 'toolResult'
-      ? region.toolUseId
-      : `${region.messageIndex}-${region.blockIndex}-${createHash('sha1')
-          .update(region.originalText)
-          .digest('hex')
-          .slice(0, 16)}`
-  const id = `shake-${stableKey}`
+      ? `${region.toolUseId}-${contentHash}`
+      : `${region.messageIndex}-${region.blockIndex}-${contentHash}`
+  const id = `shake-${stableKey.replace(/[^A-Za-z0-9._-]/g, '_')}`
   const persisted = await persistToolResult(region.originalText, id)
   if ('error' in persisted) {
     // Let shakeMessages skip this region: never replace recoverable content

@@ -41,6 +41,7 @@ import type {
   TombstoneMessage,
 } from './types/message.js'
 import { logError } from './utils/log.js'
+import { isAbortError } from './utils/errors.js'
 import {
   PROMPT_TOO_LONG_ERROR_MESSAGE,
   isPromptTooLongMessage,
@@ -605,7 +606,6 @@ async function* queryLoop(
     // reports the pre-reduction size. When a reduction lands, measure the
     // reduced array directly for this turn's blocking/predictive checks.
     let compactionV2TokenOverride: number | undefined
-    let compactionV2SavingsForLegacy = 0
     if (feature('HISTORY_SNIP')) {
       queryCheckpoint('query_snip_start')
       const snipResult = snipModule!.snipCompactIfNeeded(messagesForQuery)
@@ -725,7 +725,12 @@ async function* queryLoop(
         logError(error)
         v2Result = {
           wasCompacted: false,
-          consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
+          // Aborts are user intent, not a failed compaction attempt.
+          ...(isAbortError(error)
+            ? {}
+            : {
+                consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
+              }),
         }
       }
       autoCompactOutcome = v2Result
@@ -736,7 +741,6 @@ async function* queryLoop(
             typeof countTokensPreciseForMessages
           >[0],
         )
-        compactionV2SavingsForLegacy = v2Result.tokensSaved ?? 0
       }
     } else {
       autoCompactOutcome = await deps.autocompact(
@@ -1001,10 +1005,18 @@ async function* queryLoop(
           },
           querySource,
           tracking,
-          // The legacy threshold check re-estimates from the usage anchor,
-          // which shake cannot change; include its savings so a just-reduced
-          // context is not compacted again this turn.
-          snipTokensFreed + compactionV2SavingsForLegacy,
+          // Legacy subtracts this from its anchor-based estimate. When shake
+          // reduced the context, the anchor overcounts by exactly
+          // (anchor estimate − precise reduced estimate); passing that keeps
+          // the legacy check aligned with the blocking/predictive checks
+          // above without double-counting tail reductions.
+          compactionV2TokenOverride !== undefined
+            ? Math.max(
+                0,
+                tokenCountWithEstimation(messagesForQuery) -
+                  compactionV2TokenOverride,
+              )
+            : snipTokensFreed,
         )
         if (predictiveResult.rapidRefillBreaker) {
           // 2.9: identical trip semantics to the main call above (official
