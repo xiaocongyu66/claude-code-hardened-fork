@@ -111,8 +111,8 @@ describe('speculative preview (deferApply)', () => {
   test('commit after an appended turn applies once and keeps the tail', async () => {
     const spies = makeSpies()
     const tail = [
-      { ...message, uuid: 'u2' } as Message,
-      { ...message, uuid: 'u3' } as Message,
+      { ...message, uuid: 'u2' } as unknown as Message,
+      { ...message, uuid: 'u3' } as unknown as Message,
     ]
     const manager = createSpeculationManager({
       enabled: true,

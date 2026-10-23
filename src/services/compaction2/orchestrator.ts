@@ -166,6 +166,8 @@ export interface CompactionV2Result {
   outcome?: CompactionOutcome
   trace: DecisionTraceEntry[]
   shouldCompact: boolean
+  /** Set when the run was a compute-only preview (`deferApply: true`). */
+  deferredApply?: DeferredCompactionApply
 }
 
 export interface DefaultMethodOptions {
@@ -493,9 +495,15 @@ export async function runCompactionV2(
       warning: outcome.warning,
     })
     result.outcome = outcome
-    if (outcome.kind === 'compacted' && !options.deferApply) {
-      // Preview runs return the outcome untouched; the commit path journals it.
-      if (options.persist) {
+    if (outcome.kind === 'compacted') {
+      if (options.deferApply) {
+        // Preview runs return the outcome untouched; the commit path journals
+        // it and applies the legacy side effects.
+        result.deferredApply = {
+          outcome,
+          messages: [...request.messages],
+        }
+      } else if (options.persist) {
         await options.persist(outcome, request.messages)
       } else if (feature('COMPACTION_V2')) {
         await persistCompactionEntry(outcome, request.messages)
