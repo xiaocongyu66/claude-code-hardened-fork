@@ -566,14 +566,11 @@ export interface CompactionV2QueryResult {
   consecutiveFailures?: number
   /** Mechanical reduction (shake) to use for this request only. */
   reducedMessages?: Message[]
-<<<<<<< HEAD
   /** Context-promotion decision from the overflow trigger, when applicable. */
   promotion?: PromotionResult
-=======
   /** Tokens removed by the reduction (drives the one-shot UI notice). */
   reducedTokensSaved?: number
   reducedMethod?: CompactionMethodName
->>>>>>> feat/compaction-w15
 }
 
 /**
@@ -691,14 +688,6 @@ export async function runCompactionV2ForQuery(
       promotion: result.promotion,
     }
   }
-<<<<<<< HEAD
-  const legacyResult = getLegacyCompactionResult(result.outcome)
-  if (legacyResult) {
-    return {
-      wasCompacted: true,
-      compactionResult: legacyResult,
-      promotion: result.promotion,
-=======
   if (result.outcome?.kind === 'compacted') {
     const legacyResult = getLegacyCompactionResult(result.outcome)
     if (legacyResult) {
@@ -709,8 +698,8 @@ export async function runCompactionV2ForQuery(
           result.outcome.method,
           methodMetadata(result.outcome),
         ),
+        promotion: result.promotion,
       }
->>>>>>> feat/compaction-w15
     }
   }
   if (result.shouldCompact) {
