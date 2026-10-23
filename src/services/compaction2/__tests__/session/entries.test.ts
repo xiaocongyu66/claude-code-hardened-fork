@@ -223,6 +223,136 @@ describe('persistCompactionEntry', () => {
     )
     expect(result).toBeNull()
   })
+
+  test('journals bounded attachment metadata and strips snapcompact frames', async () => {
+    const fileAttachment = {
+      type: 'attachment',
+      uuid: 'att-1',
+      attachment: {
+        type: 'file',
+        filename: '/repo/src/a.ts',
+        content: {
+          type: 'text',
+          file: { content: 'x'.repeat(20_000) },
+        },
+      },
+    } as unknown as Message
+    const hookResult = {
+      type: 'attachment',
+      uuid: 'hook-1',
+      attachment: {
+        type: 'hook_additional_context',
+        content: ['remember this'],
+        hookName: 'SessionStart',
+        toolUseID: 'SessionStart',
+      },
+    } as unknown as Message
+    const frames = [
+      {
+        data: 'A'.repeat(200_000),
+        mimeType: 'image/png',
+        cols: 1,
+        rows: 1,
+        chars: 1,
+      },
+    ]
+    const outcome = softOutcome({
+      preserveData: {
+        legacyCompactionResult: {
+          boundaryMarker: {},
+          summaryMessages: [{ message: { content: 'summary text' } }],
+          attachments: [fileAttachment],
+          hookResults: [hookResult],
+        },
+        snapcompact: {
+          mode: 'image',
+          text: 'archived text',
+          summary: 'snap summary',
+          frames,
+        },
+      },
+    })
+
+    const entry = await persistCompactionEntry(outcome, [message], {
+      append: async () => {},
+    })
+
+    expect(entry).not.toBeNull()
+    expect(entry!.attachments).toEqual([
+      { type: 'file', path: '/repo/src/a.ts' },
+    ])
+    expect(entry!.hookResults).toEqual([
+      {
+        type: 'hook_additional_context',
+        name: 'SessionStart',
+        text: 'remember this',
+        toolUseId: 'SessionStart',
+      },
+    ])
+
+    const archive = entry!.preserveData!.snapcompact as Record<string, unknown>
+    expect(archive.frames).toBeUndefined()
+    expect(archive.frameCount).toBe(1)
+    expect(archive.text).toBe('archived text')
+    expect(archive.mode).toBe('image')
+
+    // The journal row must not carry the frame base64 or the legacy result.
+    const serialized = JSON.stringify(entry)
+    expect(serialized).not.toContain('AAAA')
+    expect(serialized).not.toContain('legacyCompactionResult')
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThan(64 * 1024)
+  })
+
+  test('truncates oversized text and caps the combined attachment budget', async () => {
+    const hugeHook = {
+      type: 'attachment',
+      uuid: 'huge',
+      attachment: {
+        type: 'hook_additional_context',
+        content: ['x'.repeat(20_000)],
+        hookName: 'Huge',
+      },
+    } as unknown as Message
+    const many = Array.from(
+      { length: 20 },
+      (_, index) =>
+        ({
+          type: 'attachment',
+          uuid: `att-${index}`,
+          attachment: {
+            type: 'critical_system_reminder',
+            content: 'y'.repeat(4_000),
+          },
+        }) as unknown as Message,
+    )
+
+    const entry = await persistCompactionEntry(
+      softOutcome({
+        preserveData: {
+          legacyCompactionResult: {
+            boundaryMarker: {},
+            summaryMessages: [{ message: { content: 'summary' } }],
+            attachments: many,
+            hookResults: [hugeHook],
+          },
+        },
+      }),
+      [message],
+      { append: async () => {} },
+    )
+
+    expect(entry).not.toBeNull()
+    const first = entry!.attachments![0]!
+    expect(Buffer.byteLength(first.text ?? '', 'utf8')).toBeLessThanOrEqual(
+      4 * 1024,
+    )
+
+    const combined = JSON.stringify([
+      ...(entry!.attachments ?? []),
+      ...(entry!.hookResults ?? []),
+    ])
+    expect(Buffer.byteLength(combined, 'utf8')).toBeLessThanOrEqual(32 * 1024)
+  })
 })
 
 describe('legacy transcript compatibility', () => {

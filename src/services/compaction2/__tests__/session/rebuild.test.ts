@@ -180,4 +180,133 @@ describe('rebuildMessagesFromEntries', () => {
       ]),
     ).toBeNull()
   })
+
+  test('restores attachments and hook results after the summary, before kept', () => {
+    const rebuilt = rebuildMessagesFromEntries([
+      compaction({
+        attachments: [
+          { type: 'file', path: '/repo/a.ts' },
+          { type: 'plan_file_reference', path: '/plan.md', text: 'plan body' },
+        ],
+        hookResults: [
+          {
+            type: 'hook_additional_context',
+            name: 'SessionStart',
+            text: 'hook context',
+            toolUseId: 'SessionStart',
+          },
+        ],
+      }),
+      u2,
+      a3,
+    ])
+
+    expect(rebuilt).not.toBeNull()
+    const rows = rebuilt!.slice(2)
+    expect(rows.map(message => message.type)).toEqual([
+      'attachment',
+      'attachment',
+      'attachment',
+      'user',
+      'assistant',
+    ])
+
+    const file = rows[0]!.attachment as Record<string, unknown>
+    expect(file.type).toBe('compact_file_reference')
+    expect(file.filename).toBe('/repo/a.ts')
+
+    const plan = rows[1]!.attachment as Record<string, unknown>
+    expect(plan.type).toBe('plan_file_reference')
+    expect(plan.planFilePath).toBe('/plan.md')
+    expect(plan.planContent).toBe('plan body')
+
+    const hook = rows[2]!.attachment as Record<string, unknown>
+    expect(hook.type).toBe('hook_additional_context')
+    expect(hook.content).toEqual(['hook context'])
+
+    // Restored rows never carry tool_result blocks, so the kept tail still
+    // starts at firstKeptEntryId with its tool pairing intact.
+    expect(String(rows[3]!.uuid)).toBe('u2')
+    expect(String(rows[4]!.uuid)).toBe('a3')
+  })
+
+  test('old rows without attachments rebuild unchanged', () => {
+    const rebuilt = rebuildMessagesFromEntries([
+      u1,
+      compaction({ firstKeptEntryId: 'u2' }),
+      u2,
+      a3,
+    ])
+
+    expect(rebuilt!.slice(2).map(message => String(message.uuid))).toEqual([
+      'u2',
+      'a3',
+    ])
+  })
+
+  test('drops corrupt attachment fields and still rebuilds', () => {
+    const rebuilt = rebuildMessagesFromEntries([
+      compaction({
+        attachments: [
+          null,
+          { type: 42 },
+          { type: 'hook_success', text: 'still here' },
+        ] as never,
+        hookResults: 'not-an-array' as never,
+      }),
+      u2,
+    ])
+
+    expect(rebuilt).not.toBeNull()
+    const rows = rebuilt!.slice(2)
+    expect(rows).toHaveLength(2)
+    expect((rows[0]!.attachment as Record<string, unknown>).type).toBe(
+      'hook_success',
+    )
+    expect(String(rows[1]!.uuid)).toBe('u2')
+  })
+
+  test('rebuilds snapcompact text after frames are stripped', () => {
+    const rebuilt = rebuildMessagesFromEntries([
+      compaction({
+        method: 'snapcompact',
+        preserveData: {
+          snapcompact: {
+            mode: 'image',
+            frameCount: 3,
+            text: 'archived conversation body',
+            summary: 'snap summary',
+          },
+        },
+      }),
+      u2,
+      a3,
+    ])
+
+    const archive = rebuilt![2]!
+    expect(archive.type).toBe('user')
+    expect(String(archive.message!.content)).toContain(
+      'archived conversation body',
+    )
+    expect(String(rebuilt![3]!.uuid)).toBe('u2')
+  })
+
+  test('rebuilds text from head/tail when no full text is stored', () => {
+    const rebuilt = rebuildMessagesFromEntries([
+      compaction({
+        method: 'snapcompact',
+        preserveData: {
+          snapcompact: {
+            mode: 'text',
+            textHead: 'HEAD',
+            textTail: 'TAIL',
+          },
+        },
+      }),
+      u2,
+    ])
+
+    const archive = rebuilt![2]!
+    expect(String(archive.message!.content)).toContain('HEADTAIL')
+  })
 })

@@ -3,7 +3,8 @@
 // Given the journaled session entries (compaction rows + transcript messages),
 // reconstruct the model context at the latest compaction:
 //
-//   compact boundary → summary user message → messages after firstKeptEntryId
+//   compact boundary → summary → restored archive/attachments/hook results →
+//   messages after firstKeptEntryId
 //
 // Returns `null` when there is no usable compaction row (missing, corrupt, or
 // its cut point no longer resolves). Callers then keep the legacy transcript
@@ -17,6 +18,8 @@ import type {
 import { createCompactionBoundaryMessage } from './display.js'
 import {
   isCompactionSessionEntry,
+  sanitizeAttachmentMetaPair,
+  type CompactionEntryAttachmentMeta,
   type CompactionSessionEntry,
 } from './entries.js'
 
@@ -133,6 +136,120 @@ function alignToolPairing(messages: Message[]): Message[] {
 }
 
 /**
+ * Rebuild a bounded attachment message. Only shapes the API normalizer can
+ * consume are reconstructed; everything else degrades to a text reminder so a
+ * damaged journal row can never crash message normalization.
+ */
+function restoreAttachment(
+  meta: CompactionEntryAttachmentMeta,
+  timestamp: string,
+): Message | null {
+  const attachment = restoredAttachmentBody(meta)
+  if (!attachment) return null
+  return {
+    type: 'attachment',
+    uuid: randomUUID(),
+    timestamp,
+    attachment,
+  } as unknown as Message
+}
+
+function restoredAttachmentBody(
+  meta: CompactionEntryAttachmentMeta,
+): Record<string, unknown> | null {
+  const text = meta.text ?? ''
+  const hookName = meta.name ?? 'SessionStart'
+  const hookEvent = 'SessionStart'
+  const toolUseId =
+    meta.toolUseId !== undefined ? { toolUseID: meta.toolUseId } : {}
+  switch (meta.type) {
+    case 'file':
+    case 'image':
+    case 'pdf':
+    case 'notebook':
+    case 'pdf_reference':
+    case 'compact_file_reference':
+      // File bytes are deliberately not journaled; point at the path instead
+      // (the same text the legacy `compact_file_reference` fallback emits).
+      return meta.path
+        ? { type: 'compact_file_reference', filename: meta.path }
+        : null
+    case 'plan_file_reference':
+      return {
+        type: 'plan_file_reference',
+        planFilePath: meta.path ?? '',
+        planContent: text,
+      }
+    case 'invoked_skills':
+      return {
+        type: 'invoked_skills',
+        skills: [
+          {
+            name: meta.name ?? 'restored-skill',
+            path: meta.path ?? '',
+            content: text,
+          },
+        ],
+      }
+    case 'hook_additional_context':
+      return {
+        type: 'hook_additional_context',
+        content: text ? [text] : [],
+        hookName,
+        hookEvent,
+        ...toolUseId,
+      }
+    case 'hook_success':
+      return {
+        type: 'hook_success',
+        content: text,
+        hookName,
+        hookEvent,
+        ...toolUseId,
+      }
+    case 'hook_stopped_continuation':
+      return {
+        type: 'hook_stopped_continuation',
+        message: text,
+        hookName,
+        hookEvent,
+        ...toolUseId,
+      }
+    case 'critical_system_reminder':
+      return { type: 'critical_system_reminder', content: text }
+    default:
+      return { type: 'critical_system_reminder', content: restoreNotice(meta) }
+  }
+}
+
+function restoreNotice(meta: CompactionEntryAttachmentMeta): string {
+  const header = `[restored ${meta.type}${meta.path ? `: ${meta.path}` : ''}]`
+  return meta.text ? `${header}\n${meta.text}` : header
+}
+
+/**
+ * Snapcompact archives keep their bounded source text even after `frames` are
+ * stripped from the journal, so resume can re-inject the archived history in
+ * text mode (image archives fall back to the same text).
+ */
+function snapcompactArchiveText(
+  preserveData: Record<string, unknown> | undefined,
+): string | undefined {
+  const archive = preserveData?.snapcompact
+  if (!archive || typeof archive !== 'object' || Array.isArray(archive)) {
+    return undefined
+  }
+  const record = archive as Record<string, unknown>
+  if (typeof record.text === 'string' && record.text.length > 0) {
+    return record.text
+  }
+  const head = typeof record.textHead === 'string' ? record.textHead : ''
+  const tail = typeof record.textTail === 'string' ? record.textTail : ''
+  const text = head + tail
+  return text.length > 0 ? text : undefined
+}
+
+/**
  * Rebuild the post-compaction context from journaled entries. `entries` may be
  * in any order as long as the latest compaction row is present and its
  * `firstKeptEntryId` resolves to a message in the same collection.
@@ -181,5 +298,37 @@ export function rebuildMessagesFromEntries(
     timestamp,
   }
 
-  return [boundary, summary, ...kept]
+  // Restore order matches the legacy post-compact layout: summary, archived
+  // snapcompact text, attachments, hook results, then the kept tail.
+  const restored: Message[] = []
+  const archiveText = snapcompactArchiveText(latest.entry.preserveData)
+  if (archiveText) {
+    restored.push({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: `<snapcompact-archive>\n${archiveText}\n</snapcompact-archive>`,
+      },
+      isMeta: true,
+      uuid: randomUUID(),
+      timestamp,
+    })
+  }
+  const meta = sanitizeAttachmentMetaPair(
+    latest.entry.attachments,
+    latest.entry.hookResults,
+  )
+  for (const attachment of meta.attachments ?? []) {
+    const message = restoreAttachment(attachment, timestamp)
+    if (message) restored.push(message)
+  }
+  for (const hook of meta.hookResults ?? []) {
+    const message = restoreAttachment(hook, timestamp)
+    if (message) restored.push(message)
+  }
+
+  // Restored messages are `attachment`/meta-user rows with no tool_result
+  // blocks, and `alignToolPairing` already ran on the kept tail, so inserting
+  // them here cannot orphan a tool_use/tool_result pair.
+  return [boundary, summary, ...restored, ...kept]
 }
