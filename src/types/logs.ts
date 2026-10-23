@@ -1,6 +1,7 @@
 import type { UUID } from 'crypto'
 import type { FileHistorySnapshot } from 'src/utils/fileHistory.js'
 import type { ContentReplacementRecord } from 'src/utils/toolResultStorage.js'
+import type { CompactionSessionEntry } from '../services/compaction2/session/entries.js'
 import type { AgentId } from './ids.js'
 import type { Message } from './message.js'
 import type { QueueOperationMessage } from './messageQueueTypes.js'
@@ -46,6 +47,7 @@ export type LogOption = {
   attributionSnapshots?: AttributionSnapshotMessage[] // Optional attribution snapshots
   contextCollapseCommits?: ContextCollapseCommitEntry[] // Ordered — commit B may reference commit A's summary
   contextCollapseSnapshot?: ContextCollapseSnapshotEntry // Last-wins — staged queue + spawn state
+  compactionEntries?: CompactionSessionEntry[] // COMPACTION_V2 journal rows, file order
   gitBranch?: string // Git branch at the end of the session
   projectPath?: string // Original project directory path
   prNumber?: number // GitHub PR number linked to this session

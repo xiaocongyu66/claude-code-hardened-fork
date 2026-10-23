@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle'
 import type { UUID } from 'crypto'
 import { relative } from 'path'
+import type { CompactionSessionEntry } from '../services/compaction2/session/entries.js'
 import { getCwd } from 'src/utils/cwd.js'
 import { addInvokedSkill } from '../bootstrap/state.js'
 import { asSessionId } from '../types/ids.js'
@@ -445,8 +446,13 @@ export function restoreSkillStateFromMessages(messages: Message[]): void {
 export async function loadMessagesFromJsonlPath(path: string): Promise<{
   messages: SerializedMessage[]
   sessionId: UUID | undefined
+  compactionEntries: CompactionSessionEntry[]
 }> {
-  const { messages: byUuid, leafUuids } = await loadTranscriptFile(path)
+  const {
+    messages: byUuid,
+    leafUuids,
+    compactionEntries,
+  } = await loadTranscriptFile(path)
   let tip: (typeof byUuid extends Map<UUID, infer T> ? T : never) | null = null
   let tipTs = 0
   for (const m of byUuid.values()) {
@@ -457,7 +463,9 @@ export async function loadMessagesFromJsonlPath(path: string): Promise<{
       tip = m
     }
   }
-  if (!tip) return { messages: [], sessionId: undefined }
+  if (!tip) {
+    return { messages: [], sessionId: undefined, compactionEntries }
+  }
   const chain = buildConversationChain(byUuid, tip)
   return {
     messages: removeExtraFields(chain),
@@ -465,6 +473,7 @@ export async function loadMessagesFromJsonlPath(path: string): Promise<{
     // transcript, so the root retains the source session's ID. Matches
     // loadFullLog's mostRecentLeaf.sessionId.
     sessionId: tip.sessionId as UUID | undefined,
+    compactionEntries,
   }
 }
 
@@ -517,6 +526,7 @@ export async function loadConversationForResume(
     let log: LogOption | null = null
     let messages: Message[] | null = null
     let sessionId: UUID | undefined
+    let compactionEntries: CompactionSessionEntry[] | undefined
 
     if (source === undefined) {
       // --continue: most recent session, skipping live --bg/daemon sessions
@@ -551,6 +561,7 @@ export async function loadConversationForResume(
       const loaded = await loadMessagesFromJsonlPath(sourceJsonlFile)
       messages = loaded.messages
       sessionId = loaded.sessionId
+      compactionEntries = loaded.compactionEntries
     } else if (typeof source === 'string') {
       // Load specific session by ID
       log = await getLastSessionLog(source as UUID)
@@ -584,7 +595,24 @@ export async function loadConversationForResume(
       void copyFileHistoryForResume(log)
 
       messages = log.messages
+      compactionEntries = log.compactionEntries
       checkResumeConsistency(messages)
+    }
+
+    // COMPACTION_V2 resume: prefer the journaled compaction row over the
+    // legacy compact_boundary chain. A missing/corrupt row (or a stale cut
+    // point) leaves `messages` untouched so legacy resume semantics apply.
+    if (feature('COMPACTION_V2')) {
+      if (compactionEntries?.length) {
+        const { rebuildMessagesFromEntries } = await import(
+          '../services/compaction2/session/rebuild.js'
+        )
+        const rebuilt = rebuildMessagesFromEntries([
+          ...compactionEntries,
+          ...messages!,
+        ])
+        if (rebuilt) messages = rebuilt
+      }
     }
 
     // Restore skill state from invoked_skills attachments before deserialization.
