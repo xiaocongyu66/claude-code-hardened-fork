@@ -145,6 +145,11 @@ import {
   isCacheWarningEnabled,
   shouldShowCacheWarning,
 } from './utils/cacheWarning.js'
+import type {
+  CompactionV2QueryResult,
+  CompactionV2Tracking,
+} from './services/compaction2/orchestrator.js'
+import type { SpeculationManager } from './services/compaction2/speculation/manager.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
@@ -280,6 +285,109 @@ type State = {
   // Why the previous iteration continued. Undefined on first iteration.
   // Lets tests assert recovery paths fired without inspecting message contents.
   transition: Continue | undefined
+}
+
+// ---------------------------------------------------------------------------
+// COMPACTION_V2 speculative compaction (opt-in: CCH_COMPACTION_SPECULATION=1)
+//
+// The manager module owns no global state; query.ts owns this process-level
+// singleton. Per-start dependencies ride on the speculation context so a
+// background pass never reads a later loop iteration's live values. The
+// transcript itself is copied by the manager and only committed when its
+// snapshot prefix is still the live prefix.
+// ---------------------------------------------------------------------------
+
+type SpeculationQueryContext = {
+  toolUseContext: ToolUseContext
+  systemPrompt: SystemPrompt
+  userContext: { [key: string]: string }
+  systemContext: { [key: string]: string }
+  querySource: QuerySource
+  tracking?: CompactionV2Tracking
+}
+
+type CompactionSpeculationManager = SpeculationManager<
+  CompactionV2QueryResult,
+  SpeculationQueryContext
+>
+
+let compactionSpeculationManager: CompactionSpeculationManager | null = null
+
+function getCompactionSpeculationManager(): CompactionSpeculationManager | null {
+  if (process.env.CCH_COMPACTION_SPECULATION !== '1') return null
+  if (compactionSpeculationManager) return compactionSpeculationManager
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const { createSpeculationManager } =
+    require('./services/compaction2/speculation/manager.js') as typeof import('./services/compaction2/speculation/manager.js')
+  const { runCompactionV2ForQuery } =
+    require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  compactionSpeculationManager = createSpeculationManager<
+    CompactionV2QueryResult,
+    SpeculationQueryContext
+  >({
+    enabled: true,
+    runner: async snapshot => {
+      const context = snapshot.runnerContext
+      if (!context) return undefined
+      // Background passes get their own controller so cancelling one never
+      // aborts the live turn (and vice versa is handled by the manager).
+      const controller = new AbortController()
+      const onAbort = () => controller.abort()
+      if (snapshot.signal.aborted) controller.abort()
+      else snapshot.signal.addEventListener('abort', onAbort, { once: true })
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const { cloneFileStateCache } =
+        require('./utils/fileStateCache.js') as typeof import('./utils/fileStateCache.js')
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      const liveContext = context.toolUseContext
+      const toolUseContext: ToolUseContext = {
+        ...liveContext,
+        abortController: controller,
+        // compactConversation clears these caches; clone them so a background
+        // pass never mutates the live REPL's read/nested-memory state.
+        readFileState: cloneFileStateCache(liveContext.readFileState),
+        ...(liveContext.loadedNestedMemoryPaths
+          ? {
+              loadedNestedMemoryPaths: new Set(
+                liveContext.loadedNestedMemoryPaths,
+              ),
+            }
+          : {}),
+        // A speculative pass must not drive the live spinner/SDK status.
+        onCompactProgress: undefined,
+        setSDKStatus: undefined,
+        setStreamMode: undefined,
+        setResponseLength: () => {},
+      }
+      try {
+        const result = await runCompactionV2ForQuery({
+          messages: [...snapshot.messages],
+          model: snapshot.model,
+          trigger: 'threshold',
+          // The snapshot sits below the live threshold. Report the threshold
+          // as the current size so the internal trigger fires for this run.
+          tokenCount: snapshot.thresholdTokens + 1,
+          toolUseContext,
+          cacheSafeParams: {
+            systemPrompt: context.systemPrompt,
+            userContext: context.userContext,
+            systemContext: context.systemContext,
+            toolUseContext,
+            forkContextMessages: [...snapshot.messages],
+          },
+          querySource: context.querySource,
+          tracking: context.tracking,
+        })
+        return result.wasCompacted || result.reducedMessages
+          ? result
+          : undefined
+      } finally {
+        snapshot.signal.removeEventListener('abort', onAbort)
+      }
+    },
+  })
+  return compactionSpeculationManager
 }
 
 export async function* query(
@@ -719,17 +827,68 @@ async function* queryLoop(
       let v2Result: Awaited<ReturnType<typeof runCompactionV2ForQuery>> = {
         wasCompacted: false,
       }
+      const v2TokenCount =
+        tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
       // A mid-turn pass at the end of the previous tool iteration already
       // handled this provider request; consume the one-shot skip instead of
       // running the threshold pass again.
-      if (!compactionV2LoopModule!.consumeMidTurnSkip(compactionV2Loop!)) {
+      const midTurnSkip = compactionV2LoopModule!.consumeMidTurnSkip(
+        compactionV2Loop!,
+      )
+      // Main-thread turns only: subagent/compact-fork loops share this
+      // process-level slot and must never consume each other's snapshots.
+      const speculationAllowed =
+        !toolUseContext.agentId &&
+        querySource !== 'compact' &&
+        querySource !== 'session_memory'
+      const speculation =
+        midTurnSkip || !speculationAllowed
+          ? null
+          : getCompactionSpeculationManager()
+      if (speculation) {
+        /* eslint-disable @typescript-eslint/no-require-imports */
+        const { resolveThresholdDecision } =
+          require('./services/compaction2/triggers/threshold.js') as typeof import('./services/compaction2/triggers/threshold.js')
+        const { DEFAULT_COMPACTION_SETTINGS } =
+          require('./services/compaction2/contracts.js') as typeof import('./services/compaction2/contracts.js')
+        /* eslint-enable @typescript-eslint/no-require-imports */
+        const thresholdTokens = resolveThresholdDecision({
+          tokenCount: v2TokenCount,
+          windowTokens: getEffectiveContextWindowSize(
+            toolUseContext.options.mainLoopModel,
+          ),
+          settings: DEFAULT_COMPACTION_SETTINGS,
+        }).thresholdTokens
+        const speculationCtx = {
+          messages: messagesForQuery,
+          tokenCount: v2TokenCount,
+          thresholdTokens,
+          model: toolUseContext.options.mainLoopModel,
+          runnerContext: {
+            toolUseContext,
+            systemPrompt,
+            userContext,
+            systemContext,
+            querySource,
+            tracking,
+          },
+        }
+        // Entering the pre-threshold band schedules a background run.
+        speculation.maybeStart(speculationCtx)
+        // At the threshold, splice in the armed result instead of paying for
+        // the API compaction; otherwise fall through to the existing chain.
+        if (v2TokenCount >= thresholdTokens) {
+          const armed = speculation.consume(speculationCtx)
+          if (armed) v2Result = armed
+        }
+      }
+      if (!midTurnSkip && !v2Result.wasCompacted && !v2Result.reducedMessages) {
         try {
           v2Result = await runCompactionV2ForQuery({
             messages: messagesForQuery,
             model: toolUseContext.options.mainLoopModel,
             trigger: 'threshold',
-            tokenCount:
-              tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+            tokenCount: v2TokenCount,
             toolUseContext,
             cacheSafeParams: autoCompactCacheSafeParams,
             querySource,
