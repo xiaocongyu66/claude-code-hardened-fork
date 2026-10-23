@@ -1864,7 +1864,9 @@ async function* queryLoop(
         const lastDeliveredAssistant = [...assistantMessages]
           .reverse()
           .find(message => !message.isApiErrorMessage)
-        const stopReason = lastDeliveredAssistant?.message?.stop_reason
+        const rawStopReason = lastDeliveredAssistant?.message?.stop_reason
+        const stopReason =
+          typeof rawStopReason === 'string' ? rawStopReason : null
         const incompleteStop =
           compactionV2LoopModule!.isIncompleteStop(stopReason)
         // A delivered non-incomplete turn clears the one-shot guard.
