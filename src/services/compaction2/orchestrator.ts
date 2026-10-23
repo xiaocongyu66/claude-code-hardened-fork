@@ -587,6 +587,14 @@ export interface ApplyCompactionOutcomeContext {
    * marker used by the direct path). Kept injectable for the commit tests.
    */
   applySideEffects?: (messages: readonly Message[]) => void
+  /**
+   * Live tool context. The preview ran against a clone (its caches were
+   * cleared on the copy); committing clears the live caches exactly like the
+   * direct `compactConversation` path does.
+   */
+  toolUseContext?: ToolUseContext
+  /** Trigger passed to deferred PostCompact hooks. Defaults to 'auto'. */
+  trigger?: 'manual' | 'auto'
 }
 
 /** Injectable commit-time dependencies (tests). */
@@ -597,6 +605,11 @@ export interface ApplyCompactionOutcomeDeps {
   ) => Promise<unknown>
   resetLastSummarizedMessageId?: (id: undefined) => void
   cleanup?: (querySource?: QuerySource) => void
+  /** Runs the PostCompact hooks a preview skipped. */
+  executePostCompactHooks?: (
+    data: { trigger: 'manual' | 'auto'; compactSummary: string },
+    signal?: AbortSignal,
+  ) => Promise<{ userDisplayMessage?: string }>
 }
 
 /**
@@ -615,6 +628,13 @@ export async function applyCompactionOutcome(
 ): Promise<CompactionSessionEntry | null> {
   if (outcome?.kind !== 'compacted') return null
   const messages = ctx.messages ?? []
+  // Methods that summarize through `compactConversation` (soft) or its soft
+  // runner adapter (handoff) own the legacy caches/hooks. Preview runs only
+  // cleared the clone; commit clears the live context and runs the PostCompact
+  // hooks the preview skipped. Remote/snapcompact never run these on the
+  // direct path, so the commit path stays consistent with it.
+  const usedLegacyCompact =
+    outcome.method === 'soft' || outcome.method === 'handoff'
   if (outcome.method === 'soft') {
     const applySideEffects =
       ctx.applySideEffects ?? loadCompact().applyCompactConversationSideEffects
@@ -626,6 +646,23 @@ export async function applyCompactionOutcome(
     const cleanup =
       deps.cleanup ?? loadPostCompactCleanup().runPostCompactCleanup
     cleanup(ctx.querySource)
+  }
+  if (usedLegacyCompact) {
+    ctx.toolUseContext?.readFileState.clear()
+    ctx.toolUseContext?.loadedNestedMemoryPaths?.clear()
+    // `compactConversation` skipped PostCompact hooks in preview mode (the
+    // result could still be discarded). The summary is committed now, so run
+    // them once with it. PreCompact hooks are NOT replayed: they shape the
+    // summary request that already ran (see compact.ts).
+    const summary = resolveCompactionSummary(outcome)
+    if (summary) {
+      const executePostCompactHooks =
+        deps.executePostCompactHooks ?? loadHooks().executePostCompactHooks
+      await executePostCompactHooks(
+        { trigger: ctx.trigger ?? 'auto', compactSummary: summary },
+        ctx.toolUseContext?.abortController?.signal,
+      )
+    }
   }
   const persist = deps.persist ?? persistCompactionEntry
   return (await persist(outcome, messages)) as CompactionSessionEntry | null
@@ -1614,5 +1651,9 @@ function loadSessionMemory(): typeof import('../SessionMemory/sessionMemoryUtils
 
 function loadTokens(): typeof import('../../utils/tokens.js') {
   return require('../../utils/tokens.js') as typeof import('../../utils/tokens.js')
+}
+
+function loadHooks(): typeof import('../../utils/hooks.js') {
+  return require('../../utils/hooks.js') as typeof import('../../utils/hooks.js')
 }
 /* eslint-enable @typescript-eslint/no-require-imports */

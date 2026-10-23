@@ -267,6 +267,76 @@ describe('createSpeculationManager invalidation', () => {
     await flush()
     expect(manager.consume(ctx([msg('u1')]))).toBeUndefined()
   })
+
+  test('cancel releases an armed run and allows a later run to arm', async () => {
+    const results = ['first', 'second']
+    let calls = 0
+    const manager = createSpeculationManager({
+      enabled: true,
+      runner: () => results[calls++]!,
+    })
+
+    expect(manager.maybeStart(ctx([msg('u1')]))).toBe(true)
+    await flush()
+    expect(manager.state()).toBe('armed')
+
+    // Abort/exit path releases the frozen transcript + runner context.
+    manager.cancel()
+    expect(manager.state()).toBe('idle')
+
+    // The `if (run)` slot guard must not keep speculation disabled forever.
+    expect(manager.maybeStart(ctx([msg('u1')]))).toBe(true)
+    await flush()
+    expect(manager.consume(ctx([msg('u1')]))).toEqual({
+      result: 'second',
+      appendedMessages: [],
+    })
+  })
+
+  test('discards an armed result older than its TTL at consume time', async () => {
+    let clock = 0
+    const manager = createSpeculationManager({
+      enabled: true,
+      now: () => clock,
+      timeoutMs: 10_000,
+      armedTtlMs: 500,
+      runner: () => 'summary',
+    })
+
+    expect(manager.maybeStart(ctx([msg('u1')]))).toBe(true)
+    await flush()
+    expect(manager.state()).toBe('armed')
+
+    // The run itself was fast (finishedAt - startedAt ≈ 0), but the result
+    // sat armed past its TTL because the loop never reached the threshold.
+    clock = 501
+    expect(manager.consume(ctx([msg('u1')]))).toBeUndefined()
+    expect(manager.state()).toBe('idle')
+    // The slot is free after a stale discard.
+    expect(manager.maybeStart(ctx([msg('u1')]))).toBe(true)
+  })
+
+  test('discards a snapshot whose last message has no uuid', async () => {
+    let signal: AbortSignal | undefined
+    const manager = createSpeculationManager({
+      enabled: true,
+      runner: snapshot => {
+        signal = snapshot.signal
+        return 'summary'
+      },
+    })
+    const withoutUuid = [
+      { type: 'user', message: { role: 'user', content: 'u1' } },
+    ] as unknown as Message[]
+
+    expect(manager.maybeStart(ctx(withoutUuid))).toBe(true)
+    await flush()
+    // Same length, rewritten tail: only the anchor uuid could prove the
+    // snapshot is still a prefix, so no anchor means no commit.
+    expect(manager.consume(ctx(withoutUuid))).toBeUndefined()
+    expect(signal?.aborted).toBe(true)
+    expect(manager.state()).toBe('idle')
+  })
 })
 
 describe('createSpeculationManager concurrency', () => {
