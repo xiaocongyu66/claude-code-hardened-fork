@@ -39,7 +39,10 @@ import {
 } from './session/display.js'
 import {
   appendCompactionEntry,
+  boundAttachmentMetaPair,
   createCompactionSessionEntry,
+  projectAttachmentMeta,
+  type CompactionEntryAttachmentMeta,
   type CompactionSessionEntry,
 } from './session/entries.js'
 import { countContextTokens } from './tokens/contextCount.js'
@@ -488,12 +491,19 @@ export async function persistCompactionEntry(
   const summary = resolveCompactionSummary(outcome)
   if (!summary) return null
 
+  const legacy = getLegacyCompactionResult(outcome)
+  const meta = boundAttachmentMetaPair(
+    projectAttachmentMetas(legacy?.attachments),
+    projectAttachmentMetas(legacy?.hookResults),
+  )
+
   const entry = createCompactionSessionEntry({
     summary,
     firstKeptEntryId: outcome.cutPoint.firstKeptEntryId,
     tokensBefore: outcome.cutPoint.tokensBefore,
     method: outcome.method,
-    preserveData: withoutLegacyResult(outcome.preserveData),
+    preserveData: slimPreserveData(outcome.preserveData),
+    ...meta,
     parentUuid: messages.at(-1)?.uuid,
     uuid: options.uuid?.(),
     timestamp: options.now ? new Date(options.now()).toISOString() : undefined,
@@ -527,19 +537,44 @@ function resolveCompactionSummary(
   return undefined
 }
 
+function projectAttachmentMetas(
+  messages: readonly Message[] | undefined,
+): CompactionEntryAttachmentMeta[] {
+  if (!messages) return []
+  const metas: CompactionEntryAttachmentMeta[] = []
+  for (const message of messages) {
+    const meta = projectAttachmentMeta(message)
+    if (meta) metas.push(meta)
+  }
+  return metas
+}
+
 /**
- * Drop the full legacy CompactionResult before journaling — its
- * `messagesToKeep` duplicate transcript bytes already on disk.
+ * Slim `preserveData` before journaling:
+ * - drop the full legacy CompactionResult (its `messagesToKeep` duplicate
+ *   transcript bytes already on disk),
+ * - drop snapcompact `frames` base64 and keep only their count, so the row
+ *   stays small while the archive's `text`/`textHead`/`textTail` remain
+ *   available for text-mode resume.
  */
-function withoutLegacyResult(
+function slimPreserveData(
   data: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (!data) return undefined
   const rest: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(data)) {
-    if (key !== 'legacyCompactionResult') rest[key] = value
+    if (key === 'legacyCompactionResult') continue
+    rest[key] = key === 'snapcompact' ? slimSnapcompactArchive(value) : value
   }
   return Object.keys(rest).length > 0 ? rest : undefined
+}
+
+function slimSnapcompactArchive(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const archive = value as Record<string, unknown>
+  if (!Array.isArray(archive.frames)) return archive
+  const { frames, ...rest } = archive
+  return { ...rest, frameCount: frames.length }
 }
 
 // ---------------------------------------------------------------------------
