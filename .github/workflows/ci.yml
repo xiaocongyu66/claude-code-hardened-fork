@@ -50,6 +50,17 @@ jobs:
           test -s coverage/lcov.info
           grep -q '^SF:' coverage/lcov.info
 
+      # TUI engine E2E: spawns the CLI against scripts/mock-anthropic-server.ts
+      # (no real API / network). Kept non-blocking so a flaky engine cold start
+      # cannot gate the package job; a failure still shows up red on this step.
+      # TUI_E2E=1 opts the test back in: the earlier full-suite sweep sees
+      # CI=true and skips it so this step is the only place it runs.
+      - name: TUI engine E2E (mock Anthropic API)
+        continue-on-error: true
+        env:
+          TUI_E2E: "1"
+        run: bun test tests/integration/tui-engine-e2e.test.ts
+
   # ── Rust TUI：fmt / clippy / test（cargo workspace：packages/tui-native/native）──
   rust:
     runs-on: ubuntu-latest
