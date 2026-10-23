@@ -155,7 +155,7 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
                 if let Some(row) = view.submit_input() {
                     session.insert_rows(std::slice::from_ref(&row))?;
                     if let Some(process) = engine.as_mut() {
-                        process.send_prompt(&row.text.trim_start_matches("> "))?;
+                        process.send_prompt(row.text.trim_start_matches("> "))?;
                         view.status = Some("sent".into());
                     }
                 }
