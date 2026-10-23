@@ -93,7 +93,10 @@ describe('createSpeculationManager arm and commit', () => {
 
     await flush()
     expect(manager.state()).toBe('armed')
-    expect(manager.consume(ctx(messages))).toBe('summary')
+    expect(manager.consume(ctx(messages))).toEqual({
+      result: 'summary',
+      appendedMessages: [],
+    })
     expect(manager.state()).toBe('idle')
   })
 
@@ -133,8 +136,9 @@ describe('createSpeculationManager arm and commit', () => {
 })
 
 describe('createSpeculationManager invalidation', () => {
-  test('discards when the transcript grew past the snapshot', async () => {
+  test('commits with messages appended after the snapshot', async () => {
     const messages = [msg('u1'), msg('u2')]
+    const appended = msg('u3')
     let signal: AbortSignal | undefined
     const manager = createSpeculationManager({
       enabled: true,
@@ -146,7 +150,48 @@ describe('createSpeculationManager invalidation', () => {
 
     manager.maybeStart(ctx(messages))
     await flush()
-    expect(manager.consume(ctx([...messages, msg('u3')]))).toBeUndefined()
+    const consumed = manager.consume(ctx([...messages, appended]))
+    expect(consumed).toEqual({
+      result: 'summary',
+      appendedMessages: [appended],
+    })
+    // The appended turn is preserved; the run was not aborted.
+    expect(consumed?.appendedMessages[0]).toBe(appended)
+    expect(signal?.aborted).toBe(false)
+    expect(manager.state()).toBe('idle')
+  })
+
+  test('commits with N appended messages after the snapshot', async () => {
+    const messages = [msg('u1'), msg('u2')]
+    const tail = [msg('u3'), msg('u4'), msg('u5')]
+    const manager = createSpeculationManager({
+      enabled: true,
+      runner: async () => 'summary',
+    })
+
+    manager.maybeStart(ctx(messages))
+    await flush()
+    const consumed = manager.consume(ctx([...messages, ...tail]))
+    expect(consumed?.result).toBe('summary')
+    expect(consumed?.appendedMessages).toEqual(tail)
+    expect(consumed?.appendedMessages).toHaveLength(3)
+  })
+
+  test('discards when the snapshot anchor is gone', async () => {
+    const messages = [msg('u1'), msg('u2')]
+    let signal: AbortSignal | undefined
+    const manager = createSpeculationManager({
+      enabled: true,
+      runner: snapshot => {
+        signal = snapshot.signal
+        return 'summary'
+      },
+    })
+
+    manager.maybeStart(ctx(messages))
+    await flush()
+    // Branch rewritten: the last snapshot message is no longer anywhere.
+    expect(manager.consume(ctx([msg('u1'), msg('uX')]))).toBeUndefined()
     expect(signal?.aborted).toBe(true)
     expect(manager.state()).toBe('idle')
   })
@@ -160,6 +205,20 @@ describe('createSpeculationManager invalidation', () => {
     manager.maybeStart(ctx([msg('u1'), msg('u2')]))
     await flush()
     expect(manager.consume(ctx([msg('u1'), msg('uX')]))).toBeUndefined()
+  })
+
+  test('discards when the prefix changed but the anchor survived', async () => {
+    const manager = createSpeculationManager({
+      enabled: true,
+      runner: async () => 'summary',
+    })
+
+    manager.maybeStart(ctx([msg('u1'), msg('u2'), msg('u3')]))
+    await flush()
+    // Same anchor/position, rewritten earlier history.
+    expect(
+      manager.consume(ctx([msg('uX'), msg('u2'), msg('u3')])),
+    ).toBeUndefined()
   })
 
   test('discards when the transcript was truncated from the front', async () => {
@@ -230,7 +289,10 @@ describe('createSpeculationManager concurrency', () => {
 
     resolveRun!('summary')
     await flush()
-    expect(manager.consume(ctx([msg('u1')]))).toBe('summary')
+    expect(manager.consume(ctx([msg('u1')]))).toEqual({
+      result: 'summary',
+      appendedMessages: [],
+    })
   })
 })
 

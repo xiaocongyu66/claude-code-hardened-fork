@@ -453,6 +453,49 @@ export async function resolveCompactMessages(
   }
 }
 
+export interface CompactConversationOptions {
+  /**
+   * Compute-only mode: generate the summary and post-compact attachments but
+   * skip persistent side effects (sidechain transcript recording, session
+   * metadata re-append, session transcript segment, post-compaction marker).
+   * The caller must invoke `applyCompactConversationSideEffects()` at commit
+   * time; discarding the result then leaves no trace. Default false preserves
+   * the legacy behavior.
+   */
+  deferApply?: boolean
+}
+
+/**
+ * Apply the persistent session/transcript side effects of a successful
+ * `compactConversation`. This is split out so speculative runs can compute a
+ * summary (`deferApply: true`) and commit its writes only when the snapshot
+ * is still valid. Calling it on a direct (non-deferred) compaction would
+ * duplicate writes, so only deferred callers use it.
+ */
+export function applyCompactConversationSideEffects(
+  messages: readonly Message[],
+): void {
+  markPostCompaction()
+
+  // Re-append session metadata (custom title, tag) so it stays within the
+  // 16KB tail window that readLiteMetadata reads for --resume display.
+  reAppendSessionMetadata()
+
+  // Write a reduced transcript segment for the pre-compaction messages
+  // (assistant mode only). Fire-and-forget; errors are logged internally.
+  if (feature('KAIROS')) {
+    sessionTranscriptModule
+      ?.writeSessionTranscriptSegment([...messages])
+      .catch(error => {
+        logError(
+          new Error('[sessionTranscript] compact segment flush failed', {
+            cause: toError(error),
+          }),
+        )
+      })
+  }
+}
+
 export async function compactConversation(
   messages: Message[],
   context: ToolUseContext,
@@ -461,7 +504,9 @@ export async function compactConversation(
   customInstructions?: string,
   isAutoCompact: boolean = false,
   recompactionInfo?: RecompactionInfo,
+  options?: CompactConversationOptions,
 ): Promise<CompactionResult> {
+  const deferApply = options?.deferApply === true
   try {
     if (messages.length === 0) {
       throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
@@ -526,6 +571,7 @@ export async function compactConversation(
         context,
         preCompactTokenCount,
         cacheSafeParams: retryCacheSafeParams,
+        deferApply,
       })
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
@@ -777,29 +823,19 @@ export async function compactConversation(
         context.agentId,
       )
     }
-    markPostCompaction()
-
-    // Re-append session metadata (custom title, tag) so it stays within
-    // the 16KB tail window that readLiteMetadata reads for --resume display.
-    // Without this, enough post-compaction messages push the metadata entry
-    // out of the window, causing --resume to show the auto-generated title
-    // instead of the user-set session name.
-    reAppendSessionMetadata()
-
-    // Write a reduced transcript segment for the pre-compaction messages
-    // (assistant mode only). Fire-and-forget — errors are logged internally,
-    // plus a .catch here so a rejection can never surface as an unhandled
-    // promise rejection.
-    if (feature('KAIROS')) {
-      sessionTranscriptModule
-        ?.writeSessionTranscriptSegment(messages)
-        .catch(error => {
-          logError(
-            new Error('[sessionTranscript] compact segment flush failed', {
-              cause: toError(error),
-            }),
-          )
-        })
+    if (!deferApply) {
+      markPostCompaction()
+      // Re-append session metadata (custom title, tag) so it stays within
+      // the 16KB tail window that readLiteMetadata reads for --resume display.
+      // Without this, enough post-compaction messages push the metadata entry
+      // out of the window, causing --resume to show the auto-generated title
+      // instead of the user-set session name.
+      //
+      // Write a reduced transcript segment for the pre-compaction messages
+      // (assistant mode only). Fire-and-forget — errors are logged internally,
+      // plus a .catch here so a rejection can never surface as an unhandled
+      // promise rejection.
+      applyCompactConversationSideEffects(messages)
     }
 
     context.onCompactProgress?.({
@@ -1237,6 +1273,7 @@ async function streamCompactSummary({
   context,
   preCompactTokenCount,
   cacheSafeParams,
+  deferApply,
 }: {
   messages: Message[]
   summaryRequest: UserMessage
@@ -1244,6 +1281,8 @@ async function streamCompactSummary({
   context: ToolUseContext
   preCompactTokenCount: number
   cacheSafeParams: CacheSafeParams
+  /** Preview mode: do not record the fork's sidechain transcript. */
+  deferApply?: boolean
 }): Promise<AssistantMessage> {
   // When prompt cache sharing is enabled, use forked agent to reuse the
   // main conversation's cached prefix (system prompt, tools, context messages).
@@ -1290,6 +1329,8 @@ async function streamCompactSummary({
           forkLabel: 'compact',
           maxTurns: 1,
           skipCacheWrite: true,
+          // Speculative previews must not leave sidechain transcript rows.
+          skipTranscript: deferApply === true,
           // Pass the compact context's abortController so user Esc aborts the
           // fork — same signal the streaming fallback uses at
           // `signal: context.abortController.signal` below.
