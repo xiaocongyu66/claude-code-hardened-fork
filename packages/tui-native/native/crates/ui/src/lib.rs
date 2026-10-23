@@ -5,6 +5,7 @@
 
 use cch_tui_proto::EngineEvent;
 use serde_json::Value;
+use std::collections::HashMap;
 use unicode_width::UnicodeWidthChar;
 
 /// Visual role of a logical row; the renderer maps it to a palette token.
@@ -17,6 +18,10 @@ pub enum RowStyle {
     Tool,
     /// A tool invocation line (`name(args)`), rendered with the message bullet.
     ToolCall,
+    /// A tool call whose result has not arrived yet (dim bullet).
+    ToolCallPending,
+    /// A tool call that ended in an error result (red bullet).
+    ToolCallError,
     /// A tool result line, rendered with the `⎿` gutter.
     ToolResult,
     /// Markdown heading, carrying its level (`1..=6`).
@@ -91,6 +96,10 @@ pub struct ChatView {
     pub panel_summary: Option<String>,
     /// Context-window usage in percent, when the engine reported it.
     pub context_percent: Option<f64>,
+    /// Index into `completed` for each tool id, so a later tool_result can
+    /// flip the call's bullet from pending to success/error.
+    #[allow(clippy::type_complexity)]
+    tool_rows: HashMap<String, usize>,
     /// True while a turn is in flight (drives the spinner).
     pub busy: bool,
     /// Monotonic tick used to pick a spinner frame.
@@ -124,12 +133,14 @@ impl ChatView {
                     Some(diff_rows) => diff_rows,
                     None => message_rows(extra.get("message"), false),
                 };
+                self.resolve_tool_results(extra.get("message"));
                 self.completed.extend(rows.clone());
                 rows
             }
             EngineEvent::Assistant { extra } => {
                 self.live_text.clear();
                 let rows = message_rows(extra.get("message"), true);
+                self.record_tool_calls(extra.get("message"), &rows);
                 self.completed.extend(rows.clone());
                 rows
             }
@@ -162,6 +173,63 @@ impl ChatView {
             EngineEvent::ControlCancelRequest { .. }
             | EngineEvent::KeepAlive
             | EngineEvent::Unknown => Vec::new(),
+        }
+    }
+
+    /// Map `tool_use` ids to the transcript row indexes they produced.
+    fn record_tool_calls(&mut self, message: Option<&Value>, rows: &[Row]) {
+        let Some(blocks) = message
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let ids = blocks.iter().filter_map(|block| {
+            (block.get("type")?.as_str()? == "tool_use")
+                .then(|| block.get("id")?.as_str().map(ToOwned::to_owned))
+                .flatten()
+        });
+        let base = self.completed.len();
+        let mut row_index = 0usize;
+        for id in ids {
+            // Each tool_use block produced exactly one ToolCallPending row.
+            while row_index < rows.len() && rows[row_index].style != RowStyle::ToolCallPending {
+                row_index += 1;
+            }
+            if row_index == rows.len() {
+                break;
+            }
+            self.tool_rows.insert(id, base + row_index);
+            row_index += 1;
+        }
+    }
+
+    /// Flip a tool call's bullet once its result arrives.
+    fn resolve_tool_results(&mut self, message: Option<&Value>) {
+        let Some(blocks) = message
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(index) = self.tool_rows.get(id).copied() else {
+                continue;
+            };
+            let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+            if let Some(row) = self.completed.get_mut(index) {
+                row.style = if failed {
+                    RowStyle::ToolCallError
+                } else {
+                    RowStyle::ToolCall
+                };
+            }
         }
     }
 
@@ -324,7 +392,10 @@ fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
                 .get("input")
                 .map(summarize_tool_input)
                 .unwrap_or_default();
-            vec![Row::new(RowStyle::ToolCall, format!("{name}({summary})"))]
+            vec![Row::new(
+                RowStyle::ToolCallPending,
+                format!("{name}({summary})"),
+            )]
         }
         Some("tool_result") => {
             let text = block
@@ -496,6 +567,44 @@ mod tests {
         // Non-vim callers are unchanged.
         view.vim_mode = None;
         assert_eq!(view.status_line(), "sent");
+    }
+
+    #[test]
+    fn tool_bullet_tracks_the_result_status() {
+        let mut view = ChatView::new();
+        view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(view.completed[0].style, RowStyle::ToolCallPending);
+
+        view.ingest(
+            &parse_line(
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(view.completed[0].style, RowStyle::ToolCall);
+
+        view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}}"#,
+            )
+            .unwrap(),
+        );
+        view.ingest(
+            &parse_line(
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"boom"}]}}"#,
+            )
+            .unwrap(),
+        );
+        let failed = view
+            .completed
+            .iter()
+            .find(|row| row.text.starts_with("Bash(") && row.style == RowStyle::ToolCallError);
+        assert!(failed.is_some(), "{:?}", view.completed);
     }
 
     #[test]

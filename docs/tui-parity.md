@@ -57,10 +57,10 @@ Verified against the Ink app; each row names the source of truth.
 | Message bullet | `BLACK_CIRCLE` = `⏺` (darwin) / `●` (`figures.ts:12`) | `message_bullet()` | ✅ |
 | Assistant prefix | `AssistantTextMessage.tsx:190-196` (bullet column, width 2) | first line `⏺ `, rest 2 spaces | ✅ |
 | Tool call label | `AssistantToolUseMessage.tsx:137-160` (`⏺ ` + bold name + `(input)`) | `⏺ ` + bold name + `(args)` spans | 🟡 args are a JSON summary, not `renderToolUseMessage()` |
-| Tool bullet colour | `ToolUseLoader.tsx:16` (success / error / dim while unresolved) | not yet tracked | ⬜ |
+| Tool bullet colour | `ToolUseLoader.tsx:16` (success / error / dim while unresolved) | `ToolCallPending/ToolCall/ToolCallError` | ✅ |
 | Tool result gutter | `MessageResponse.tsx:20-25` (`  ⎿  ` dim, 5-col) | `  ⎿  ` + 5-space continuation | ✅ |
 | User prompt block | `UserPromptMessage.tsx:72-84`, `userMessageBackground` | full-width bg, 1 col right padding | ✅ |
-| Streaming text | `Messages.tsx:921-933` (bullet + StreamingMarkdown, marginTop 1) | plain live text | ⬜ |
+| Streaming text | `Messages.tsx:921-933` (bullet + StreamingMarkdown, marginTop 1) | bullet + markdown + tail window | ✅ |
 | Spinner | `Spinner.tsx:42-44,537` (`·✢✱✶✻✽` + reverse, 120ms) | same frames, 120ms | ✅ |
 | Compact boundary | `CompactBoundaryMessage.tsx:11-13` | `✻ Conversation compacted (ctrl+o for history)` | ✅ |
 | Diff colours | `theme.ts` `diffAdded`/`diffRemoved` used as **background** | `bg(diff_added_bg/diff_removed_bg)` | ✅ |

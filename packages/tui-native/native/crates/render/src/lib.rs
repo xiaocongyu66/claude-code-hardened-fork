@@ -221,7 +221,9 @@ impl TerminalSession {
         // The sidebar takes ~30% and is only drawn when it has content.
         let sidebar_width = (width / 3).clamp(18, 44);
         let main_width = width.saturating_sub(sidebar_width + 1).max(1);
-        let lines = transcript_lines(model, transcript_height, main_width, &theme);
+        let mut lines = transcript_lines(model, transcript_height, main_width, &theme);
+        lines.extend(live_lines(view, main_width, &theme));
+        let lines = tail(lines, transcript_height);
         let unseen = model.unseen_count();
         let panel_lines = panel_lines(panel, sidebar_width.saturating_sub(2), &theme);
         self.terminal.draw(|frame| {
@@ -272,7 +274,9 @@ impl TerminalSession {
         } else {
             width
         };
-        let lines = transcript_lines(model, transcript_height, main_width, &theme);
+        let mut lines = transcript_lines(model, transcript_height, main_width, &theme);
+        lines.extend(live_lines(view, main_width, &theme));
+        let lines = tail(lines, transcript_height);
         let unseen = model.unseen_count();
         let panel_lines =
             panel.map(|panel| panel_lines(panel, sidebar_width.saturating_sub(2), &theme));
@@ -398,6 +402,37 @@ pub fn message_bullet() -> &'static str {
     }
 }
 
+/// Streaming assistant text: bullet + incremental Markdown, with Ink's
+/// marginTop=1 before the block (`Messages.tsx:921-933`).
+pub fn live_lines(view: &ChatView, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    if view.live_text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::from("")];
+    let body = cch_tui_markdown::render_markdown(&view.live_text, width.saturating_sub(2));
+    for (index, row) in body.iter().enumerate() {
+        let lead = if index == 0 {
+            format!("{} ", message_bullet())
+        } else {
+            "  ".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{lead}{}", row.text),
+            row_style(row.style, theme),
+        )));
+    }
+    lines
+}
+
+/// Keep only the last `height` lines so streaming always shows its tail.
+fn tail(lines: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {
+    let len = lines.len();
+    if len <= height {
+        return lines;
+    }
+    lines.into_iter().skip(len - height).collect()
+}
+
 /// OSC52 clipboard sequence: `ESC ] 52 ; c ; <base64> BEL`.
 pub fn osc52_sequence(text: &str) -> String {
     use base64::Engine as _;
@@ -432,7 +467,9 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
         // prompts lose one column to Ink's `paddingRight={1}`.
         let (prefix, cont, available) = match row.style {
             RowStyle::Assistant => (message_bullet(), "  ", width.saturating_sub(2)),
-            RowStyle::ToolCall => (message_bullet(), "  ", width.saturating_sub(2)),
+            RowStyle::ToolCall | RowStyle::ToolCallPending | RowStyle::ToolCallError => {
+                (message_bullet(), "  ", width.saturating_sub(2))
+            }
             RowStyle::ToolResult => ("  ⎿  ", "     ", width.saturating_sub(5)),
             RowStyle::User => ("", "", width.saturating_sub(1).max(1)),
             _ => ("", "", width),
@@ -452,7 +489,10 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
         // tool-call row is its own block, while a user prompt arrives split
         // into one row per line: only its first row opens a new block.
         let starts_block = match row.style {
-            RowStyle::Assistant | RowStyle::ToolCall => true,
+            RowStyle::Assistant
+            | RowStyle::ToolCall
+            | RowStyle::ToolCallPending
+            | RowStyle::ToolCallError => true,
             RowStyle::User => previous != Some(RowStyle::User),
             _ => false,
         };
@@ -466,7 +506,10 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
         previous = Some(row.style);
         let mut tool_call_offset = 0usize;
         for (line_index, styled) in styled_rows.iter().enumerate() {
-            if row.style == RowStyle::ToolCall {
+            if matches!(
+                row.style,
+                RowStyle::ToolCall | RowStyle::ToolCallPending | RowStyle::ToolCallError
+            ) {
                 lines.push(tool_call_line(
                     row,
                     styled,
@@ -518,8 +561,16 @@ fn tool_call_line(
     cont: &str,
     theme: &Theme,
 ) -> Line<'static> {
-    let normal = row_style(RowStyle::ToolCall, theme);
+    let palette = theme.palette;
+    let normal = Style::default().fg(palette.foreground);
     let name_style = normal.add_modifier(Modifier::BOLD);
+    // ToolUseLoader: dim while unresolved, success when it returned, error
+    // when the result was an error.
+    let bullet_style = match row.style {
+        RowStyle::ToolCallPending => Style::default().fg(palette.dim),
+        RowStyle::ToolCallError => Style::default().fg(palette.error),
+        _ => Style::default().fg(palette.success),
+    };
     let text = styled.text.as_str();
     let line_chars = text.chars().count();
     // Char offset of the first `(`; everything before it is the tool name.
@@ -534,7 +585,7 @@ fn tool_call_line(
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     if line_index == 0 {
-        spans.push(Span::styled(format!("{prefix} "), normal));
+        spans.push(Span::styled(format!("{prefix} "), bullet_style));
     } else {
         spans.push(Span::styled(cont.to_string(), normal));
     }
@@ -649,7 +700,9 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::System => Style::default().fg(palette.system),
         RowStyle::Error => Style::default().fg(palette.error),
         RowStyle::Tool => Style::default().fg(palette.tool),
-        RowStyle::ToolCall => Style::default().fg(palette.tool),
+        RowStyle::ToolCall => Style::default().fg(palette.foreground),
+        RowStyle::ToolCallPending => Style::default().fg(palette.dim),
+        RowStyle::ToolCallError => Style::default().fg(palette.error),
         RowStyle::ToolResult => Style::default().fg(palette.dim),
         // Markdown row roles. The markdown crate emits the text (markers,
         // prefixes and indentation included); these only pick a palette token.
@@ -686,9 +739,11 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView, theme: &Theme) {
     ])
     .split(area);
 
-    let live = Paragraph::new(view.live_text.as_str())
-        .style(Style::default().fg(theme.palette.foreground));
-    frame.render_widget(live, chunks[0]);
+    let live = tail(
+        live_lines(view, chunks[0].width as usize, theme),
+        chunks[0].height as usize,
+    );
+    frame.render_widget(Paragraph::new(live), chunks[0]);
 
     draw_prompt(frame, view, chunks[1]);
     draw_status(frame, view, chunks[2], theme);
@@ -1148,6 +1203,20 @@ mod tests {
     }
 
     #[test]
+    fn tool_bullet_colors_follow_status() {
+        let theme = Theme::dark();
+        for (style, color) in [
+            (RowStyle::ToolCallPending, theme.palette.dim),
+            (RowStyle::ToolCall, theme.palette.success),
+            (RowStyle::ToolCallError, theme.palette.error),
+        ] {
+            let rows = vec![Row::new(style, "Bash(ls)")];
+            let lines = rows_to_lines(&rows, 40, &theme, true);
+            assert_eq!(lines[0].spans[0].style.fg, Some(color), "{style:?}");
+        }
+    }
+
+    #[test]
     fn tool_call_name_is_bold_and_args_are_plain() {
         let rows = vec![Row::new(RowStyle::ToolCall, "Bash(ls -la)")];
         let theme = Theme::dark();
@@ -1496,6 +1565,31 @@ mod tests {
             .decode(payload)
             .expect("base64");
         assert_eq!(String::from_utf8(decoded).expect("utf8"), "hello");
+    }
+
+    #[test]
+    fn streaming_text_gets_a_bullet_and_markdown() {
+        let mut view = ChatView::new();
+        view.live_text = "# hello".into();
+        let lines = live_lines(&view, 40, &Theme::dark());
+        assert_eq!(lines.len(), 2, "blank margin + one line");
+        assert_eq!(lines[0].width(), 0);
+        assert!(
+            lines[1]
+                .to_string()
+                .starts_with(&format!("{} ", message_bullet())),
+            "{}",
+            lines[1]
+        );
+        assert!(!lines[1].to_string().contains('#'), "{}", lines[1]);
+    }
+
+    #[test]
+    fn tail_keeps_the_last_lines() {
+        let lines = vec![Line::from("a"), Line::from("b"), Line::from("c")];
+        let kept = tail(lines, 2);
+        let text: Vec<String> = kept.iter().map(|line| line.to_string()).collect();
+        assert_eq!(text, ["b", "c"]);
     }
 
     #[test]
