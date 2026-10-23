@@ -14,7 +14,7 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Fullscreen virtual list | `useVirtualScroll.ts` | ✅ `crates/fullscreen` | window, follow/unseen |
 | Markdown | `Markdown.tsx` | ✅ `crates/markdown` | headings/lists/quotes/code/tables/links |
 | Code highlighting | `HighlightedCode.tsx` | ✅ `crates/highlight` | syntect, byte-budget LRU |
-| Diffs | `StructuredDiff.tsx`, `FileEditToolDiff.tsx` | 🟡 `crates/diff` + render | renderer ready; Edit-tool wiring pending |
+| Diffs | `StructuredDiff.tsx`, `FileEditToolDiff.tsx` | ✅ | Edit `structuredPatch` renders as +/-/context rows |
 | Permission dialog | `permissions/PermissionRequest.tsx` | ✅ `crates/dialog` + overlay | allow/deny, suggestions, cancel |
 | Prompt editing | `PromptInput.tsx` | ✅ `TextBuffer` + `keymap` | multi-line, undo, kill ring, chords |
 | Paste folding | `PromptInput.tsx` (~1399) | ✅ `TextBuffer::insert_paste` | >800 chars or >2 newlines |
