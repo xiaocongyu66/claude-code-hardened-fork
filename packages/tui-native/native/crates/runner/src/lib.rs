@@ -67,6 +67,9 @@ pub enum TuiCommand {
     Interrupt,
     /// The TUI is leaving; the host may tear down the session.
     Exit,
+    /// Ask the host for the current context usage. The host answers with a
+    /// `control_response` engine event carrying `percent`.
+    GetContextUsage { request_id: String },
 }
 
 /// Why a [`TuiCommand`] JSON line could not be decoded.
@@ -106,6 +109,10 @@ impl TuiCommand {
             }),
             Self::Interrupt => serde_json::json!({ "type": "interrupt" }),
             Self::Exit => serde_json::json!({ "type": "exit" }),
+            Self::GetContextUsage { request_id } => serde_json::json!({
+                "type": "get_context_usage",
+                "request_id": request_id,
+            }),
         };
         value.to_string()
     }
@@ -123,6 +130,13 @@ impl TuiCommand {
                 .and_then(serde_json::Value::as_str)
                 .map(|text| Self::Prompt(text.to_string()))
                 .ok_or(CommandError::Malformed("prompt")),
+            "get_context_usage" => value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| Self::GetContextUsage {
+                    request_id: id.to_string(),
+                })
+                .ok_or(CommandError::Malformed("get_context_usage")),
             "permission" => {
                 let request_id = value
                     .get("request_id")
@@ -245,6 +259,9 @@ pub fn run_interactive_with_mode(
     let mut queued_prompts: Vec<String> = Vec::new();
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
+    let mut next_context_poll = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut pending_context_request: Option<String> = None;
+    let mut request_seq = 0u64;
     let mut quit: Option<TuiCommand> = None;
 
     loop {
@@ -282,8 +299,25 @@ pub fn run_interactive_with_mode(
                                 permission,
                             ));
                         }
-                        EngineEvent::ControlResponse { .. } => {
-                            dialog = None;
+                        EngineEvent::ControlResponse { response } => {
+                            let mut consumed = false;
+                            if let cch_tui_proto::ControlResponse::Success {
+                                request_id,
+                                response: Some(payload),
+                            } = response
+                                && pending_context_request.as_deref() == Some(request_id.as_str())
+                            {
+                                if let Some(percent) =
+                                    payload.get("percent").and_then(serde_json::Value::as_f64)
+                                {
+                                    view.context_percent = Some(percent);
+                                }
+                                pending_context_request = None;
+                                consumed = true;
+                            }
+                            if !consumed {
+                                dialog = None;
+                            }
                         }
                         EngineEvent::ControlCancelRequest { .. } => {
                             if let Some(open) = dialog.as_mut() {
@@ -310,6 +344,19 @@ pub fn run_interactive_with_mode(
                     break;
                 }
             }
+        }
+        if pending_context_request.is_none() && std::time::Instant::now() >= next_context_poll {
+            request_seq = request_seq.wrapping_add(1);
+            let request_id = format!("ctx-{request_seq}");
+            if outbox
+                .send(TuiCommand::GetContextUsage {
+                    request_id: request_id.clone(),
+                })
+                .is_ok()
+            {
+                pending_context_request = Some(request_id);
+            }
+            next_context_poll = std::time::Instant::now() + std::time::Duration::from_secs(5);
         }
         if engine_closed {
             view.status = Some("engine exited — press q".into());

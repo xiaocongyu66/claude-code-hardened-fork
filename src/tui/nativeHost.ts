@@ -70,6 +70,14 @@ export interface RunNativeTuiDeps {
   /** Interrupt the in-flight turn. */
   abort?: () => void
   pollIntervalMs?: number
+  /** Context window used to turn the last usage into a percentage. */
+  contextWindowTokens?: number
+  /**
+   * Optional precise provider for context usage (e.g. the engine's
+   * `get_context_usage` control request). When absent the host derives the
+   * percentage from the newest `assistant.usage`.
+   */
+  getContextUsage?: () => Promise<number | null> | number | null
   /** Injected for deterministic tests; defaults to setTimeout. */
   sleep?: (ms: number) => Promise<void>
   onError?: (error: unknown) => void
@@ -219,8 +227,21 @@ export async function runNativeTui(
     }
   }
 
+  let lastContextTokens = 0
+  const contextWindow = deps.contextWindowTokens ?? 200_000
   const sendFrame = (frame: unknown): void => {
     if (stopped) return
+    const record = asRecord(frame)
+    if (record?.type === 'assistant') {
+      const usage = asRecord(asRecord(record.message)?.usage)
+      if (usage) {
+        lastContextTokens =
+          ((usage.input_tokens as number | undefined) ?? 0) +
+          ((usage.cache_read_input_tokens as number | undefined) ?? 0) +
+          ((usage.cache_creation_input_tokens as number | undefined) ?? 0) +
+          ((usage.output_tokens as number | undefined) ?? 0)
+      }
+    }
     try {
       native.send(JSON.stringify(frame))
     } catch (error) {
@@ -346,6 +367,35 @@ export async function runNativeTui(
           }
           case 'permission': {
             await answerPermission(event as NativePermissionEvent)
+            break
+          }
+          case 'get_context_usage': {
+            const requestId = (event as unknown as Record<string, unknown>)
+              .request_id
+            let percent: number | null = null
+            if (deps.getContextUsage) {
+              try {
+                percent = await deps.getContextUsage()
+              } catch (error) {
+                onError(error)
+              }
+            }
+            if (percent === null && lastContextTokens > 0) {
+              percent = Math.min(
+                100,
+                (lastContextTokens / Math.max(1, contextWindow)) * 100,
+              )
+            }
+            if (percent !== null && typeof requestId === 'string') {
+              sendFrame({
+                type: 'control_response',
+                response: {
+                  subtype: 'success',
+                  request_id: requestId,
+                  response: { percent },
+                },
+              })
+            }
             break
           }
           case 'interrupt': {

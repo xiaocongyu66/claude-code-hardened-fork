@@ -142,6 +142,29 @@ describe('runNativeTui', () => {
     expect(answers).toHaveLength(1)
   })
 
+  test('answers get_context_usage with the injected percentage', async () => {
+    const mod = new FakeNativeModule()
+    const result = await runNativeTui({
+      nativeModule: mod,
+      contextWindowTokens: 1000,
+      getContextUsage: () => 42,
+      sleep: scriptedSleep(mod, [
+        () => ({ type: 'get_context_usage', request_id: 'ctx-1' }),
+        () => ({ type: 'exit' }),
+      ]),
+      submitPrompt: async function* () {},
+    })
+
+    expect(result.started).toBe(true)
+    const response = mod.sent.find(
+      frame => (frame as Record<string, unknown>).type === 'control_response',
+    ) as Record<string, unknown> | undefined
+    expect(response).toBeDefined()
+    const body = response!.response as Record<string, unknown>
+    expect(body.request_id).toBe('ctx-1')
+    expect((body.response as Record<string, unknown>).percent).toBe(42)
+  })
+
   test('interrupt calls the injected abort and unknown frames are ignored', async () => {
     const mod = new FakeNativeModule()
     mod.queue.push({ type: 'mystery' })
