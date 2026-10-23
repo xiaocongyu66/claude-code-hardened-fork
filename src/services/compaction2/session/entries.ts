@@ -254,9 +254,14 @@ export function boundAttachmentMetaList(
 ): CompactionEntryAttachmentMeta[] | undefined {
   const out: CompactionEntryAttachmentMeta[] = []
   let used = 0
-  appendBounded(list, out, () => used, bytes => {
-    used += bytes
-  })
+  appendBounded(
+    list,
+    out,
+    () => used,
+    bytes => {
+      used += bytes
+    },
+  )
   return out.length > 0 ? out : undefined
 }
 
@@ -292,12 +297,22 @@ export function boundAttachmentMetaPair(
   const boundedAttachments: CompactionEntryAttachmentMeta[] = []
   const boundedHookResults: CompactionEntryAttachmentMeta[] = []
   let used = 0
-  appendBounded(attachments, boundedAttachments, () => used, bytes => {
-    used += bytes
-  })
-  appendBounded(hookResults, boundedHookResults, () => used, bytes => {
-    used += bytes
-  })
+  appendBounded(
+    attachments,
+    boundedAttachments,
+    () => used,
+    bytes => {
+      used += bytes
+    },
+  )
+  appendBounded(
+    hookResults,
+    boundedHookResults,
+    () => used,
+    bytes => {
+      used += bytes
+    },
+  )
   return {
     ...(boundedAttachments.length > 0 && {
       attachments: boundedAttachments,
