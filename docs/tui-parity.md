@@ -12,16 +12,16 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Streaming text | `REPL.tsx` (`streamingText`) | ✅ `ChatView::live_text` | deltas never touch frozen rows |
 | Inline scrollback freeze | `ScrollBox` + `shouldRenderStatically` | ✅ `TerminalSession::insert_rows` | frozen via `insert_before` |
 | Fullscreen virtual list | `useVirtualScroll.ts` | ✅ `crates/fullscreen` | window, follow/unseen |
-| Markdown | `Markdown.tsx` | 🟡 `crates/markdown` | headings/lists/quotes/code; tables + links in flight |
+| Markdown | `Markdown.tsx` | ✅ `crates/markdown` | headings/lists/quotes/code/tables/links |
 | Code highlighting | `HighlightedCode.tsx` | ✅ `crates/highlight` | syntect, byte-budget LRU |
 | Diffs | `StructuredDiff.tsx`, `FileEditToolDiff.tsx` | 🟡 `crates/diff` + render | renderer ready; Edit-tool wiring pending |
 | Permission dialog | `permissions/PermissionRequest.tsx` | ✅ `crates/dialog` + overlay | allow/deny, suggestions, cancel |
 | Prompt editing | `PromptInput.tsx` | ✅ `TextBuffer` + `keymap` | multi-line, undo, kill ring, chords |
 | Paste folding | `PromptInput.tsx` (~1399) | ✅ `TextBuffer::insert_paste` | >800 chars or >2 newlines |
 | History search | `HistorySearchDialog.tsx` | 🟡 wired (Ctrl+R) | UI is a status line; dialog view pending |
-| Vim mode | `PromptInput.tsx` (~2456) | 🟡 in flight (`VIM_SPECS`) | env `CCH_TUI_VIM` |
-| Message actions | `messageActions.tsx` | 🟡 model in flight | copy / rewind / expand |
-| Tool output expand | `CtrlOToExpand.tsx` | 🟡 model in flight | collapsed 3 lines by default |
+| Vim mode | `PromptInput.tsx` (~2456) | ✅ `crates/core::vim` | env `CCH_TUI_VIM=1` |
+| Message actions | `messageActions.tsx` | 🟡 model ready | focus/copy/rewind not wired to keys yet |
+| Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | collapse 3 lines; inline is frozen |
 | Task / agent panel | `TaskListV2.tsx`, `components/tasks/*` | ✅ `crates/panel` | status line + fullscreen sidebar |
 | Spinner / activity | `Spinner.tsx` | ⬜ | needs a tick source in the loop |
 | Plan mode | `ExitPlanModePermissionRequest/*` | ⬜ | renderer can reuse the dialog overlay |
