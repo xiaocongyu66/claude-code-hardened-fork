@@ -25,7 +25,17 @@ export interface PayloadRejectionEvidence {
   contextWindow?: number
   /** Local estimate for the rejected request. */
   tokenCount?: number
+  /**
+   * Whether the conversation has history a compaction pass could reclaim.
+   * A payload-shaped rejection with local headroom only dead-ends when there
+   * is nothing to reclaim; otherwise maintenance may still shrink context.
+   */
+  hasReclaimableHistory?: boolean
 }
+
+/** A 413 whose text also proves a token overflow is not a payload-only case. */
+const TOKEN_OVERFLOW_TEXT_PATTERN =
+  /\bprompt is too long\b|\bcontext length exceeded\b|\bmaximum context length\b|\b\d+\s*tokens?\s*>\s*\d+\b/i
 
 export interface PayloadGuardDecision {
   isPayloadRejection: boolean
@@ -71,9 +81,11 @@ export function evaluatePayloadGuard(
   const providerTokens = evidence.providerInputTokens
 
   const tokenOverflowProven =
-    providerTokens !== undefined &&
-    windowTokens > 0 &&
-    providerTokens > windowTokens
+    (evidence.message !== undefined &&
+      TOKEN_OVERFLOW_TEXT_PATTERN.test(evidence.message)) ||
+    (providerTokens !== undefined &&
+      windowTokens > 0 &&
+      providerTokens > windowTokens)
 
   if (!isPayloadRejection) {
     return {
@@ -118,13 +130,16 @@ export function evaluatePayloadGuard(
     providerTokens <= windowTokens
 
   if (windowTokens > 0 && localHeadroom && usageWithinWindow) {
+    const canReclaim = evidence.hasReclaimableHistory === true
     return {
       isPayloadRejection: true,
       mediaEvidence: false,
       tokenOverflowProven: false,
-      blockCompaction: true,
+      blockCompaction: !canReclaim,
       excludeMediaMethods: true,
-      reason: 'payload-budget-with-headroom',
+      reason: canReclaim
+        ? 'payload-with-reclaimable-history'
+        : 'payload-budget-with-headroom',
     }
   }
 

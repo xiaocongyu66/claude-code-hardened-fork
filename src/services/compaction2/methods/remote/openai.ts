@@ -183,10 +183,9 @@ export function buildOpenAiCompactionInput(
           break
         case 'thinking':
         case 'redacted_thinking':
-          return {
-            input: [],
-            unsupported: 'openai-unsupported-thinking-block',
-          }
+          // Reasoning blocks are not part of the OpenAI wire format; skip them
+          // instead of refusing the whole compaction for thinking sessions.
+          break
         default:
           return {
             input: [],
@@ -604,6 +603,36 @@ export function buildOpenAiV2ReplacementHistory(
   return { replacementHistory, retainedImageCount }
 }
 
+const V2_TIMEOUT_MS = 300_000
+const V2_MAX_RETRIES = 2
+
+async function fetchV2Once(
+  fetchImpl: NonNullable<RemoteLaneRequest['transport']['fetch']>,
+  endpoint: string,
+  apiKey: string | undefined,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
+  const controller = new AbortController()
+  const onAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
+  const timer = setTimeout(() => controller.abort(), V2_TIMEOUT_MS)
+  try {
+    return await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: openAiHeaders(apiKey),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
 async function runV2(
   request: RemoteLaneRequest,
   input: Array<Record<string, unknown>>,
@@ -611,18 +640,33 @@ async function runV2(
   const fetchImpl = request.transport.fetch
   if (!fetchImpl) return { skipped: 'openai-transport-missing' }
   const endpoint = resolveOpenAiResponsesEndpoint(request.transport.baseUrl)
-  const response = await fetchImpl(endpoint, {
-    method: 'POST',
-    headers: openAiHeaders(request.transport.apiKey),
-    body: JSON.stringify({
-      model: request.transport.model,
-      input: [...input, { type: 'compaction_trigger' }],
-      instructions: request.instructions,
-      stream: true,
-      store: false,
-    }),
-    signal: request.signal,
-  })
+  const body = {
+    model: request.transport.model,
+    input: [...input, { type: 'compaction_trigger' }],
+    instructions: request.instructions,
+    stream: true,
+    store: false,
+  }
+  let response: Response | undefined
+  let lastError: unknown
+  for (let attempt = 0; attempt <= V2_MAX_RETRIES; attempt++) {
+    try {
+      response = await fetchV2Once(
+        fetchImpl,
+        endpoint,
+        request.transport.apiKey,
+        body,
+        request.signal,
+      )
+      break
+    } catch (error) {
+      if (isAbortError(error) && request.signal?.aborted) throw error
+      lastError = error
+      if (attempt === V2_MAX_RETRIES) throw error
+      await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)))
+    }
+  }
+  if (!response) throw lastError ?? new Error('V2 remote compaction failed')
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
     throw new Error(
@@ -647,6 +691,7 @@ async function runV2(
         version: 'v2',
         provider: 'openai',
         replacementHistory,
+        compactionItem,
         usedTokens: collection.usedTokens,
         usage: collection.usage,
         retainedImageCount,

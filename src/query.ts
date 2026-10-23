@@ -315,7 +315,14 @@ type CompactionSpeculationManager = SpeculationManager<
 
 let compactionSpeculationManager: CompactionSpeculationManager | null = null
 
+// Disabled until the runner is side-effect-free: it currently reuses the
+// committing soft path, so an armed pass that is later discarded leaves
+// transcript/journal/cleanup side effects behind. Re-enable together with
+// commit-time finalization and prefix-append semantics.
+const SPECULATION_WIRING_ENABLED = false
+
 function getCompactionSpeculationManager(): CompactionSpeculationManager | null {
+  if (!SPECULATION_WIRING_ENABLED) return null
   if (process.env.CCH_COMPACTION_SPECULATION !== '1') return null
   if (compactionSpeculationManager) return compactionSpeculationManager
   /* eslint-disable @typescript-eslint/no-require-imports */
@@ -390,6 +397,34 @@ function getCompactionSpeculationManager(): CompactionSpeculationManager | null 
     },
   })
   return compactionSpeculationManager
+}
+
+type CompactionSettingsLike = {
+  enabled?: boolean
+  midTurnEnabled?: boolean
+  idleEnabled?: boolean
+  asyncEnabled?: boolean
+}
+
+function loadCompactionSettingsLike(): CompactionSettingsLike | undefined {
+  try {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const { getCompactionSettings } =
+      require('./utils/settings/settings.js') as {
+        getCompactionSettings(): unknown
+      }
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    const value = getCompactionSettings()
+    return value && typeof value === 'object'
+      ? (value as CompactionSettingsLike)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function isCompactionDisabledBySettings(): boolean {
+  return loadCompactionSettingsLike()?.enabled === false
 }
 
 export async function* query(
@@ -576,6 +611,11 @@ async function* queryLoop(
     : null
   /* eslint-enable @typescript-eslint/no-require-imports */
   const compactionV2Loop = compactionV2LoopModule?.createLoopCompactionState()
+  // settings.compaction.enabled=false must also suppress the legacy
+  // predictive path when V2 is on, not just the V2 adapter.
+  const compactionV2SettingsDisabled = feature('COMPACTION_V2')
+    ? isCompactionDisabledBySettings()
+    : false
   const compactionV2ReducedNotice =
     compactionV2Display?.createReducedNoticeState()
   const reducedNoticeFor = (result: {
@@ -1202,7 +1242,11 @@ async function* queryLoop(
     // us past the context window. Uses effectiveContextWindow directly
     // (without the autocompact buffer) to avoid double-reserving with
     // getAutoCompactThreshold which already subtracts buffer.
-    if (!compactionResult && isAutoCompactEnabled()) {
+    if (
+      !compactionResult &&
+      isAutoCompactEnabled() &&
+      !compactionV2SettingsDisabled
+    ) {
       const model = toolUseContext.options.mainLoopModel
       const currentTokens =
         compactionV2TokenOverride ??
@@ -2819,7 +2863,7 @@ async function* queryLoop(
             },
             querySource,
             tracking,
-            settings: { midTurnEnabled: true },
+            settings: loadCompactionSettingsLike(),
           })
         } catch (error) {
           logError(error)

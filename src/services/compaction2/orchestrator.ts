@@ -834,13 +834,24 @@ export async function runIdleCompactionV2(
   if (!isCompactionEnabledInSettings(compactionSettings)) {
     return { compacted: false, trace: [] }
   }
+  // An explicit idleEnabled:false wins over the env opt-in.
+  if (
+    compactionSettings &&
+    typeof compactionSettings === 'object' &&
+    (compactionSettings as Record<string, unknown>).idleEnabled === false
+  ) {
+    return { compacted: false, trace: [] }
+  }
   const tokenCount = defaultCountTokens(request.messages)
   const result = await runCompactionV2(
     {
       model: request.model,
       trigger: 'idle',
       messages: request.messages,
-      settings: { ...request.settings, idleEnabled: true },
+      settings: {
+        ...request.settings,
+        idleEnabled: request.settings?.idleEnabled ?? true,
+      },
       windowTokens: getEffectiveContextWindowSize(request.model),
       tokenCount,
       lastActivityAt: request.lastActivityAt,
@@ -1035,7 +1046,39 @@ function getLegacyCompactionResult(
   ) {
     return candidate as CompactionResult
   }
+  // Remote/snapcompact outcomes carry a summary and cut point but no legacy
+  // result. Build the minimal shape the query loop/transcript understand so
+  // the result is not discarded and soft does not run a second summary call.
+  if (typeof outcome.summary === 'string' && outcome.summary.length > 0) {
+    return buildLegacyResultFromOutcome(outcome)
+  }
   return undefined
+}
+
+function buildLegacyResultFromOutcome(
+  outcome: Extract<CompactionOutcome, { kind: 'compacted' }>,
+): CompactionResult {
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const { createUserMessage } =
+    require('../../utils/messages.js') as typeof import('../../utils/messages.js')
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  const tokensBefore = outcome.cutPoint.tokensBefore
+  const tokensAfter = Math.max(0, tokensBefore - outcome.tokensSaved)
+  return {
+    boundaryMarker: outcome.cutPoint.boundaryMessage,
+    summaryMessages: [
+      createUserMessage({
+        content: outcome.summary,
+        isCompactSummary: true,
+        isVisibleInTranscriptOnly: true,
+      }),
+    ],
+    attachments: [],
+    hookResults: [],
+    preCompactTokenCount: tokensBefore,
+    postCompactTokenCount: tokensAfter,
+    truePostCompactTokenCount: tokensAfter,
+  }
 }
 
 function defaultCountTokens(messages: readonly Message[]): number {
