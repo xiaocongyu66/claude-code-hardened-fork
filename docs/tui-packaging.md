@@ -4,7 +4,7 @@
 
 - 源码：`packages/tui-native/native`（Cargo workspace，bin 名 `cch-tui`）
 - 解析器：`src/utils/tuiBinary.ts`
-- 平台包模板：`packages/tui-native/package.json`
+- 平台包模板：`packages/tui-native/packaging/package.json.template`
 - CI：`.github/workflows/ci.yml`（`rust` + `native` 矩阵 + `package`）
 - 本地全流程：`scripts/build-all.mjs`
 
@@ -45,10 +45,10 @@ vendor/tui/<cargo-triple>/cch-tui[.exe].sha256
 
 ### npm 平台包
 
-平台包目录由模板 `packages/tui-native/package.json` 复制生成，模板与 6 个实例位于：
+平台包目录由模板 `packages/tui-native/packaging/package.json.template` 复制生成，模板与 6 个实例位于：
 
 ```
-packages/tui-native/package.json                 # 模板（private，不发布）
+packages/tui-native/packaging/package.json.template  # 模板（非 workspace，不发布）
 packages/tui-native/platforms/<platform>-<arch>/package.json
 ```
 
