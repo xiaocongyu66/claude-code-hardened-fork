@@ -7,6 +7,10 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 
+pub mod text;
+
+pub use text::{KillDirection, KillRing, TextBuffer};
+
 /// Stable identity supplied by the caller (list key, message id, ...).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ElementKey(pub String);
