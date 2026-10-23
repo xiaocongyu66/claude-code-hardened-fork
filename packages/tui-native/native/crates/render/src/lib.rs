@@ -303,6 +303,7 @@ pub fn osc52_sequence(text: &str) -> String {
 /// everything else (user input, tool output, errors) is wrapped verbatim.
 fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let mut previous: Option<RowStyle> = None;
     let mut index = 0;
     while index < rows.len() {
         let row = &rows[index];
@@ -314,15 +315,18 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
                 index += 1;
             }
             lines.extend(code_block_lines(&rows[start..index], theme));
+            previous = Some(RowStyle::CodeBlock);
             continue;
         }
         index += 1;
         // Rows with a gutter (assistant prose, tool calls, tool results) are
-        // wrapped to the remaining width so the prefix never overflows.
+        // wrapped to the remaining width so the prefix never overflows. User
+        // prompts lose one column to Ink's `paddingRight={1}`.
         let (prefix, cont, available) = match row.style {
             RowStyle::Assistant => (message_bullet(), "  ", width.saturating_sub(2)),
             RowStyle::ToolCall => (message_bullet(), "  ", width.saturating_sub(2)),
             RowStyle::ToolResult => ("  ⎿  ", "     ", width.saturating_sub(5)),
+            RowStyle::User => ("", "", width.saturating_sub(1).max(1)),
             _ => ("", "", width),
         };
         let styled_rows = match row.style {
@@ -332,7 +336,38 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
                 .map(|line| Row::new(row.style, line))
                 .collect(),
         };
+        if styled_rows.is_empty() {
+            continue;
+        }
+        // Ink's MessageRow adds `marginTop={1}` to assistant, tool-call and
+        // user blocks (but not to tool results). Each top-level assistant or
+        // tool-call row is its own block, while a user prompt arrives split
+        // into one row per line: only its first row opens a new block.
+        let starts_block = match row.style {
+            RowStyle::Assistant | RowStyle::ToolCall => true,
+            RowStyle::User => previous != Some(RowStyle::User),
+            _ => false,
+        };
+        if starts_block && !lines.is_empty() && !lines.last().is_some_and(|line| line.width() == 0)
+        {
+            lines.push(Line::from(""));
+        }
+        previous = Some(row.style);
+        let mut tool_call_offset = 0usize;
         for (line_index, styled) in styled_rows.iter().enumerate() {
+            if row.style == RowStyle::ToolCall {
+                lines.push(tool_call_line(
+                    row,
+                    styled,
+                    line_index,
+                    tool_call_offset,
+                    prefix,
+                    cont,
+                    theme,
+                ));
+                tool_call_offset += styled.text.chars().count();
+                continue;
+            }
             let lead = if line_index == 0 { prefix } else { cont };
             let mut text = if lead.is_empty() {
                 styled.text.clone()
@@ -342,10 +377,12 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
             let style = if row.style == RowStyle::ToolResult {
                 Style::default().fg(theme.palette.dim)
             } else if row.style == RowStyle::User {
-                // Ink paints the prompt as a full-width background block.
-                let used = unicode_width::UnicodeWidthStr::width(text.as_str());
-                if used < width {
-                    text.push_str(&" ".repeat(width - used));
+                // Ink paints the prompt as a background block with one column
+                // of right padding: the background stops before the last cell.
+                let target = width.saturating_sub(1);
+                let used = UnicodeWidthStr::width(text.as_str());
+                if used < target {
+                    text.push_str(&" ".repeat(target - used));
                 }
                 Style::default()
                     .bg(theme.palette.user_message_bg)
@@ -357,6 +394,51 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
         }
     }
     lines
+}
+
+/// One wrapped line of a tool call: `"⏺ "` in the normal tool color, the tool
+/// name (text before the first `(`) in bold, and the `(input)` suffix plain.
+fn tool_call_line(
+    row: &Row,
+    styled: &Row,
+    line_index: usize,
+    line_start: usize,
+    prefix: &str,
+    cont: &str,
+    theme: &Theme,
+) -> Line<'static> {
+    let normal = row_style(RowStyle::ToolCall, theme);
+    let name_style = normal.add_modifier(Modifier::BOLD);
+    let text = styled.text.as_str();
+    let line_chars = text.chars().count();
+    // Char offset of the first `(`; everything before it is the tool name.
+    let boundary = row
+        .text
+        .find('(')
+        .map(|byte| row.text[..byte].chars().count());
+    // Chars of the tool name on this wrapped line.
+    let name_chars = boundary.map_or(line_chars, |end| {
+        end.min(line_start + line_chars).saturating_sub(line_start)
+    });
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if line_index == 0 {
+        spans.push(Span::styled(format!("{prefix} "), normal));
+    } else {
+        spans.push(Span::styled(cont.to_string(), normal));
+    }
+    let byte_split = text
+        .char_indices()
+        .nth(name_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    if byte_split > 0 {
+        spans.push(Span::styled(text[..byte_split].to_string(), name_style));
+    }
+    if byte_split < text.len() {
+        spans.push(Span::styled(text[byte_split..].to_string(), normal));
+    }
+    Line::from(spans)
 }
 
 /// Highlight a fenced (or indented) code block. Fence lines are dropped; the
@@ -852,6 +934,100 @@ mod tests {
             "{texts:?}"
         );
         assert!(texts.iter().any(|text| text.contains("item")), "{texts:?}");
+    }
+
+    #[test]
+    fn tool_call_name_is_bold_and_args_are_plain() {
+        let rows = vec![Row::new(RowStyle::ToolCall, "Bash(ls -la)")];
+        let theme = Theme::dark();
+        let lines = rows_to_lines(&rows, 40, &theme);
+
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let spans = &lines[0].spans;
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert_eq!(
+            spans[0].content.as_ref(),
+            format!("{} ", message_bullet()),
+            "dot keeps its own normal span"
+        );
+        assert!(!spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content.as_ref(), "Bash");
+        assert!(
+            spans[1].style.add_modifier.contains(Modifier::BOLD),
+            "tool name is bold: {spans:?}"
+        );
+        assert_eq!(spans[2].content.as_ref(), "(ls -la)");
+        assert!(
+            !spans[2].style.add_modifier.contains(Modifier::BOLD),
+            "arguments are not bold: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_block_starts_with_a_blank_line() {
+        let rows = vec![
+            Row::new(RowStyle::User, "hi"),
+            Row::new(RowStyle::Assistant, "hello"),
+        ];
+        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        assert!(lines.len() >= 3, "{lines:?}");
+        assert_eq!(lines[1].width(), 0, "blank separator: {lines:?}");
+        assert!(
+            lines[2..]
+                .iter()
+                .any(|line| line.to_string().contains("hello")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn multi_line_message_rows_do_not_add_blank_lines() {
+        let rows = vec![
+            Row::new(RowStyle::User, "one"),
+            Row::new(RowStyle::User, "two"),
+        ];
+        let lines = rows_to_lines(&rows, 20, &Theme::dark());
+        assert_eq!(lines.len(), 2, "continuation rows stay compact: {lines:?}");
+        assert!(lines.iter().all(|line| line.width() > 0), "{lines:?}");
+    }
+
+    #[test]
+    fn consecutive_tool_calls_each_start_a_block() {
+        let rows = vec![
+            Row::new(RowStyle::ToolCall, "Bash(ls)"),
+            Row::new(RowStyle::ToolCall, "Read(a.rs)"),
+        ];
+        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[1].width(), 0, "blank separator: {lines:?}");
+    }
+
+    #[test]
+    fn consecutive_tool_results_have_no_blank_lines() {
+        let rows = vec![
+            Row::new(RowStyle::ToolCall, "Bash(ls)"),
+            Row::new(RowStyle::ToolResult, "a.txt"),
+            Row::new(RowStyle::ToolResult, "b.txt"),
+        ];
+        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines.iter().all(|line| line.width() > 0), "{lines:?}");
+    }
+
+    #[test]
+    fn user_block_keeps_one_column_of_right_padding() {
+        let theme = Theme::dark();
+        let rows = vec![Row::new(RowStyle::User, "hi")];
+        let lines = rows_to_lines(&rows, 10, &theme);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        // `paddingRight={1}` in Ink: the background stops before the last
+        // column, so the painted line is one column narrower than the area.
+        assert_eq!(lines[0].width(), 9, "{lines:?}");
+        assert_eq!(lines[0].to_string(), "hi       ");
+        assert_eq!(
+            lines[0].spans[0].style.bg,
+            Some(theme.palette.user_message_bg)
+        );
     }
 
     #[test]
