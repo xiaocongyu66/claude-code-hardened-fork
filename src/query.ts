@@ -106,7 +106,6 @@ import {
   finalContextTokensFromLastResponse,
   tokenCountWithEstimation,
 } from './utils/tokens.js'
-import { countTokensPreciseForMessages } from './services/tokenEstimation.js'
 import { ESCALATED_MAX_TOKENS } from './utils/context.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from './services/analytics/growthbook.js'
 import { SLEEP_TOOL_NAME } from '@claude-code-hardened/builtin-tools/tools/SleepTool/prompt.js'
@@ -425,6 +424,21 @@ function loadCompactionSettingsLike(): CompactionSettingsLike | undefined {
 
 function isCompactionDisabledBySettings(): boolean {
   return loadCompactionSettingsLike()?.enabled === false
+}
+
+/**
+ * COMPACTION_V2 context measurement (usage anchor + tokenizer tail). A lazy
+ * require keeps the compaction2 token layer out of the flag-off path.
+ */
+function countV2ContextTokens(
+  messages: readonly Message[],
+  model: string,
+): number {
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const { countContextTokens } =
+    require('./services/compaction2/tokens/contextCount.js') as typeof import('./services/compaction2/tokens/contextCount.js')
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  return countContextTokens(messages, model).tokens
 }
 
 export async function* query(
@@ -804,6 +818,9 @@ async function* queryLoop(
     // reports the pre-reduction size. When a reduction lands, measure the
     // reduced array directly for this turn's blocking/predictive checks.
     let compactionV2TokenOverride: number | undefined
+    // The same V2 measurement feeds the blocking/predictive checks. Stays
+    // undefined on the legacy path so flag-off behavior is unchanged.
+    let compactionV2ContextTokens: number | undefined
     if (feature('HISTORY_SNIP')) {
       queryCheckpoint('query_snip_start')
       const snipResult = snipModule!.snipCompactIfNeeded(messagesForQuery)
@@ -908,7 +925,11 @@ async function* queryLoop(
         wasCompacted: false,
       }
       const v2TokenCount =
-        tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
+        countV2ContextTokens(
+          messagesForQuery,
+          toolUseContext.options.mainLoopModel,
+        ) - snipTokensFreed
+      compactionV2ContextTokens = v2TokenCount
       // A mid-turn pass at the end of the previous tool iteration already
       // handled this provider request; consume the one-shot skip instead of
       // running the threshold pass again.
@@ -992,11 +1013,11 @@ async function* queryLoop(
       autoCompactOutcome = v2Result
       if (v2Result.reducedMessages) {
         messagesForQuery = v2Result.reducedMessages
-        compactionV2TokenOverride = countTokensPreciseForMessages(
-          messagesForQuery as Parameters<
-            typeof countTokensPreciseForMessages
-          >[0],
+        compactionV2TokenOverride = countV2ContextTokens(
+          messagesForQuery,
+          toolUseContext.options.mainLoopModel,
         )
+        compactionV2ContextTokens = compactionV2TokenOverride
         const notice = reducedNoticeFor(v2Result)
         if (notice) yield notice
       }
@@ -1226,6 +1247,7 @@ async function* queryLoop(
     ) {
       const { isAtBlockingLimit } = calculateTokenWarningState(
         compactionV2TokenOverride ??
+          compactionV2ContextTokens ??
           tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
         toolUseContext.options.mainLoopModel,
       )
@@ -1250,6 +1272,7 @@ async function* queryLoop(
       const model = toolUseContext.options.mainLoopModel
       const currentTokens =
         compactionV2TokenOverride ??
+        compactionV2ContextTokens ??
         tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
       const estimatedGrowth = estimateMaxTurnGrowth(model)
       const predictiveThreshold =
@@ -1930,7 +1953,10 @@ async function* queryLoop(
             })
           if (overflowDecision === 'v2') {
             const overflowTokens =
-              tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
+              countV2ContextTokens(
+                messagesForQuery,
+                toolUseContext.options.mainLoopModel,
+              ) - snipTokensFreed
             let overflowResult: Awaited<
               ReturnType<typeof runCompactionV2ForQuery>
             >
@@ -2230,7 +2256,10 @@ async function* queryLoop(
           compactionV2Loop!.incompleteAttempted = false
         }
         const incompleteTokens =
-          tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
+          countV2ContextTokens(
+            messagesForQuery,
+            toolUseContext.options.mainLoopModel,
+          ) - snipTokensFreed
         if (
           incompleteStop &&
           compactionV2LoopModule!.shouldAttemptIncompleteRecovery({
@@ -2827,7 +2856,10 @@ async function* queryLoop(
     // a no-op so the same request is never compacted twice.
     if (feature('COMPACTION_V2')) {
       const midTurnTokens =
-        tokenCountWithEstimation(nextMessages) - snipTokensFreed
+        countV2ContextTokens(
+          nextMessages,
+          updatedToolUseContext.options.mainLoopModel,
+        ) - snipTokensFreed
       const thresholdAttempted =
         !!compactionResult || consecutiveFailures !== undefined
       if (

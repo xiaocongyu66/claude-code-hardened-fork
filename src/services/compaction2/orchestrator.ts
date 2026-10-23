@@ -42,6 +42,7 @@ import {
   createCompactionSessionEntry,
   type CompactionSessionEntry,
 } from './session/entries.js'
+import { countContextTokens } from './tokens/contextCount.js'
 import { estimateTokens } from './tokens/index.js'
 import { evaluateIdleTrigger } from './triggers/idle.js'
 import { evaluateIncompleteTrigger } from './triggers/incomplete.js'
@@ -642,6 +643,10 @@ export async function runCompactionV2ForQuery(
   }
   const windowTokens = getEffectiveContextWindowSize(request.model)
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
+  // omp-style measurement: the last provider usage block anchors the count and
+  // only the messages after it are tokenized. The caller's `tokenCount` is a
+  // legacy estimate and is deliberately not used on this path.
+  const tokenCount = countContextTokens(request.messages, request.model).tokens
 
   // Remote compaction is opt-in. Build the provider-bound transport lazily so
   // the flag-off path never touches auth, and a missing transport keeps the
@@ -656,7 +661,7 @@ export async function runCompactionV2ForQuery(
       trigger: request.trigger,
       messages: request.messages,
       windowTokens,
-      tokenCount: request.tokenCount,
+      tokenCount,
       stopReason: request.stopReason,
       overflowDetected: request.overflowDetected,
       payloadRejection: request.payloadRejection,
@@ -671,7 +676,7 @@ export async function runCompactionV2ForQuery(
         toolUseContext: request.toolUseContext,
         cacheSafeParams: request.cacheSafeParams,
         querySource: request.querySource,
-        tokenCount: request.tokenCount,
+        tokenCount,
         autoCompactThreshold,
         tracking: request.tracking,
       }),
