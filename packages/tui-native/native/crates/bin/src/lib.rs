@@ -448,9 +448,11 @@ pub fn run_with_deadline(
                             submit(
                                 &mut view,
                                 &mut buffer,
-                                &mut session,
-                                &mut transcript,
-                                fullscreen,
+                                ScreenTarget {
+                                    session: &mut session,
+                                    transcript: &mut transcript,
+                                    fullscreen,
+                                },
                                 engine.as_mut(),
                                 &mut history,
                                 &mut queued_prompts,
@@ -637,16 +639,25 @@ fn freeze(
 ///
 /// Folded pastes are expanded before sending: the transcript and the engine
 /// see the original text, while the input line only ever showed placeholders.
+struct ScreenTarget<'a> {
+    session: &'a mut TerminalSession,
+    transcript: &'a mut TranscriptModel,
+    fullscreen: bool,
+}
+
 fn submit(
     view: &mut ChatView,
     buffer: &mut TextBuffer,
-    session: &mut TerminalSession,
-    transcript: &mut TranscriptModel,
-    fullscreen: bool,
+    screen: ScreenTarget<'_>,
     engine: Option<&mut EngineProcess>,
     history: &mut PromptHistory,
     queued_prompts: &mut Vec<String>,
 ) -> io::Result<()> {
+    let ScreenTarget {
+        session,
+        transcript,
+        fullscreen,
+    } = screen;
     let draft = buffer.expand_pastes();
     if !draft.trim().is_empty() {
         let row = Row::new(RowStyle::User, format!("> {draft}"));

@@ -192,6 +192,13 @@ impl ChatView {
             line.push_str(" · ");
             line.push_str(vim);
         }
+        if self.queued > 0 {
+            line.push_str(&format!(" · queued {}", self.queued));
+        }
+        if self.busy {
+            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            line = format!("{} {line}", FRAMES[self.spinner_frame % FRAMES.len()]);
+        }
         line
     }
 }
