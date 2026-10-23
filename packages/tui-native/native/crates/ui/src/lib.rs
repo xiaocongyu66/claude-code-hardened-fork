@@ -96,6 +96,9 @@ pub struct ChatView {
     pub panel_summary: Option<String>,
     /// Context-window usage in percent, when the engine reported it.
     pub context_percent: Option<f64>,
+    /// Active message focus as `(index, total)`, both one-based. Shown on the
+    /// status line while message actions are open.
+    pub focus: Option<(usize, usize)>,
     /// Index into `completed` for each tool id, so a later tool_result can
     /// flip the call's bullet from pending to success/error.
     #[allow(clippy::type_complexity)]
@@ -247,7 +250,7 @@ impl ChatView {
     /// Status line content.
     ///
     /// A transient status, when present, replaces the model/session summary.
-    /// The vim mode indicator is appended in both cases.
+    /// The message focus and vim mode indicator are appended in both cases.
     pub fn status_line(&self) -> String {
         let mut line = if let Some(status) = &self.status {
             status.clone()
@@ -266,6 +269,9 @@ impl ChatView {
             }
             line
         };
+        if let Some((index, total)) = self.focus {
+            line.push_str(&format!(" · msg {index}/{total}"));
+        }
         if let Some(vim) = &self.vim_mode {
             line.push_str(" · ");
             line.push_str(vim);
@@ -567,6 +573,20 @@ mod tests {
         // An explicit transient status wins over the summary.
         view.status = Some("search: x (1/2)".into());
         assert_eq!(view.status_line(), "search: x (1/2)");
+    }
+
+    #[test]
+    fn status_line_shows_the_message_focus() {
+        let mut view = ChatView::new();
+        view.focus = Some((2, 5));
+        assert_eq!(view.status_line(), "unknown model · session - · msg 2/5");
+
+        // A transient status keeps the focus suffix.
+        view.status = Some("copied".into());
+        assert_eq!(view.status_line(), "copied · msg 2/5");
+
+        view.focus = None;
+        assert_eq!(view.status_line(), "copied");
     }
 
     #[test]
