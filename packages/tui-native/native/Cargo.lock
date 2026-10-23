@@ -244,10 +244,18 @@ dependencies = [
  "cch-tui-highlight",
  "cch-tui-markdown",
  "cch-tui-proto",
+ "cch-tui-theme",
  "cch-tui-ui",
  "ratatui",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "cch-tui-theme"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
 ]
 
 [[package]]
