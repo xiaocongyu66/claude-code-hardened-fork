@@ -247,7 +247,7 @@ pub fn run_with_deadline(
         }
         view.queued = queued_prompts.len();
         if view.busy {
-            view.spinner_frame = (started.elapsed().as_millis() / 100) as usize;
+            view.spinner_frame = (started.elapsed().as_millis() / 120) as usize;
         }
         view.panel_summary = Some(panel.summary_line()).filter(|line| !line.is_empty());
         if let Some(process) = engine.as_mut()

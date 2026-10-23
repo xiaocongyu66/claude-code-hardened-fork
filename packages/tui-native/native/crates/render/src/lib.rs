@@ -252,6 +252,15 @@ impl Drop for TerminalSession {
     }
 }
 
+/// Message bullet used by the Ink app (`figures.BLACK_CIRCLE`).
+pub fn message_bullet() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⏺"
+    } else {
+        "●"
+    }
+}
+
 /// OSC52 clipboard sequence: `ESC ] 52 ; c ; <base64> BEL`.
 pub fn osc52_sequence(text: &str) -> String {
     use base64::Engine as _;
@@ -279,18 +288,43 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
             continue;
         }
         index += 1;
+        // Rows with a gutter (assistant prose, tool calls, tool results) are
+        // wrapped to the remaining width so the prefix never overflows.
+        let (prefix, cont, available) = match row.style {
+            RowStyle::Assistant => (message_bullet(), "  ", width.saturating_sub(2)),
+            RowStyle::ToolCall => (message_bullet(), "  ", width.saturating_sub(2)),
+            RowStyle::ToolResult => ("  ⎿  ", "     ", width.saturating_sub(5)),
+            _ => ("", "", width),
+        };
         let styled_rows = match row.style {
-            RowStyle::Assistant => cch_tui_markdown::render_markdown(&row.text, width),
-            _ => wrap_text(&row.text, width)
+            RowStyle::Assistant => cch_tui_markdown::render_markdown(&row.text, available),
+            _ => wrap_text(&row.text, available)
                 .into_iter()
                 .map(|line| Row::new(row.style, line))
                 .collect(),
         };
-        for styled in &styled_rows {
-            lines.push(Line::from(Span::styled(
-                styled.text.clone(),
-                row_style(styled.style, theme),
-            )));
+        for (line_index, styled) in styled_rows.iter().enumerate() {
+            let lead = if line_index == 0 { prefix } else { cont };
+            let mut text = if lead.is_empty() {
+                styled.text.clone()
+            } else {
+                format!("{lead}{}", styled.text)
+            };
+            let style = if row.style == RowStyle::ToolResult {
+                Style::default().fg(theme.palette.dim)
+            } else if row.style == RowStyle::User {
+                // Ink paints the prompt as a full-width background block.
+                let used = unicode_width::UnicodeWidthStr::width(text.as_str());
+                if used < width {
+                    text.push_str(&" ".repeat(width - used));
+                }
+                Style::default()
+                    .bg(theme.palette.user_message_bg)
+                    .fg(theme.palette.foreground)
+            } else {
+                row_style(styled.style, theme)
+            };
+            lines.push(Line::from(Span::styled(text, style)));
         }
     }
     lines
@@ -392,6 +426,8 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::System => Style::default().fg(palette.system),
         RowStyle::Error => Style::default().fg(palette.error),
         RowStyle::Tool => Style::default().fg(palette.tool),
+        RowStyle::ToolCall => Style::default().fg(palette.tool),
+        RowStyle::ToolResult => Style::default().fg(palette.dim),
         // Markdown row roles. The markdown crate emits the text (markers,
         // prefixes and indentation included); these only pick a palette token.
         RowStyle::Heading(_) => Style::default()
@@ -441,15 +477,22 @@ fn draw_prompt(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) 
         .iter()
         .enumerate()
         .map(|(index, line)| {
+            // Ink renders `figures.pointer` (❯) plus a non-breaking space and
+            // dims it while a turn is in flight.
             if index == 0 {
-                format!("> {line}")
+                format!("❯ {line}")
             } else {
                 format!("  {line}")
             }
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let input = Paragraph::new(input_text).style(Style::default().add_modifier(Modifier::BOLD));
+    let input_style = if view.busy {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+    };
+    let input = Paragraph::new(input_text).style(input_style);
     frame.render_widget(input, area);
 
     // Cursor at the end of the last input line, clamped to the viewport.
@@ -592,7 +635,7 @@ mod tests {
 
         let screen = render(&view, 40, 6);
         assert!(screen.contains("streaming"), "screen: {screen}");
-        assert!(screen.contains("> hi"), "screen: {screen}");
+        assert!(screen.contains("❯ hi"), "screen: {screen}");
         assert!(screen.contains("m1 · session s1"), "screen: {screen}");
     }
 
@@ -625,7 +668,7 @@ mod tests {
         let mut view = ChatView::new();
         view.input = "first\nsecond".into();
         let screen = render(&view, 40, 8);
-        assert!(screen.contains("> first"), "screen: {screen}");
+        assert!(screen.contains("❯ first"), "screen: {screen}");
         assert!(screen.contains("  second"), "screen: {screen}");
     }
 
@@ -722,7 +765,7 @@ mod tests {
         let lines = transcript_lines(&mut model, 6, 40, &theme);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(
-            texts.iter().any(|text| text == "line 49"),
+            texts.iter().any(|text| text.trim_end() == "line 49"),
             "tail not visible: {texts:?}"
         );
 
@@ -730,7 +773,7 @@ mod tests {
         let lines = transcript_lines(&mut model, 6, 40, &theme);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(
-            texts.iter().any(|text| text == "line 0"),
+            texts.iter().any(|text| text.trim_end() == "line 0"),
             "top not visible: {texts:?}"
         );
         assert!(!model.is_following());
@@ -774,7 +817,7 @@ mod tests {
         let rows = vec![Row::new(RowStyle::User, "# not a heading")];
         let lines = rows_to_lines(&rows, 40, &Theme::dark());
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "# not a heading");
+        assert_eq!(lines[0].to_string().trim_end(), "# not a heading");
     }
 
     #[test]
@@ -787,14 +830,19 @@ mod tests {
             Row::new(RowStyle::System, "sys"),
         ];
         let lines = rows_to_lines(&rows, 40, &theme);
+        // User prompts are painted as a background block (Ink
+        // `userMessageBackground`); the rest keep their foreground token.
+        assert_eq!(
+            lines[0].spans[0].style.bg,
+            Some(theme.palette.user_message_bg)
+        );
         let expected = [
-            theme.palette.user,
             theme.palette.error,
             theme.palette.tool,
             theme.palette.system,
         ];
-        assert_eq!(lines.len(), expected.len());
-        for (line, color) in lines.iter().zip(expected) {
+        assert_eq!(lines.len(), expected.len() + 1);
+        for (line, color) in lines[1..].iter().zip(expected) {
             assert_eq!(line.spans[0].style.fg, Some(color), "line: {line:?}");
         }
     }
