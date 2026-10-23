@@ -106,11 +106,13 @@ describe('snapcompact run', () => {
     expect(outcome.tokensSaved).toBeGreaterThan(0)
     expect(outcome.cutPoint.firstKeptEntryId).toBe('u10')
     const archive = outcome.preserveData?.[SNAPCOMPACT_PRESERVE_KEY] as {
+      mode: string
       frames: { data: string }[]
       text: string
       family: string
       summary: string
     }
+    expect(archive.mode).toBe('image')
     expect(archive.family).toBe('anthropic')
     expect(archive.summary).toBe('resume from archive')
     expect(archive.frames.length).toBeGreaterThan(0)
@@ -146,18 +148,137 @@ describe('snapcompact run', () => {
     expect(outcome.reason).toBe('snapcompact-nothing-to-archive')
   })
 
-  test('skips CJK archives the ASCII font cannot render', async () => {
-    const method = createSnapcompactMethod({
-      env: enabledEnv,
-      declaresImageInput: true,
-      providerFamily: 'anthropic',
-    })
+  test('falls back to a text archive for mostly non-ASCII history', async () => {
     const cjk = Array.from({ length: 4 }, (_, index) =>
       userMessage(index, `${index}: ${'汉'.repeat(600)}`),
     )
     const outcome = await method.run(ctx({ messages: cjk }))
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    expect(outcome.method).toBe('snapcompact')
+    expect(outcome.tokensSaved).toBeGreaterThan(0)
+    expect(outcome.cutPoint.firstKeptEntryId).toBe('u2')
+    expect(outcome.summary).toContain('text mode')
+
+    const archive = outcome.preserveData?.[SNAPCOMPACT_PRESERVE_KEY] as {
+      mode: string
+      text: string
+      textHead: string
+      textTail: string
+      summary: string
+      totalChars: number
+      truncatedChars: number
+      frames?: unknown
+    }
+    expect(archive.mode).toBe('text')
+    expect('frames' in archive).toBe(false)
+    expect(archive.summary).toContain('text mode')
+    expect(archive.text).toContain('汉')
+    expect(archive.textHead.length).toBeGreaterThan(0)
+    expect(archive.textTail.length).toBeGreaterThan(0)
+    expect(archive.text).toBe(archive.textHead + archive.textTail)
+    expect(archive.totalChars).toBe(archive.text.length)
+    expect(archive.truncatedChars).toBeGreaterThan(0)
+  })
+
+  test('elides the middle of a text archive under a token budget', async () => {
+    const budgeted = createSnapcompactMethod({
+      env: enabledEnv,
+      declaresImageInput: true,
+      providerFamily: 'anthropic',
+      tokenBudget: 500,
+    })
+    const cjk = Array.from({ length: 10 }, (_, index) =>
+      userMessage(index, `${index}: ${'汉'.repeat(600)}`),
+    )
+    const outcome = await budgeted.run(ctx({ messages: cjk }))
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    expect(outcome.tokensSaved).toBeGreaterThan(0)
+
+    const archive = outcome.preserveData?.[SNAPCOMPACT_PRESERVE_KEY] as {
+      mode: string
+      text: string
+      textHead: string
+      textTail: string
+      truncatedChars: number
+    }
+    expect(archive.mode).toBe('text')
+    expect(archive.truncatedChars).toBeGreaterThan(0)
+    expect(archive.textHead.length).toBeGreaterThan(0)
+    expect(archive.textTail.length).toBeGreaterThan(0)
+    expect(archive.text).toBe(archive.textHead + archive.textTail)
+    expect(archive.text.length).toBeLessThanOrEqual(2_000)
+  })
+
+  // Three archived user messages merge into one `¶user:` scope, so a body of
+  // A ASCII chars + 3 CJK chars serializes as 10 non-ASCII chars in 8 + 3B.
+  function mixedMessages(body: string): Message[] {
+    return [
+      userMessage(0, body),
+      userMessage(1, body),
+      userMessage(2, body),
+      userMessage(3, 'kept'),
+      userMessage(4, 'kept'),
+    ]
+  }
+
+  test('keeps the image path at exactly 5% non-ASCII', async () => {
+    const body = `${'a'.repeat(61)}${'汉'.repeat(3)}`
+    const outcome = await method.run(ctx({ messages: mixedMessages(body) }))
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    const archive = outcome.preserveData?.[SNAPCOMPACT_PRESERVE_KEY] as {
+      mode: string
+    }
+    expect(archive.mode).toBe('image')
+  })
+
+  test('switches to text mode just above 5% non-ASCII', async () => {
+    const body = `${'a'.repeat(60)}${'汉'.repeat(3)}`
+    const outcome = await method.run(ctx({ messages: mixedMessages(body) }))
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    const archive = outcome.preserveData?.[SNAPCOMPACT_PRESERVE_KEY] as {
+      mode: string
+    }
+    expect(archive.mode).toBe('text')
+  })
+
+  test('keeps the image path just below 5% non-ASCII', async () => {
+    const body = `${'a'.repeat(62)}${'汉'.repeat(3)}`
+    const outcome = await method.run(ctx({ messages: mixedMessages(body) }))
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    const archive = outcome.preserveData?.[SNAPCOMPACT_PRESERVE_KEY] as {
+      mode: string
+    }
+    expect(archive.mode).toBe('image')
+  })
+
+  test('skips an empty archive', async () => {
+    const empty = Array.from({ length: 4 }, (_, index) =>
+      userMessage(index, ''),
+    )
+    const outcome = await method.run(ctx({ messages: empty }))
     expect(outcome.kind).toBe('skipped')
     if (outcome.kind !== 'skipped') return
-    expect(outcome.reason).toBe('snapcompact-non-ascii-unsupported')
+    expect(outcome.reason).toBe('snapcompact-empty-archive')
+  })
+
+  test('skips a non-ASCII archive that saves no tokens', async () => {
+    const cjk = Array.from({ length: 4 }, (_, index) =>
+      userMessage(index, `${index}: ${'汉'.repeat(600)}`),
+    )
+    const outcome = await method.run(
+      ctx({
+        messages: cjk,
+        settings: { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 0 },
+        tokenCount: entries => entries.length * 10,
+      }),
+    )
+    expect(outcome.kind).toBe('skipped')
+    if (outcome.kind !== 'skipped') return
+    expect(outcome.reason).toBe('snapcompact-no-savings')
   })
 })
