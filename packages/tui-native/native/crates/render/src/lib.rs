@@ -416,20 +416,21 @@ fn token_style(kind: cch_tui_highlight::TokenKind, theme: &Theme) -> Style {
     }
 }
 
-/// Render diff rows with `+`/`-` prefixes and the usual colors.
-pub fn diff_to_lines(rows: &[cch_tui_diff::DiffRow]) -> Vec<Line<'static>> {
+/// Render diff rows with `+`/`-` prefixes and theme backgrounds.
+pub fn diff_to_lines(rows: &[cch_tui_diff::DiffRow], theme: &Theme) -> Vec<Line<'static>> {
     use cch_tui_diff::DiffKind;
+    let palette = theme.palette;
     rows.iter()
         .map(|row| {
             if row.is_marker() {
                 return Line::from(Span::styled(
                     row.text.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(palette.accent),
                 ));
             }
             let (prefix, style) = match row.kind {
-                DiffKind::Added => ("+ ", Style::default().fg(Color::Green)),
-                DiffKind::Removed => ("- ", Style::default().fg(Color::Red)),
+                DiffKind::Added => ("+ ", Style::default().bg(palette.diff_added_bg)),
+                DiffKind::Removed => ("- ", Style::default().bg(palette.diff_removed_bg)),
                 DiffKind::Context => ("  ", Style::default()),
             };
             Line::from(Span::styled(format!("{prefix}{}", row.text), style))
@@ -470,8 +471,8 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::DiffHunk => Style::default()
             .fg(palette.accent)
             .add_modifier(Modifier::BOLD),
-        RowStyle::DiffAdded => Style::default().fg(palette.string),
-        RowStyle::DiffRemoved => Style::default().fg(palette.error),
+        RowStyle::DiffAdded => Style::default().bg(palette.diff_added_bg),
+        RowStyle::DiffRemoved => Style::default().bg(palette.diff_removed_bg),
         RowStyle::DiffContext => Style::default().fg(palette.dim),
         // Tables have no palette token yet; keep them legible with terminal
         // defaults until the theme grows table colors.
@@ -892,9 +893,10 @@ mod tests {
     }
 
     #[test]
-    fn diff_rows_get_prefixes_and_colors() {
+    fn diff_rows_get_prefixes_and_backgrounds() {
+        let theme = Theme::dark();
         let rows = cch_tui_diff::diff_lines("a\nb", "a\nc");
-        let lines = diff_to_lines(&rows);
+        let lines = diff_to_lines(&rows, &theme);
         let texts: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         assert!(texts.iter().any(|t| t == "  a"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "- b"), "{texts:?}");
@@ -903,7 +905,15 @@ mod tests {
             .iter()
             .find(|l| l.to_string().starts_with("- "))
             .expect("removed line");
-        assert_eq!(removed.spans[0].style.fg, Some(Color::Red));
+        assert_eq!(
+            removed.spans[0].style.bg,
+            Some(theme.palette.diff_removed_bg)
+        );
+        let added = lines
+            .iter()
+            .find(|l| l.to_string().starts_with("+ "))
+            .expect("added line");
+        assert_eq!(added.spans[0].style.bg, Some(theme.palette.diff_added_bg));
     }
 
     #[test]
@@ -1160,6 +1170,18 @@ mod tests {
             Some(palette.heading)
         );
         assert_eq!(row_style(RowStyle::Rule, &theme).fg, Some(palette.dim));
+        assert_eq!(
+            row_style(RowStyle::DiffAdded, &theme).bg,
+            Some(palette.diff_added_bg)
+        );
+        assert_eq!(
+            row_style(RowStyle::DiffRemoved, &theme).bg,
+            Some(palette.diff_removed_bg)
+        );
+        assert_eq!(
+            row_style(RowStyle::DiffHunk, &theme).fg,
+            Some(palette.accent)
+        );
 
         let dark = Theme::dark();
         assert_eq!(row_style(RowStyle::User, &dark).fg, Some(dark.palette.user));
