@@ -7,6 +7,7 @@
 import type { CompactionContext } from '../contracts.js'
 import type { ShakeReducer, ShakeReduction } from '../methods/shake.js'
 import { estimateTokens } from '../tokens/index.js'
+import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from './prune.js'
 import {
   DEFAULT_SHAKE_CONFIG,
   shakeMessages,
@@ -29,16 +30,24 @@ export function createShakeReducer(
     async reduce(ctx: CompactionContext): Promise<ShakeReduction | null> {
       const countTokens = (text: string) =>
         estimateTokens(text, ctx.model).tokens
+      // Cheap deterministic pre-pass: age-based pruning and useless-result
+      // elision before the more aggressive shake. Upstream's
+      // pruneToolOutputs does not enable supersede reads by default.
+      const pruned = pruneToolOutputs(ctx.messages, countTokens, {
+        ...DEFAULT_PRUNE_CONFIG,
+        supersedeKey: undefined,
+      })
       const result = await shakeMessages(
-        ctx.messages,
+        pruned.messages,
         countTokens,
         config,
         region => offload(region, ctx),
       )
-      if (result.regions.length === 0 || result.tokensSaved <= 0) return null
+      const tokensSaved = pruned.tokensSaved + result.tokensSaved
+      if (tokensSaved <= 0) return null
       return {
         messages: result.messages,
-        tokensSaved: result.tokensSaved,
+        tokensSaved,
       }
     },
   }

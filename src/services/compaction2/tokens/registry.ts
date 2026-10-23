@@ -7,7 +7,7 @@
 // (or the file is malformed), resolution returns `null` and the caller falls
 // back to the cl100k native counter / content-adaptive estimate.
 import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { type HfTokenizer, createHfTokenizer } from './hfTokenizer.js'
 import {
   type ManifestEntry,
@@ -76,7 +76,14 @@ function loadEntry(dir: string, entry: ManifestEntry): LoadedTokenizer | null {
 
   let loaded: Loaded | null = null
   try {
-    const content = readFileSync(join(dir, entry.file), 'utf8')
+    // Manifest paths are untrusted input; never read outside the data dir.
+    const root = resolve(dir)
+    const filePath = resolve(dir, entry.file)
+    if (filePath !== root && !filePath.startsWith(root + sep)) {
+      tokenizerCache.set(cacheKey, null)
+      return null
+    }
+    const content = readFileSync(filePath, 'utf8')
     if (entry.format === 'hf') {
       const tokenizer = createHfTokenizer(entry.id, content)
       loaded = tokenizer

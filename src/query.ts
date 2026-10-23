@@ -703,17 +703,25 @@ async function* queryLoop(
       const { runCompactionV2ForQuery } =
         require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
       /* eslint-enable @typescript-eslint/no-require-imports */
-      const v2Result = await runCompactionV2ForQuery({
-        messages: messagesForQuery,
-        model: toolUseContext.options.mainLoopModel,
-        trigger: 'threshold',
-        tokenCount:
-          tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
-        toolUseContext,
-        cacheSafeParams: autoCompactCacheSafeParams,
-        querySource,
-        tracking,
-      })
+      let v2Result: Awaited<ReturnType<typeof runCompactionV2ForQuery>>
+      try {
+        v2Result = await runCompactionV2ForQuery({
+          messages: messagesForQuery,
+          model: toolUseContext.options.mainLoopModel,
+          trigger: 'threshold',
+          tokenCount:
+            tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+          toolUseContext,
+          cacheSafeParams: autoCompactCacheSafeParams,
+          querySource,
+          tracking,
+        })
+      } catch (error) {
+        // The v2 chain must never take down the query loop; legacy
+        // autoCompactIfNeeded swallows its own failures.
+        logError(error)
+        v2Result = { wasCompacted: false }
+      }
       autoCompactOutcome = v2Result
       if (v2Result.reducedMessages) {
         messagesForQuery = v2Result.reducedMessages

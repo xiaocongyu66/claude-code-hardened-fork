@@ -1,3 +1,4 @@
+import { feature } from 'bun:bundle'
 import type { CompactionResult } from '../compact/compact.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import type { Message } from '../../types/message.js'
@@ -465,6 +466,28 @@ export async function runCompactionV2ForQuery(
   ) {
     return { wasCompacted: false }
   }
+  // Match the remaining legacy shouldAutoCompact suppressions: context
+  // collapse owns the headroom problem when enabled, and reactive-only mode
+  // leaves overflow recovery to the API error path.
+  if (feature('CONTEXT_COLLAPSE')) {
+    if (request.querySource === 'marble_origami') {
+      return { wasCompacted: false }
+    }
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const { isContextCollapseEnabled } =
+      require('../contextCollapse/index.js') as typeof import('../contextCollapse/index.js')
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    if (isContextCollapseEnabled()) return { wasCompacted: false }
+  }
+  if (feature('REACTIVE_COMPACT')) {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const { getFeatureValue_CACHED_MAY_BE_STALE } =
+      require('../analytics/growthbook.js') as typeof import('../analytics/growthbook.js')
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    if (getFeatureValue_CACHED_MAY_BE_STALE('tengu_cobalt_raccoon', false)) {
+      return { wasCompacted: false }
+    }
+  }
   const windowTokens = getEffectiveContextWindowSize(request.model)
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
 
@@ -549,8 +572,14 @@ export interface IdleCompactionV2Result {
 export async function runIdleCompactionV2(
   request: IdleCompactionV2Request,
 ): Promise<IdleCompactionV2Result> {
-  const { getEffectiveContextWindowSize, getAutoCompactThreshold } =
-    loadAutoCompact()
+  const {
+    getEffectiveContextWindowSize,
+    getAutoCompactThreshold,
+    isAutoCompactEnabled,
+  } = loadAutoCompact()
+  // Idle is still automatic compaction: honor DISABLE_COMPACT /
+  // DISABLE_AUTO_COMPACT / autoCompactEnabled even when the env opt-in is set.
+  if (!isAutoCompactEnabled()) return { compacted: false, trace: [] }
   const tokenCount = defaultCountTokens(request.messages)
   const result = await runCompactionV2(
     {

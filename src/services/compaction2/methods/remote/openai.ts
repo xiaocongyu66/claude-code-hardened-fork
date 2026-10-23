@@ -672,7 +672,9 @@ export async function runOpenAiCompactionLane(
   if (version === 'v2') return runV2(request, built.input)
   try {
     return await runV2(request, built.input)
-  } catch {
+  } catch (error) {
+    // Never swallow an abort (user ESC) into a duplicate V1 request.
+    if (error instanceof Error && error.name === 'AbortError') throw error
     return runV1(request, built.input)
   }
 }

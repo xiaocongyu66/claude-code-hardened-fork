@@ -214,6 +214,11 @@ export function isRemoteMethodAvailable(
   const env = readEnv(deps)
   if (!isRemoteCompactionEnabled(env)) return false
   if (deps?.isAvailable) return deps.isAvailable(ctx)
+  if (deps?.run) return true
+  // Without an injected transport the lane can only return
+  // `remote-transport-missing`; report unavailable so the chain does not run
+  // it (and then fall through to soft) on every threshold pass.
+  if (!deps?.fetch) return false
   return resolveRemote(ctx, deps).lane !== undefined
 }
 
