@@ -32,8 +32,8 @@ import {
  *   { type: "summarize", instructions }`), firstParty/Vertex only.
  * - `openai`: Responses `/responses/compact` (V1) and streaming
  *   `compaction_trigger` (V2).
- * - `bedrock`: skeleton. CCH's Bedrock transport is Anthropic Messages
- *   (`AnthropicBedrock`), not Converse, so the side request cannot be reused.
+ * - `bedrock`: Converse side request through the shared Bedrock Runtime
+ *   client, additionally gated by `CCH_BEDROCK_COMPACTION=1`.
  *
  * Availability is deliberately conservative: the feature is off unless
  * `CCH_REMOTE_COMPACTION=1`, and an unknown gateway is never available.
@@ -156,6 +156,14 @@ function defaultBaseUrl(
   if (provider === 'firstParty' || provider === 'vertex') {
     return env.ANTHROPIC_BASE_URL
   }
+  if (provider === 'bedrock') {
+    const override = env.ANTHROPIC_BEDROCK_BASE_URL
+    if (override) return override
+    const region = env.AWS_REGION?.trim() || env.AWS_DEFAULT_REGION?.trim()
+    return region
+      ? `https://bedrock-runtime.${region}.amazonaws.com`
+      : undefined
+  }
   return undefined
 }
 
@@ -206,6 +214,7 @@ function resolveRemote(
       isBedrockCompactionLaneAvailable({
         model: ctx.model,
         region: env.AWS_REGION ?? env.AWS_DEFAULT_REGION,
+        env,
       })
     ) {
       lane = runBedrockCompactionLane
