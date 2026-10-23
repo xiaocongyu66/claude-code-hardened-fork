@@ -99,13 +99,22 @@ Rules:
 - Existing engine `stream.ts` buffers are unbounded; the engine host must add a
   bounded queue before this ships (tracked in the plan, M1).
 
-## Deliberate gaps
+## Resolved gaps (print / stream-json engine)
 
-- `get_context_usage` exists only in print mode today; if the interactive
-  engine does not answer it, the TUI falls back to `assistant.usage` from the
-  last message.
-- Task lifecycle (`task_started`/`task_progress`/`task_notification`) is
-  currently assembled from `AppState.tasks` in the Ink REPL; the engine host
-  must emit these frames for the TUI task panel.
-- Compaction boundaries are partially filtered by `QueryEngine`; the TUI shows
-  what it receives and tolerates their absence.
+- `get_context_usage` is a first-class `control_request` in print mode
+  (`src/cli/print.ts`). The success response contains `context_tokens`,
+  `window_tokens`, and `percent` alongside the full `/context` breakdown.
+  The summary aliases `totalTokens` / `rawMaxTokens` / `percentage`, so no
+  extra scan is performed. The TUI may still fall back to the last
+  `assistant.usage` if the request errors.
+- Task lifecycle frames (`task_started` / `task_progress` /
+  `task_notification`) are emitted from the existing task framework through
+  `src/utils/sdkEventQueue.ts`. At drain time each frame is enriched
+  read-only from the task registry with `task_id`, `task_type`,
+  `description`, `status`, optional `output` (output file path), and optional
+  `summary`. The Ink REPL continues to use `AppState.tasks`; the wire frames
+  are a projection of the same state.
+- `compact_boundary` and the task frames bypass the streamlined transformer
+  (`isTuiPassthroughSystemMessage` in `src/cli/print.ts`), so they are always
+  emitted on the stream-json path. The TUI still tolerates their absence for
+  older engines/sessions.

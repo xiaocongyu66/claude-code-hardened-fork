@@ -209,6 +209,18 @@ export const SDKControlGetContextUsageResponseSchema = lazySchema(() =>
       maxTokens: z.number(),
       rawMaxTokens: z.number(),
       percentage: z.number(),
+      /**
+       * Lightweight summary consumed by the TUI; aliases of totalTokens /
+       * rawMaxTokens / percentage so clients that only need the number do
+       * not walk the full breakdown.
+       */
+      context_tokens: z
+        .number()
+        .describe('Tokens currently in context (alias of totalTokens).'),
+      window_tokens: z
+        .number()
+        .describe('Model context window size (alias of rawMaxTokens).'),
+      percent: z.number().describe('Context usage percentage, 0-100.'),
       gridRows: z.array(z.array(ContextGridSquareSchema())),
       model: z.string(),
       memoryFiles: z.array(
