@@ -15,6 +15,18 @@ pub enum RowStyle {
     System,
     Error,
     Tool,
+    /// Markdown heading, carrying its level (`1..=6`).
+    Heading(u8),
+    /// A logical row made up entirely of inline code.
+    InlineCode,
+    /// A fenced or indented code block, kept verbatim for the highlighter.
+    CodeBlock,
+    /// Content of an unordered or ordered list item (marker included).
+    ListItem,
+    /// Content of a blockquote (prefix included).
+    Blockquote,
+    /// A horizontal rule.
+    Rule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +351,14 @@ mod tests {
 
         let rows = wrap_text("a\tb\nc", 8);
         assert_eq!(rows, ["a    b", "c"]);
+    }
+
+    #[test]
+    fn markdown_row_styles_are_distinct() {
+        assert_ne!(RowStyle::Heading(1), RowStyle::Heading(2));
+        assert_ne!(RowStyle::InlineCode, RowStyle::CodeBlock);
+        assert_ne!(RowStyle::ListItem, RowStyle::Blockquote);
+        assert_ne!(RowStyle::Assistant, RowStyle::Rule);
     }
 
     #[test]
