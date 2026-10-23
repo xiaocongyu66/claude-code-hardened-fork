@@ -116,6 +116,13 @@ export interface CompactionV2Options {
   canAcceptOutcome?: (outcome: CompactionOutcome) => boolean
   /** Gate a method before it runs (e.g. circuit-breaker skips API methods). */
   canRunMethod?: (name: CompactionMethodName) => boolean
+  /**
+   * Raw `settings.compaction` from settings.json. Merged below the explicit
+   * request settings and above DEFAULT_COMPACTION_SETTINGS.
+   */
+  compactionSettings?: unknown
+  /** Environment map for CLAUDE_CODE_COMPACTION_* overrides. Defaults to process.env. */
+  env?: Record<string, string | undefined>
 }
 
 export interface CompactionV2Result {
@@ -196,7 +203,10 @@ export async function runCompactionV2(
   request: CompactionV2Request,
   options: CompactionV2Options = {},
 ): Promise<CompactionV2Result> {
-  const settings = resolveSettings(request.settings)
+  const settings = resolveSettings(request.settings, {
+    compaction: options.compactionSettings,
+    env: options.env,
+  })
   const countTokens = options.countTokens ?? defaultCountTokens
   const tokenCount = request.tokenCount ?? countTokens(request.messages)
   const windowTokens =
@@ -578,6 +588,10 @@ export async function runCompactionV2ForQuery(
   // querySource='compact' and would otherwise re-enter this branch forever),
   // and honor DISABLE_COMPACT / DISABLE_AUTO_COMPACT / autoCompactEnabled.
   if (!isAutoCompactEnabled()) return { wasCompacted: false }
+  const compactionSettings = loadCompactionSettings()
+  if (!isCompactionEnabledInSettings(compactionSettings)) {
+    return { wasCompacted: false }
+  }
   // Circuit breaker: once the API-backed methods have failed this many turns
   // in a row, skip them. Local reducers (shake/snapcompact) stay available —
   // they need no model call and are the only recovery left.
@@ -659,6 +673,7 @@ export async function runCompactionV2ForQuery(
       canRunMethod: name =>
         !circuitOpen || name === 'snapcompact' || name === 'shake',
       resolveWindowTokens: getEffectiveContextWindowSize,
+      compactionSettings,
     },
   )
 
@@ -741,6 +756,7 @@ export async function runManualCompactionV2(
         outcome.kind !== 'compacted' ||
         getLegacyCompactionResult(outcome) !== undefined,
       resolveWindowTokens: getEffectiveContextWindowSize,
+      compactionSettings: loadCompactionSettings(),
     },
   )
   return getLegacyCompactionResult(result.outcome)
@@ -778,6 +794,10 @@ export async function runIdleCompactionV2(
   // Idle is still automatic compaction: honor DISABLE_COMPACT /
   // DISABLE_AUTO_COMPACT / autoCompactEnabled even when the env opt-in is set.
   if (!isAutoCompactEnabled()) return { compacted: false, trace: [] }
+  const compactionSettings = loadCompactionSettings()
+  if (!isCompactionEnabledInSettings(compactionSettings)) {
+    return { compacted: false, trace: [] }
+  }
   const tokenCount = defaultCountTokens(request.messages)
   const result = await runCompactionV2(
     {
@@ -800,6 +820,7 @@ export async function runIdleCompactionV2(
         autoCompactThreshold: getAutoCompactThreshold(request.model),
       }),
       resolveWindowTokens: getEffectiveContextWindowSize,
+      compactionSettings,
     },
   )
 
@@ -875,6 +896,39 @@ function createQueryPromotion(): ContextPromotion | null {
   }
 }
 
+/**
+ * Read `settings.compaction` from settings.json. The settings module is loaded
+ * lazily so the pure decision graph (and its tests) never touches disk.
+ */
+function loadCompactionSettings(): unknown {
+  try {
+    const { getCompactionSettings } =
+      require('../../utils/settings/settings.js') as {
+        getCompactionSettings(): unknown
+      }
+    return getCompactionSettings()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Automatic triggers honor `compaction.enabled` (default true). An explicit
+ * CLAUDE_CODE_COMPACTION_ENABLED wins. Manual `/compact` is never gated by it.
+ */
+function isCompactionEnabledInSettings(
+  settings: unknown,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const fromEnv = envBoolean(env, 'CLAUDE_CODE_COMPACTION_ENABLED')
+  if (fromEnv !== undefined) return fromEnv
+  if (settings && typeof settings === 'object') {
+    const enabled = (settings as Record<string, unknown>).enabled
+    if (enabled === false) return false
+  }
+  return true
+}
+
 function createLegacySoftDeps(input: {
   toolUseContext: ToolUseContext
   cacheSafeParams: CacheSafeParams
@@ -941,31 +995,203 @@ function defaultResolveWindowTokens(model: string): number {
   return getEffectiveContextWindowSize(model)
 }
 
-function resolveSettings(
+/** Local mirror of CompactionMethodName (avoids importing the settings schema). */
+const COMPACTION_METHOD_NAMES: readonly CompactionMethodName[] = [
+  'remote',
+  'snapcompact',
+  'handoff',
+  'shake',
+  'soft',
+]
+
+function isCompactionMethodName(value: unknown): value is CompactionMethodName {
+  return (
+    typeof value === 'string' &&
+    (COMPACTION_METHOD_NAMES as readonly string[]).includes(value)
+  )
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+function asPositiveInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined
+}
+
+function asNonNegativeInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined
+}
+
+function asThresholdPercent(value: unknown): number | undefined {
+  const percent = asPositiveInt(value)
+  return percent !== undefined && percent <= 99 ? percent : undefined
+}
+
+function asIdleTimeout(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 60
+    ? value
+    : undefined
+}
+
+/** Filter unknown method names; an empty result is treated as invalid. */
+function sanitizeMethodOrder(
+  value: unknown,
+): CompactionMethodName[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const filtered = value.filter(isCompactionMethodName)
+  return filtered.length > 0 ? filtered : undefined
+}
+
+function envValue(
+  env: Record<string, string | undefined>,
+  name: string,
+): string | undefined {
+  const raw = env[name]
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
+function envBoolean(
+  env: Record<string, string | undefined>,
+  name: string,
+): boolean | undefined {
+  const raw = envValue(env, name)?.toLowerCase()
+  if (raw === undefined) return undefined
+  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on') {
+    return true
+  }
+  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off') {
+    return false
+  }
+  return undefined
+}
+
+function envInteger(
+  env: Record<string, string | undefined>,
+  name: string,
+  guard: (value: unknown) => number | undefined,
+): number | undefined {
+  const raw = envValue(env, name)
+  if (raw === undefined) return undefined
+  return guard(Number(raw))
+}
+
+function envMethodOrder(
+  env: Record<string, string | undefined>,
+  name: string,
+): CompactionMethodName[] | undefined {
+  const raw = envValue(env, name)
+  if (raw === undefined) return undefined
+  return sanitizeMethodOrder(raw.split(',').map(part => part.trim()))
+}
+
+export interface CompactionSettingsSources {
+  /** Raw `settings.compaction` object from settings.json. */
+  compaction?: unknown
+  /** Environment map; defaults to process.env. */
+  env?: Record<string, string | undefined>
+}
+
+/**
+ * Resolve the effective compaction settings.
+ *
+ * Precedence (highest first):
+ *   1. explicit request settings
+ *   2. CLAUDE_CODE_COMPACTION_* environment variables (only when set)
+ *   3. settings.compaction from settings.json
+ *   4. DEFAULT_COMPACTION_SETTINGS
+ *
+ * Invalid values are skipped per field, so a bad request value falls through
+ * to the next source instead of poisoning the whole policy.
+ */
+export function resolveSettings(
   input: Partial<CompactionSettings> | undefined,
+  sources: CompactionSettingsSources = {},
 ): CompactionSettings {
+  const global =
+    sources.compaction && typeof sources.compaction === 'object'
+      ? (sources.compaction as Record<string, unknown>)
+      : {}
+  const env = sources.env ?? process.env
+
   return {
-    methodOrder: input?.methodOrder ?? DEFAULT_COMPACTION_SETTINGS.methodOrder,
+    methodOrder: sanitizeMethodOrder(input?.methodOrder) ??
+      envMethodOrder(env, 'CLAUDE_CODE_COMPACTION_METHOD_ORDER') ??
+      sanitizeMethodOrder(global.methodOrder) ?? [
+        ...DEFAULT_COMPACTION_SETTINGS.methodOrder,
+      ],
     keepRecentTokens:
-      input?.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+      asNonNegativeInt(input?.keepRecentTokens) ??
+      envInteger(
+        env,
+        'CLAUDE_CODE_COMPACTION_KEEP_RECENT_TOKENS',
+        asNonNegativeInt,
+      ) ??
+      asNonNegativeInt(global.keepRecentTokens) ??
+      DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
     reserveTokens:
-      input?.reserveTokens ?? DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+      asPositiveInt(input?.reserveTokens) ??
+      envInteger(env, 'CLAUDE_CODE_COMPACTION_RESERVE_TOKENS', asPositiveInt) ??
+      asPositiveInt(global.reserveTokens),
     thresholdTokens:
-      input?.thresholdTokens ?? DEFAULT_COMPACTION_SETTINGS.thresholdTokens,
+      asPositiveInt(input?.thresholdTokens) ??
+      envInteger(
+        env,
+        'CLAUDE_CODE_COMPACTION_THRESHOLD_TOKENS',
+        asPositiveInt,
+      ) ??
+      asPositiveInt(global.thresholdTokens),
     thresholdPercent:
-      input?.thresholdPercent ?? DEFAULT_COMPACTION_SETTINGS.thresholdPercent,
+      asThresholdPercent(input?.thresholdPercent) ??
+      envInteger(
+        env,
+        'CLAUDE_CODE_COMPACTION_THRESHOLD_PERCENT',
+        asThresholdPercent,
+      ) ??
+      asThresholdPercent(global.thresholdPercent),
     midTurnEnabled:
-      input?.midTurnEnabled ?? DEFAULT_COMPACTION_SETTINGS.midTurnEnabled,
+      asBoolean(input?.midTurnEnabled) ??
+      envBoolean(env, 'CLAUDE_CODE_COMPACTION_MID_TURN_ENABLED') ??
+      asBoolean(global.midTurnEnabled) ??
+      DEFAULT_COMPACTION_SETTINGS.midTurnEnabled,
     autoContinue:
-      input?.autoContinue ?? DEFAULT_COMPACTION_SETTINGS.autoContinue,
+      asBoolean(input?.autoContinue) ??
+      envBoolean(env, 'CLAUDE_CODE_COMPACTION_AUTO_CONTINUE') ??
+      asBoolean(global.autoContinue) ??
+      DEFAULT_COMPACTION_SETTINGS.autoContinue,
     asyncEnabled:
-      input?.asyncEnabled ?? DEFAULT_COMPACTION_SETTINGS.asyncEnabled,
-    idleEnabled: input?.idleEnabled ?? DEFAULT_COMPACTION_SETTINGS.idleEnabled,
+      asBoolean(input?.asyncEnabled) ??
+      envBoolean(env, 'CLAUDE_CODE_COMPACTION_ASYNC_ENABLED') ??
+      asBoolean(global.asyncEnabled) ??
+      DEFAULT_COMPACTION_SETTINGS.asyncEnabled,
+    idleEnabled:
+      asBoolean(input?.idleEnabled) ??
+      envBoolean(env, 'CLAUDE_CODE_COMPACTION_IDLE_ENABLED') ??
+      asBoolean(global.idleEnabled) ??
+      DEFAULT_COMPACTION_SETTINGS.idleEnabled,
     idleThresholdTokens:
-      input?.idleThresholdTokens ??
+      asPositiveInt(input?.idleThresholdTokens) ??
+      envInteger(
+        env,
+        'CLAUDE_CODE_COMPACTION_IDLE_THRESHOLD_TOKENS',
+        asPositiveInt,
+      ) ??
+      asPositiveInt(global.idleThresholdTokens) ??
       DEFAULT_COMPACTION_SETTINGS.idleThresholdTokens,
     idleTimeoutSeconds:
-      input?.idleTimeoutSeconds ??
+      asIdleTimeout(input?.idleTimeoutSeconds) ??
+      envInteger(
+        env,
+        'CLAUDE_CODE_COMPACTION_IDLE_TIMEOUT_SECONDS',
+        asIdleTimeout,
+      ) ??
+      asIdleTimeout(global.idleTimeoutSeconds) ??
       DEFAULT_COMPACTION_SETTINGS.idleTimeoutSeconds,
   }
 }

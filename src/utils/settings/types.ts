@@ -34,6 +34,125 @@ export const EnvironmentVariablesSchema = lazySchema(() =>
 )
 
 /**
+ * Valid V2 compaction method names. Mirrors CompactionMethodName in
+ * services/compaction2/contracts.ts. Kept local so the settings schema does
+ * not depend on the compaction service.
+ */
+export const COMPACTION_METHOD_NAMES = [
+  'remote',
+  'snapcompact',
+  'handoff',
+  'shake',
+  'soft',
+] as const
+
+export type CompactionMethodNameSetting =
+  (typeof COMPACTION_METHOD_NAMES)[number]
+
+/**
+ * Schema for the V2 compaction policy (COMPACTION_V2).
+ *
+ * Every field is optional and tolerant: an invalid value is dropped
+ * (`undefined`) instead of failing the whole settings file, so the
+ * orchestrator can fall back to its next source or
+ * DEFAULT_COMPACTION_SETTINGS.
+ */
+export const CompactionSettingsSchema = lazySchema(() =>
+  z
+    .object({
+      enabled: z
+        .boolean()
+        .optional()
+        .catch(undefined)
+        .describe('Whether automatic V2 compaction is enabled (default: true)'),
+      methodOrder: z
+        .array(z.unknown())
+        .transform(values =>
+          values.filter(
+            (value): value is CompactionMethodNameSetting =>
+              typeof value === 'string' &&
+              (COMPACTION_METHOD_NAMES as readonly string[]).includes(value),
+          ),
+        )
+        .optional()
+        .catch(undefined)
+        .describe(
+          'Preferred fallback order for compaction methods. Unknown names are ignored (default: remote, snapcompact, handoff, shake, soft)',
+        ),
+      thresholdTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .catch(undefined)
+        .describe('Fixed token threshold; overrides thresholdPercent when set'),
+      thresholdPercent: z
+        .number()
+        .int()
+        .min(1)
+        .max(99)
+        .optional()
+        .catch(undefined)
+        .describe('Threshold as a percentage of the context window (1-99)'),
+      reserveTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .catch(undefined)
+        .describe(
+          'Tokens reserved for the response (default: max(15% of window, 16384))',
+        ),
+      keepRecentTokens: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .catch(undefined)
+        .describe('Most recent tokens kept intact (default: 20000)'),
+      midTurnEnabled: z
+        .boolean()
+        .optional()
+        .catch(undefined)
+        .describe(
+          'Check thresholds at mid-turn tool boundaries (default: true)',
+        ),
+      autoContinue: z
+        .boolean()
+        .optional()
+        .catch(undefined)
+        .describe('Continue automatically after compaction (default: true)'),
+      asyncEnabled: z
+        .boolean()
+        .optional()
+        .catch(undefined)
+        .describe('Speculatively compact in the background (default: true)'),
+      idleEnabled: z
+        .boolean()
+        .optional()
+        .catch(undefined)
+        .describe('Compact while idle (default: false)'),
+      idleThresholdTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .catch(undefined)
+        .describe('Idle token threshold (default: 200000)'),
+      idleTimeoutSeconds: z
+        .number()
+        .int()
+        .min(60)
+        .optional()
+        .catch(undefined)
+        .describe(
+          'Seconds to wait while idle before compacting (default: 300)',
+        ),
+    })
+    .passthrough(),
+)
+
+/**
  * Schema for permissions section
  */
 export const PermissionsSchema = lazySchema(() =>
@@ -410,6 +529,12 @@ export const SettingsSchema = lazySchema(() =>
             'Takes precedence over all built-in context window detection. ' +
             'Useful for third-party/proxy models whose true context differs from built-in tables ' +
             '(e.g. grok-4.5 = 500000, gpt-5.6-sol = 600000).',
+        ),
+      compaction: CompactionSettingsSchema()
+        .optional()
+        .catch(undefined)
+        .describe(
+          'V2 compaction policy (COMPACTION_V2). Invalid fields are ignored and fall back to the built-in defaults.',
         ),
       // Whether to automatically approve all MCP servers in the project
       enableAllProjectMcpServers: z
