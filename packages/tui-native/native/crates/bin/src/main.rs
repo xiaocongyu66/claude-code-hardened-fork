@@ -25,6 +25,7 @@ fn main() -> ExitCode {
             }
         }
         Some("--replay") => run_replay(&args),
+        Some("--bench-replay") => run_bench_replay(&args),
         Some("--engine") => run_engine(&args),
         Some("--help") | Some("-h") => {
             print_help();
@@ -51,7 +52,13 @@ fn print_help() {
              --exit-after-ms <n>   test-only: quit automatically after n ms\n\
              --fullscreen          use the alternate screen\n\
          --engine <program> [args...]  spawn the TS engine and drive it\n\
-             (add --fullscreen before or after the program name)"
+             (add --fullscreen before or after the program name)\n\
+         --bench-replay [n] [--bench-rows]\n\
+                                   synthesize n transcript events (default 10000)\n\
+                                   and print ingest/freeze/render timings as JSON\n\
+             --bench-rows          also time fullscreen window renders (p50/p99)\n\
+             --width <n>           transcript width (default 120)\n\
+             --height <n>          viewport height (default 40)"
     );
 }
 
@@ -110,6 +117,48 @@ fn run_replay(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_bench_replay(args: &[String]) -> ExitCode {
+    let mut options = cch_tui_bin::bench::BenchOptions::default();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bench-rows" => options.rows = true,
+            "--width" => {
+                index += 1;
+                match args.get(index).and_then(|value| value.parse().ok()) {
+                    Some(value) => options.width = value,
+                    None => {
+                        eprintln!("cch-tui: --width requires a number");
+                        return ExitCode::from(EX_USAGE);
+                    }
+                }
+            }
+            "--height" => {
+                index += 1;
+                match args.get(index).and_then(|value| value.parse().ok()) {
+                    Some(value) => options.height = value,
+                    None => {
+                        eprintln!("cch-tui: --height requires a number");
+                        return ExitCode::from(EX_USAGE);
+                    }
+                }
+            }
+            other => match other.parse() {
+                Ok(events) => options.events = events,
+                Err(_) => {
+                    eprintln!("cch-tui: unknown bench option `{other}`");
+                    return ExitCode::from(EX_USAGE);
+                }
+            },
+        }
+        index += 1;
+    }
+
+    let report = cch_tui_bin::bench::run(&options);
+    println!("{}", report.to_json());
+    ExitCode::SUCCESS
 }
 
 fn run_engine(args: &[String]) -> ExitCode {

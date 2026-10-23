@@ -14,6 +14,7 @@ cch-tui-proto = { path = "../proto" }
 cch-tui-ui = { path = "../ui" }
 cch-tui-render = { path = "../render" }
 cch-tui-core = { path = "../core" }
+cch-tui-theme = { path = "../theme" }
 cch-tui-keymap = { path = "../keymap" }
 cch-tui-dialog = { path = "../dialog" }
 cch-tui-fullscreen = { path = "../fullscreen" }

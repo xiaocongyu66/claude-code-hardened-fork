@@ -1,5 +1,6 @@
 //! Headless entry points used by CI smoke tests and the interactive runner.
 
+pub mod bench;
 pub mod engine;
 
 use std::collections::BTreeMap;
@@ -1088,17 +1089,24 @@ fn freeze(
     rows: &[Row],
 ) -> io::Result<()> {
     if fullscreen {
-        let previous = transcript.rows().last().map(|last| {
-            (
-                last.style,
-                last.text.is_empty() && last.style == RowStyle::System,
-            )
-        });
-        transcript.append(with_spacing(rows, previous));
+        freeze_fullscreen(transcript, rows);
         Ok(())
     } else {
         session.insert_rows(rows)
     }
+}
+
+/// Append a completed batch to the full-screen transcript, inserting the blank
+/// separator rows the inline renderer adds. Shared with the replay benchmark so
+/// both paths perform the same work.
+pub(crate) fn freeze_fullscreen(transcript: &mut TranscriptModel, rows: &[Row]) {
+    let previous = transcript.rows().last().map(|last| {
+        (
+            last.style,
+            last.text.is_empty() && last.style == RowStyle::System,
+        )
+    });
+    transcript.append(with_spacing(rows, previous));
 }
 
 /// Freeze the current buffer as a user row and forward it to the engine.
