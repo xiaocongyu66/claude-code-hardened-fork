@@ -17,7 +17,10 @@ import {
 } from './contracts.js'
 import { evaluateProgressGuard } from './guards/progress.js'
 import type { PayloadRejectionEvidence } from './guards/payload.js'
-import { createHandoffMethod } from './methods/handoff.js'
+import {
+  createHandoffMethod,
+  type HandoffMethodDeps,
+} from './methods/handoff.js'
 import { indexMethods, resolveMethodOrder } from './methods/registry.js'
 import {
   createRemoteMethod,
@@ -112,6 +115,7 @@ export interface CompactionV2Request {
 export interface CompactionV2Options {
   methods?: readonly CompactionMethod[]
   soft?: SoftMethodDeps | null
+  handoff?: HandoffMethodDeps | null
   shake?: ShakeReducer | null
   remote?: RemoteMethodDeps | null
   promotion?: ContextPromotion | null
@@ -144,6 +148,7 @@ export interface CompactionV2Result {
 
 export interface DefaultMethodOptions {
   soft?: SoftMethodDeps | null
+  handoff?: HandoffMethodDeps | null
   shake?: ShakeReducer | null
   remote?: RemoteMethodDeps | null
   instructions?: string
@@ -165,7 +170,7 @@ export function createDefaultMethods(
   return [
     createRemoteMethod(options.remote),
     createSnapcompactMethod(),
-    createHandoffMethod(),
+    createHandoffMethod(options.handoff),
     createShakeMethod({
       reducer: options.shake ?? null,
       resolveThresholdTokens: options.resolveThresholdTokens,
@@ -320,6 +325,7 @@ export async function runCompactionV2(
     options.methods ??
       createDefaultMethods({
         soft: options.soft,
+        handoff: options.handoff,
         shake: options.shake,
         remote: options.remote,
         instructions: request.instructions,
@@ -689,6 +695,14 @@ export async function runCompactionV2ForQuery(
   const remote = isRemoteCompactionEnabled()
     ? createQueryRemoteDeps(request.model)
     : null
+  const soft = createLegacySoftDeps({
+    toolUseContext: request.toolUseContext,
+    cacheSafeParams: request.cacheSafeParams,
+    querySource: request.querySource,
+    tokenCount,
+    autoCompactThreshold,
+    tracking: request.tracking,
+  })
 
   const result = await runCompactionV2(
     {
@@ -707,14 +721,8 @@ export async function runCompactionV2ForQuery(
       abortSignal: request.toolUseContext.abortController?.signal,
     },
     {
-      soft: createLegacySoftDeps({
-        toolUseContext: request.toolUseContext,
-        cacheSafeParams: request.cacheSafeParams,
-        querySource: request.querySource,
-        tokenCount,
-        autoCompactThreshold,
-        tracking: request.tracking,
-      }),
+      soft,
+      handoff: createLegacyHandoffDeps(soft, request.instructions),
       shake: createShakeReducer(),
       remote,
       // Promotion is a decision only; the caller owns the model switch/retry.
@@ -798,6 +806,13 @@ export async function runManualCompactionV2(
   const { getEffectiveContextWindowSize, getAutoCompactThreshold } =
     loadAutoCompact()
   const tokenCount = defaultCountTokens(request.messages)
+  const soft = createLegacySoftDeps({
+    toolUseContext: request.toolUseContext,
+    cacheSafeParams: request.cacheSafeParams,
+    querySource: request.querySource,
+    tokenCount,
+    autoCompactThreshold: getAutoCompactThreshold(request.model),
+  })
   const result = await runCompactionV2(
     {
       model: request.model,
@@ -811,13 +826,8 @@ export async function runManualCompactionV2(
       abortSignal: request.toolUseContext.abortController?.signal,
     },
     {
-      soft: createLegacySoftDeps({
-        toolUseContext: request.toolUseContext,
-        cacheSafeParams: request.cacheSafeParams,
-        querySource: request.querySource,
-        tokenCount,
-        autoCompactThreshold: getAutoCompactThreshold(request.model),
-      }),
+      soft,
+      handoff: createLegacyHandoffDeps(soft, request.instructions),
       shake: createShakeReducer(),
       // `/compact` must return a legacy CompactionResult. A non-soft compacted
       // outcome without one falls through to soft (which always carries it).
@@ -883,6 +893,13 @@ export async function runIdleCompactionV2(
     return { compacted: false, trace: [] }
   }
   const tokenCount = defaultCountTokens(request.messages)
+  const soft = createLegacySoftDeps({
+    toolUseContext: request.toolUseContext,
+    cacheSafeParams: request.cacheSafeParams,
+    querySource: request.querySource,
+    tokenCount,
+    autoCompactThreshold: getAutoCompactThreshold(request.model),
+  })
   const result = await runCompactionV2(
     {
       model: request.model,
@@ -899,13 +916,8 @@ export async function runIdleCompactionV2(
       abortSignal: request.toolUseContext.abortController?.signal,
     },
     {
-      soft: createLegacySoftDeps({
-        toolUseContext: request.toolUseContext,
-        cacheSafeParams: request.cacheSafeParams,
-        querySource: request.querySource,
-        tokenCount,
-        autoCompactThreshold: getAutoCompactThreshold(request.model),
-      }),
+      soft,
+      handoff: createLegacyHandoffDeps(soft),
       resolveWindowTokens: getEffectiveContextWindowSize,
       compactionSettings,
     },
@@ -1060,6 +1072,60 @@ function createLegacySoftDeps(input: {
         tokensAfter:
           result.truePostCompactTokenCount ?? result.postCompactTokenCount ?? 0,
       } satisfies SoftCompactRun
+    },
+  }
+}
+
+/** Concatenate the legacy summary messages into the handoff document body. */
+function extractLegacySummaryText(result: CompactionResult): string {
+  const parts: string[] = []
+  for (const message of result.summaryMessages) {
+    const content = message.message?.content
+    if (typeof content === 'string') {
+      parts.push(content)
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (
+        block &&
+        typeof block === 'object' &&
+        (block as { type?: unknown }).type === 'text' &&
+        typeof (block as { text?: unknown }).text === 'string'
+      ) {
+        parts.push((block as { text: string }).text)
+      }
+    }
+  }
+  const summary = parts.join('\n').trim()
+  if (summary.length > 0) return summary
+  return result.userDisplayMessage?.trim() ?? ''
+}
+
+/**
+ * Handoff reuses the soft runner so there is no second API client. The runner
+ * receives the handoff prompt as `/compact` custom instructions; its summary
+ * messages become the handoff document.
+ */
+function createLegacyHandoffDeps(
+  soft: SoftMethodDeps | null | undefined,
+  instructions?: string,
+): HandoffMethodDeps | null {
+  if (!soft) return null
+  return {
+    ...(instructions ? { instructions } : {}),
+    summarize: async (ctx, request) => {
+      const run = await soft.run({
+        messages: [...ctx.messages],
+        instructions: request.instructions,
+        trigger: ctx.trigger,
+        isAutoCompact: true,
+      })
+      const summary = extractLegacySummaryText(run.result)
+      if (summary.length === 0) {
+        throw new Error('handoff summary was empty')
+      }
+      return summary
     },
   }
 }

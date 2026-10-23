@@ -126,13 +126,25 @@ describe('remote method availability', () => {
     ).toBe(true)
   })
 
-  test('Bedrock is available only with a region and capable model', () => {
-    const method = createRemoteMethod({
+  test('Bedrock needs its own gate, a region and a capable model', () => {
+    const gated = createRemoteMethod({
+      env: {
+        CCH_REMOTE_COMPACTION: '1',
+        CCH_BEDROCK_COMPACTION: '1',
+        AWS_REGION: 'us-east-1',
+      },
+      provider: 'bedrock',
+    })
+    expect(gated.isAvailable(ctx({ model: 'claude-sonnet-4-6' }))).toBe(true)
+    expect(gated.isAvailable(ctx({ model: 'claude-sonnet-4-5' }))).toBe(false)
+
+    const remoteOnly = createRemoteMethod({
       env: { CCH_REMOTE_COMPACTION: '1', AWS_REGION: 'us-east-1' },
       provider: 'bedrock',
     })
-    expect(method.isAvailable(ctx({ model: 'claude-sonnet-4-6' }))).toBe(true)
-    expect(method.isAvailable(ctx({ model: 'claude-sonnet-4-5' }))).toBe(false)
+    expect(remoteOnly.isAvailable(ctx({ model: 'claude-sonnet-4-6' }))).toBe(
+      false,
+    )
   })
 
   test('unsupported providers are unavailable', () => {
@@ -218,16 +230,55 @@ describe('remote method run', () => {
     })
   })
 
-  test('the Bedrock lane reports its skeleton skip', async () => {
+  test('runs the Bedrock Converse lane through the injected fetch', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const method = createRemoteMethod({
+      env: {
+        CCH_REMOTE_COMPACTION: '1',
+        CCH_BEDROCK_COMPACTION: '1',
+        AWS_REGION: 'us-east-1',
+      },
+      provider: 'bedrock',
+      fetch: async (url, init) => {
+        calls.push({ url, init })
+        return new Response(
+          JSON.stringify({
+            output: {
+              message: {
+                role: 'assistant',
+                content: [{ text: 'converse summary' }],
+              },
+            },
+            usage: { inputTokens: 12 },
+          }),
+          { status: 200 },
+        )
+      },
+    })
+    const outcome = await method.run(ctx({ model: 'claude-sonnet-4-6' }))
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    expect(outcome.summary).toBe('converse summary')
+    expect(outcome.preserveData?.bedrock).toMatchObject({
+      provider: 'bedrock',
+      modelId: 'claude-sonnet-4-6',
+      usedTokens: 12,
+    })
+    expect(calls[0]?.url).toContain('/model/claude-sonnet-4-6/converse')
+  })
+
+  test('the Bedrock lane skips when the Converse gate is off', async () => {
     const method = createRemoteMethod({
       env: { CCH_REMOTE_COMPACTION: '1', AWS_REGION: 'us-east-1' },
       provider: 'bedrock',
-      fetch: async () => new Response('{}', { status: 200 }),
+      fetch: async () => {
+        throw new Error('request should not be sent')
+      },
     })
     expect(await method.run(ctx({ model: 'claude-sonnet-4-6' }))).toEqual({
       kind: 'skipped',
       method: 'remote',
-      reason: 'bedrock-converse-transport-unavailable',
+      reason: 'remote-lane-unavailable',
     })
   })
 

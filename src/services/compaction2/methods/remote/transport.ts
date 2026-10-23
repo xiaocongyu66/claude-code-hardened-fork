@@ -68,6 +68,26 @@ export interface BuiltRemoteTransport {
   baseUrl?: string
 }
 
+/**
+ * Minimal Converse runtime surface used by the Bedrock transport. The
+ * production adapter wraps `BedrockRuntimeClient` + `ConverseCommand`; tests
+ * inject a plain object. Keeping this narrow avoids leaking AWS SDK types into
+ * the compaction layer.
+ */
+export interface BedrockConverseInput {
+  modelId: string
+  messages?: unknown[]
+  inferenceConfig?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+export interface BedrockConverseRuntime {
+  sendConverse(
+    input: BedrockConverseInput,
+    options?: { abortSignal?: AbortSignal },
+  ): Promise<unknown>
+}
+
 export interface BuildRemoteTransportInput {
   provider: APIProvider
   model?: string
@@ -79,6 +99,16 @@ export interface BuildRemoteTransportInput {
   getOAuthToken?: () => string | null | undefined
   getOpenAiApiKey?: () => string | null | undefined
   getGoogleAccessToken?: () => Promise<string | undefined>
+  /**
+   * Existing Bedrock Converse runtime (production: the shared
+   * `createBedrockRuntimeClient()`; tests: a stub). When this property is
+   * present it is authoritative: a missing runtime disables the transport
+   * instead of falling back to the SDK, which keeps tests deterministic.
+   */
+  getBedrockConverseRuntime?: () =>
+    | Promise<BedrockConverseRuntime | undefined>
+    | BedrockConverseRuntime
+    | undefined
 }
 
 function defaultAnthropicApiKey(): string | undefined {
@@ -154,6 +184,101 @@ function createAuthorizedFetch(
   }
 }
 
+/**
+ * The runtime SDK ships as a normal dependency; `require.resolve` only tells
+ * us whether a real client factory is reachable. Credentials are resolved
+ * lazily inside `createBedrockRuntimeClient` (env, settings refresh, bearer
+ * token, or the AWS default chain) and are never logged here.
+ */
+function isBedrockRuntimeSdkAvailable(): boolean {
+  try {
+    if (typeof Bun !== 'undefined') {
+      Bun.resolveSync('@aws-sdk/client-bedrock-runtime', import.meta.dir)
+      return true
+    }
+    require.resolve('@aws-sdk/client-bedrock-runtime')
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function defaultBedrockConverseRuntime(): Promise<BedrockConverseRuntime> {
+  const [{ createBedrockRuntimeClient }, sdk] = await Promise.all([
+    import('../../../../utils/model/bedrock.js'),
+    import('@aws-sdk/client-bedrock-runtime'),
+  ])
+  const client = (await createBedrockRuntimeClient()) as unknown as {
+    send(
+      command: unknown,
+      options?: { abortSignal?: AbortSignal },
+    ): Promise<unknown>
+  }
+  const ConverseCommand = sdk.ConverseCommand as unknown as new (
+    input: Record<string, unknown>,
+  ) => unknown
+  return {
+    sendConverse: async (input, options) => {
+      const { modelId, ...rest } = input
+      return client.send(new ConverseCommand({ modelId, ...rest }), options)
+    },
+  }
+}
+
+/** Extract the model id from a Converse URL of the form `/model/<id>/converse`. */
+function modelIdFromConverseUrl(url: string): string | undefined {
+  const match = /\/(?:model|inference-profile)\/([^/?#]+)\/converse/.exec(url)
+  if (!match?.[1]) return undefined
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return match[1]
+  }
+}
+
+function bedrockConverseFetch(
+  getRuntime: () => Promise<BedrockConverseRuntime>,
+): RemoteFetch {
+  let runtimePromise: Promise<BedrockConverseRuntime> | undefined
+  const runtime = (): Promise<BedrockConverseRuntime> => {
+    runtimePromise ??= getRuntime()
+    return runtimePromise
+  }
+  return async (input, init) => {
+    const modelId = modelIdFromConverseUrl(input)
+    if (!modelId) {
+      throw new Error('Bedrock Converse endpoint is missing a model id')
+    }
+    const body =
+      typeof init.body === 'string' && init.body.length > 0
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : {}
+    const output = await (await runtime()).sendConverse(
+      { ...body, modelId },
+      init.signal ? { abortSignal: init.signal } : undefined,
+    )
+    return new Response(JSON.stringify(output ?? {}), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+}
+
+function resolveBedrockBaseUrl(input: {
+  baseUrl?: string
+  env: Record<string, string | undefined>
+}): string {
+  const explicit = normalizeRemoteBaseUrl(
+    input.baseUrl ?? input.env.ANTHROPIC_BEDROCK_BASE_URL,
+  )
+  if (explicit) return explicit
+  const region =
+    input.env.AWS_REGION?.trim() ||
+    input.env.AWS_DEFAULT_REGION?.trim() ||
+    'us-east-1'
+  return `https://bedrock-runtime.${region}.amazonaws.com`
+}
+
 function resolveVertexBaseUrl(input: {
   model: string
   baseUrl?: string
@@ -176,7 +301,8 @@ function resolveVertexBaseUrl(input: {
  * Build a provider-bound transport for the remote compaction lanes.
  *
  * Returns `undefined` for providers without a reusable side-request transport
- * (bedrock has no Converse client here) or when no credential can be resolved.
+ * (bedrock needs either the Runtime SDK or an injected Converse runtime) or
+ * when no credential can be resolved.
  */
 export function buildRemoteTransport(
   input: BuildRemoteTransportInput,
@@ -239,6 +365,24 @@ export function buildRemoteTransport(
     }
   }
 
-  // bedrock (no Converse client), foundry/gemini/grok: no side transport.
+  if (input.provider === 'bedrock') {
+    // An injected getter is authoritative; the default path only exists when
+    // the Bedrock Runtime SDK is installed. Either way the client/credential
+    // resolution happens lazily on first request.
+    const injected = input.getBedrockConverseRuntime
+    if (!injected && !isBedrockRuntimeSdkAvailable()) return undefined
+    return {
+      fetch: bedrockConverseFetch(async () => {
+        const runtime = injected
+          ? await injected()
+          : await defaultBedrockConverseRuntime()
+        if (!runtime) throw new Error('Bedrock Converse runtime unavailable')
+        return runtime
+      }),
+      baseUrl: resolveBedrockBaseUrl({ baseUrl: input.baseUrl, env }),
+    }
+  }
+
+  // foundry/gemini/grok: no side transport.
   return undefined
 }

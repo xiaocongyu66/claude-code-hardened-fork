@@ -226,8 +226,8 @@ describe('buildRemoteTransport provider branches', () => {
     expect(header(calls[0]?.init.headers, 'x-api-key')).toBeUndefined()
   })
 
-  test('bedrock and unknown providers return undefined', () => {
-    for (const provider of ['bedrock', 'foundry', 'gemini', 'grok'] as const) {
+  test('unknown providers return undefined', () => {
+    for (const provider of ['foundry', 'gemini', 'grok'] as const) {
       expect(
         buildRemoteTransport({
           provider,
@@ -236,5 +236,17 @@ describe('buildRemoteTransport provider branches', () => {
         }),
       ).toBeUndefined()
     }
+  })
+
+  test('bedrock returns undefined without an injected or installed runtime', () => {
+    expect(
+      buildRemoteTransport({
+        provider: 'bedrock',
+        env: { AWS_REGION: 'us-east-1' },
+        fetch: captureFetch().fetch,
+        // An injected getter is authoritative: no runtime → no transport.
+        getBedrockConverseRuntime: () => undefined,
+      }),
+    ).toBeUndefined()
   })
 })
