@@ -1,0 +1,21 @@
+[package]
+name = "cch-tui-napi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cch_tui"
+crate-type = ["cdylib"]
+
+[dependencies]
+cch-tui-proto = { path = "../proto" }
+cch-tui-runner = { path = "../runner" }
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[build-dependencies]
+napi-build = "2"
