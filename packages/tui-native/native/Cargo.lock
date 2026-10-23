@@ -257,6 +257,7 @@ dependencies = [
 name = "cch-tui-render"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "cch-tui-core",
  "cch-tui-dialog",
  "cch-tui-diff",

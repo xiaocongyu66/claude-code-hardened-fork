@@ -390,6 +390,22 @@ pub fn run_with_deadline(
                     break;
                 }
 
+                // Alt+C copies the last assistant message (OSC52).
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
+                    if let Some(row) = view
+                        .completed
+                        .iter()
+                        .rev()
+                        .find(|row| row.style == RowStyle::Assistant)
+                    {
+                        session.copy_to_clipboard(&row.text)?;
+                        view.status = Some("copied last message".into());
+                    } else {
+                        view.status = Some("nothing to copy".into());
+                    }
+                    continue;
+                }
+
                 // Fullscreen scrolling owns the page keys.
                 if fullscreen {
                     match key.code {

@@ -173,6 +173,15 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Copy text through the terminal (OSC52). Works over SSH and tmux
+    /// (with `set-clipboard on`); no platform clipboard binary required.
+    pub fn copy_to_clipboard(&mut self, text: &str) -> io::Result<()> {
+        use std::io::Write as _;
+        let mut stdout = io::stdout();
+        stdout.write_all(osc52_sequence(text).as_bytes())?;
+        stdout.flush()
+    }
+
     pub fn is_fullscreen(&self) -> bool {
         self.fullscreen
     }
@@ -241,6 +250,13 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.restore();
     }
+}
+
+/// OSC52 clipboard sequence: `ESC ] 52 ; c ; <base64> BEL`.
+pub fn osc52_sequence(text: &str) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{encoded}\x07")
 }
 
 /// Convert domain rows into wrapped, styled terminal lines.
@@ -730,6 +746,21 @@ mod tests {
                 .any(|line| line.to_string().contains("run tests")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn osc52_sequence_encodes_text() {
+        let sequence = osc52_sequence("hello");
+        assert!(sequence.starts_with("\x1b]52;c;"), "{sequence:?}");
+        assert!(sequence.ends_with('\x07'), "{sequence:?}");
+        let payload = sequence
+            .trim_start_matches("\x1b]52;c;")
+            .trim_end_matches('\x07');
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("base64");
+        assert_eq!(String::from_utf8(decoded).expect("utf8"), "hello");
     }
 
     #[test]
