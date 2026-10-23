@@ -48,6 +48,7 @@ fn print_help() {
          --check-tui               parse NDJSON frames from stdin (CI smoke)\n\
          --replay <file> [opts]    replay a fixture in the interactive TUI\n\
              --delay-ms <n>        pacing between frames (default 80)\n\
+             --exit-after-ms <n>   test-only: quit automatically after n ms\n\
              --fullscreen          use the alternate screen\n\
          --engine <program> [args...]  spawn the TS engine and drive it\n\
              (add --fullscreen before or after the program name)"
@@ -60,6 +61,7 @@ fn run_replay(args: &[String]) -> ExitCode {
         return ExitCode::from(EX_USAGE);
     };
     let mut delay_ms = 80u64;
+    let mut exit_after_ms: Option<u64> = None;
     let mut fullscreen = false;
     let mut index = 2;
     while index < args.len() {
@@ -70,6 +72,16 @@ fn run_replay(args: &[String]) -> ExitCode {
                     Some(value) => delay_ms = value,
                     None => {
                         eprintln!("cch-tui: --delay-ms requires a number");
+                        return ExitCode::from(EX_USAGE);
+                    }
+                }
+            }
+            "--exit-after-ms" => {
+                index += 1;
+                match args.get(index).and_then(|v| v.parse().ok()) {
+                    Some(value) => exit_after_ms = Some(value),
+                    None => {
+                        eprintln!("cch-tui: --exit-after-ms requires a number");
                         return ExitCode::from(EX_USAGE);
                     }
                 }
@@ -87,7 +99,11 @@ fn run_replay(args: &[String]) -> ExitCode {
         path: PathBuf::from(path),
         frame_delay: Duration::from_millis(delay_ms),
     };
-    match cch_tui_bin::run(source, fullscreen) {
+    match cch_tui_bin::run_with_deadline(
+        source,
+        fullscreen,
+        exit_after_ms.map(Duration::from_millis),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("cch-tui: {error}");
