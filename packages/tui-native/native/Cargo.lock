@@ -177,6 +177,7 @@ dependencies = [
  "cch-tui-proto",
  "cch-tui-render",
  "cch-tui-search",
+ "cch-tui-theme",
  "cch-tui-ui",
  "portable-pty",
  "ratatui",
