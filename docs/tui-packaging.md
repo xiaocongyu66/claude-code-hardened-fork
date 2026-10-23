@@ -6,8 +6,7 @@
 - 解析器：`src/utils/tuiBinary.ts`
 - 平台包模板：`packages/tui-native/packaging/package.json.template`
 - CI：`.github/workflows/ci.yml`（`rust` + `native` 矩阵 + `package`）
-- 发布：`.github/workflows/tui-release.yml`（一键打包/校验/发布平台包 + 根包）
-- 本地全流程：`scripts/build-all.mjs`；平台包组装：`scripts/assemble-tui-packages.mjs`
+- 本地全流程：`scripts/build-all.mjs`
 
 ## 分发模型
 
@@ -16,8 +15,7 @@
 > **状态**：根 `package.json` 的 `optionalDependencies` 与 `workspaces` 目前**尚未**加入这些包。
 > CI 使用 `bun install --frozen-lockfile`，而本地禁止执行 `bun install` 更新 `bun.lock`；
 > 发布前需由一次受控的 lockfile 更新统一注入。在此之前运行时解析失败会走
-> `getTuiBinaryError()` 的降级路径。一键发布 workflow 会在打包前把 6 个平台包
-> 注入根清单（仅工作区，不写回仓库），因此发布出的根 tarball 始终带 optionalDependencies。
+> `getTuiBinaryError()` 的降级路径。
 
 | npm 包 | Cargo target | `os` | `cpu` | 二进制 |
 |---|---|---|---|---|
@@ -90,36 +88,6 @@ getTuiBinaryPackageName(): string | null
 
 ## 发布步骤
 
-### 一键 workflow（推荐）
-
-`.github/workflows/tui-release.yml`（`workflow_dispatch`）把“下载 artifact → 组装 → 打包校验 → 发布”串成一次运行。
-
-前置：目标 ref 上 CI 的 `native` job 已产出 6 个 `native-<triple>` artifact（`tui/<triple>/cch-tui[.exe]` + `.sha256`）。
-
-1. Actions → **TUI release** → **Run workflow**，选择分支并填写：
-   - `version`：目标版本（semver，可带 `v` 前缀，脚本会去掉）；应与预期发布的根包版本一致。
-   - `dry_run`：默认 `true`，只打包/校验并上传 artifact，不执行 `npm publish`。首次发布务必先 dry-run。
-   - `source_run_id`（可选）：提供 native artifact 的 CI run ID；留空时取当前 ref 最近一次完成的 `ci.yml` run。
-
-2. workflow 行为：
-   - 下载 artifact，断言 6 个 triple 的 bin + sidecar 齐全；
-   - 运行 `node scripts/assemble-tui-packages.mjs --stage artifacts --version <v> --sync-root-manifest`：校验 sha256、恢复可执行位、把二进制写入 `packages/tui-native/platforms/<pkg>/bin/`，设置 6 个平台包 version，并让根包 version 与 6 个 `@cch/tui-*` optionalDependencies 指向该版本（只影响本次打包，不写回 git）；
-   - `npm pack` 6 个平台包与根包，逐包校验 sha256、可执行位与包内清单（平台包只允许 `package.json` + `bin/*`），上传 `tui-release-<version>` artifact（7 个 tgz）；
-   - `dry_run=false` 时按 6 个平台包 → 根包的顺序执行 `npm publish --access public`，需要仓库 secret `NPM_TOKEN`（具备 `@cch` scope 发布权限）。
-
-3. **验收**：在 6 类宿主上 `npm i -g claude-code-hardened`，确认 `node_modules/@cch/tui-<platform>-<arch>/bin/cch-tui[.exe]` 存在且可执行；调用 `resolveTuiBinary()` 返回非 null。
-
-本地演练（幂等；`bin/` 已被 gitignore）：
-
-```bash
-# 本地 build-all 已填充 vendor/tui/ 时
-node scripts/assemble-tui-packages.mjs --stage vendor/tui --version 2.8.4
-# 从 CI artifact 目录（artifacts/native-<triple>/tui/<triple>/）组装时
-node scripts/assemble-tui-packages.mjs --stage artifacts --version 2.8.4 --sync-root-manifest
-```
-
-### 手动步骤（fallback）
-
 前置：6 个平台的 CI artifact 已生成（`native-<triple>`），或本地 `node scripts/build-all.mjs` 已填充 `vendor/tui/`。
 
 1. **准备平台包**（以 linux-x64 为例，其余同理）：
@@ -130,18 +98,18 @@ node scripts/assemble-tui-packages.mjs --stage artifacts --version 2.8.4 --sync-
    chmod +x /tmp/pkg-tui-linux-x64/bin/cch-tui
    ```
    Windows 使用 `cch-tui.exe` 及其 sidecar。确认 `package.json` 的 `version` 与根包一致。
-   也可以直接运行 `node scripts/assemble-tui-packages.mjs --stage vendor/tui --version <v>`，它会完成复制、校验与 version 设置。
 2. **校验 sidecar**：`sha256sum -c`（macOS 用 `shasum -a 256 -c`）必须在 `bin/` 内通过。
 3. **发布 6 个平台包**（先于根包）：
    ```bash
    (cd /tmp/pkg-tui-linux-x64 && npm publish --access public)
    # 重复 6 次
    ```
-4. **解析根包 optionalDependencies**：发布前需把根 `package.json` 中 6 个 `@cch/tui-*` 指向实际发布版本。
-   - 一键 workflow / 本地脚本传入 `--sync-root-manifest` 会自动完成。
-   - 手工操作时，可先注入 `workspace:*` 占位并更新 `bun.lock`（见上文状态说明）；用 `npm publish` 前必须把 `workspace:*` 替换为实际发布版本（例如 `2.8.4`），否则会发布字面量 `workspace:*`。
+4. **解析根包 optionalDependencies**：发布前需注入 `workspace:*` 占位并更新
+   `bun.lock`（见上文状态说明）。
+   - `bun publish` 会把 `workspace:*` 展开为 workspace 内平台包的版本。
+   - 用 `npm publish` 时必须先把根 `package.json` 中 6 个 `@cch/tui-*` 替换为实际发布版本（例如 `2.8.4`），否则会发布字面量 `workspace:*`。
 5. **发布根包**：`npm publish --provenance --access public`（现有 `.github/workflows/publish-npm.yml` 流程）。
-6. **验收**：同上方一键流程的第 3 步。
+6. **验收**：在 6 类宿主上 `npm i -g claude-code-hardened`，确认 `node_modules/@cch/tui-<platform>-<arch>/bin/cch-tui[.exe]` 存在且可执行；调用 `resolveTuiBinary()` 返回非 null。
 
 ## 缺失 / 不可用时的降级行为
 
