@@ -720,12 +720,10 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::DiffAdded => Style::default().bg(palette.diff_added_bg),
         RowStyle::DiffRemoved => Style::default().bg(palette.diff_removed_bg),
         RowStyle::DiffContext => Style::default().fg(palette.dim),
-        // Tables have no palette token yet; keep them legible with terminal
-        // defaults until the theme grows table colors.
         RowStyle::TableHeader => Style::default()
-            .fg(Color::DarkGray)
+            .fg(palette.foreground)
             .add_modifier(Modifier::BOLD),
-        RowStyle::TableRow => Style::default(),
+        RowStyle::TableRow => Style::default().fg(palette.foreground),
     }
 }
 

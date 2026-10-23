@@ -390,7 +390,7 @@ fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
             let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
             let summary = block
                 .get("input")
-                .map(summarize_tool_input)
+                .map(|input| tool_call_summary(name, input))
                 .unwrap_or_default();
             vec![Row::new(
                 RowStyle::ToolCallPending,
@@ -417,8 +417,27 @@ fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
 }
 
 /// One-line description of a tool call's input.
-fn summarize_tool_input(input: &Value) -> String {
-    let compact = input.to_string();
+///
+/// Mirrors the intent of each tool's `renderToolUseMessage()` in the Ink app:
+/// the interesting argument (command, path, pattern, url, ...) rather than the
+/// whole JSON. Unknown tools fall back to a truncated compact payload.
+fn tool_call_summary(name: &str, input: &Value) -> String {
+    let field = |key: &str| input.get(key).and_then(Value::as_str);
+    let detail = match name.to_ascii_lowercase().as_str() {
+        "bash" | "powershell" | "shell" => field("command").map(ToOwned::to_owned),
+        "read" | "write" | "edit" | "notebookedit" => field("file_path")
+            .or_else(|| field("notebook_path"))
+            .map(ToOwned::to_owned),
+        "glob" | "grep" => field("pattern").map(ToOwned::to_owned),
+        "webfetch" => field("url").map(ToOwned::to_owned),
+        "websearch" => field("query").map(ToOwned::to_owned),
+        "task" | "agent" => field("description")
+            .or_else(|| field("prompt"))
+            .map(ToOwned::to_owned),
+        _ => None,
+    };
+    let raw = detail.unwrap_or_else(|| input.to_string());
+    let compact = raw.replace('\n', " ");
     let mut summary: String = compact.chars().take(80).collect();
     if compact.chars().count() > 80 {
         summary.push('…');
