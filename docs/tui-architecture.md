@@ -91,3 +91,26 @@ engine (TS) --NDJSON stdout--> bin reader thread --mpsc--> event loop
   do not special-case keys in `bin`.
 - New panes (tasks, agents): implement them as row producers feeding either
   `insert_rows` (inline) or a second `TranscriptModel` (fullscreen).
+
+
+## In-process napi host (shipping)
+
+The TUI ships **inside** the main package as a napi addon (`cch_tui`); there is
+no separate executable or platform package to install.
+
+```
+Bun process (engine)
+  └─ loadNativeModule('tui','tui')  →  cch_tui.node (memfd dlopen / vendor)
+        ├─ start({fullscreen, theme, vim})
+        ├─ send(<engine event JSON>)      every query/stream/system/result frame
+        ├─ poll() -> TuiCommand JSON      prompt / permission / interrupt / exit
+        └─ stop()
+```
+
+- `cch-tui-runner` owns the interactive loop and the terminal; `cch-tui-napi`
+  only exposes channels (no terminal IO inside the FFI functions).
+- The render thread is a plain `std::thread`; the host polls every ~20 ms.
+- `cch-tui` remains a development binary (`--replay`, `--bench-replay`,
+  `--check-tui`) and is not distributed.
+- Missing/invalid addon or `is_supported() === false` (no TTY) falls back to the
+  Ink UI behind `CCH_TUI_NATIVE=1`.
