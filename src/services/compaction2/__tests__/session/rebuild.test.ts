@@ -68,7 +68,13 @@ describe('rebuildMessagesFromEntries', () => {
     expect(summary!.type).toBe('user')
     expect(summary!.isCompactSummary).toBe(true)
     expect(summary!.message!.content as string).toBe('the summary')
-    expect(kept.map(m => m.uuid)).toEqual(['u2', 'a2', 'u3', 'a3', 'u4'])
+    expect(kept.map(m => String(m.uuid))).toEqual([
+      'u2',
+      'a2',
+      'u3',
+      'a3',
+      'u4',
+    ])
   })
 
   test('preserves a tool_use/tool_result pair that straddles the kept tail', () => {
@@ -82,7 +88,7 @@ describe('rebuildMessagesFromEntries', () => {
     ])
 
     const kept = rebuilt!.slice(2)
-    expect(kept.map(m => m.uuid)).toEqual(['a2', 'u3', 'a3'])
+    expect(kept.map(m => String(m.uuid))).toEqual(['a2', 'u3', 'a3'])
     const resultBlock = (
       kept[1]!.message!.content as Array<{ type: string; tool_use_id: string }>
     )[0]!
@@ -99,7 +105,7 @@ describe('rebuildMessagesFromEntries', () => {
     ])
 
     const kept = rebuilt!.slice(2)
-    expect(kept.map(m => m.uuid)).toEqual(['a3'])
+    expect(kept.map(m => String(m.uuid))).toEqual(['a3'])
     expect(
       kept.some(m =>
         (m.message?.content as Array<{ type?: string }> | undefined)?.some(
@@ -118,7 +124,7 @@ describe('rebuildMessagesFromEntries', () => {
       a3,
     ])
 
-    expect(rebuilt!.slice(2).map(m => m.uuid)).toEqual(['u2', 'a3'])
+    expect(rebuilt!.slice(2).map(m => String(m.uuid))).toEqual(['u2', 'a3'])
   })
 
   test('empty firstKeptEntryId skips a legacy boundary/summary preamble', () => {
@@ -144,7 +150,7 @@ describe('rebuildMessagesFromEntries', () => {
       a3,
     ])
 
-    expect(rebuilt!.slice(2).map(m => m.uuid)).toEqual(['u2', 'a3'])
+    expect(rebuilt!.slice(2).map(m => String(m.uuid))).toEqual(['u2', 'a3'])
   })
 
   test('returns null when there is no compaction row', () => {

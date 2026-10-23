@@ -502,7 +502,11 @@ function resolveCompactionSummary(
   if (typeof legacySummary === 'string' && legacySummary.length > 0) {
     return legacySummary
   }
-  if (typeof outcome.summary === 'string' && outcome.summary.length > 0) {
+  if (
+    outcome.kind === 'compacted' &&
+    typeof outcome.summary === 'string' &&
+    outcome.summary.length > 0
+  ) {
     return outcome.summary
   }
   return undefined

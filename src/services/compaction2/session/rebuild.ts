@@ -95,7 +95,7 @@ function findFirstKeptIndex(
 function contentBlocks(message: Message): Array<Record<string, unknown>> {
   const content = message.message?.content
   if (!Array.isArray(content)) return []
-  return content as Array<Record<string, unknown>>
+  return content as unknown as Array<Record<string, unknown>>
 }
 
 /**

@@ -142,7 +142,7 @@ describe('appendCompactionEntry JSONL round-trip', () => {
     expect(loaded.messages.size).toBe(1)
     expect(loaded.messages.has('u1' as never)).toBe(true)
     expect(loaded.compactionEntries).toHaveLength(1)
-    expect(loaded.compactionEntries[0]!.uuid).toBe('c1')
+    expect(String(loaded.compactionEntries[0]!.uuid)).toBe('c1')
   })
 })
 
