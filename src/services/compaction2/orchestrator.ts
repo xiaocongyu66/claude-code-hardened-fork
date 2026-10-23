@@ -453,6 +453,8 @@ export interface CompactionV2QueryRequest {
   payloadRejection?: PayloadRejectionEvidence
   lastActivityAt?: number
   tracking?: CompactionV2Tracking
+  /** Trigger tuning (e.g. midTurnEnabled). Defaults match DEFAULT_COMPACTION_SETTINGS. */
+  settings?: Partial<CompactionSettings>
 }
 
 export interface CompactionV2QueryResult {
@@ -538,6 +540,7 @@ export async function runCompactionV2ForQuery(
       payloadRejection: request.payloadRejection,
       lastActivityAt: request.lastActivityAt,
       instructions: request.instructions,
+      settings: request.settings,
       agentId: request.toolUseContext.agentId,
       abortSignal: request.toolUseContext.abortController?.signal,
     },
@@ -587,6 +590,66 @@ export async function runCompactionV2ForQuery(
     }
   }
   return { wasCompacted: false }
+}
+
+export interface ManualCompactionV2Request {
+  messages: Message[]
+  model: string
+  toolUseContext: ToolUseContext
+  cacheSafeParams: CacheSafeParams
+  querySource?: QuerySource
+  /** `/compact [instructions]` focus text. */
+  instructions?: string
+  settings?: Partial<CompactionSettings>
+}
+
+/**
+ * Manual `/compact` adapter. Unlike the automatic triggers this does not
+ * consult `isAutoCompactEnabled` (the user explicitly asked) and does not
+ * exclude the `compact` query source (the command itself may carry it).
+ * It still honors abort and the method chain's own availability guards.
+ *
+ * Returns undefined when the chain produced no legacy `CompactionResult`
+ * (e.g. every method failed or only a mechanical reduction ran) so the
+ * caller can fall back to the legacy command path.
+ */
+export async function runManualCompactionV2(
+  request: ManualCompactionV2Request,
+): Promise<CompactionResult | undefined> {
+  if (request.toolUseContext.abortController?.signal.aborted) return undefined
+  const { getEffectiveContextWindowSize, getAutoCompactThreshold } =
+    loadAutoCompact()
+  const tokenCount = defaultCountTokens(request.messages)
+  const result = await runCompactionV2(
+    {
+      model: request.model,
+      trigger: 'manual',
+      messages: request.messages,
+      windowTokens: getEffectiveContextWindowSize(request.model),
+      tokenCount,
+      instructions: request.instructions,
+      settings: request.settings,
+      agentId: request.toolUseContext.agentId,
+      abortSignal: request.toolUseContext.abortController?.signal,
+    },
+    {
+      soft: createLegacySoftDeps({
+        toolUseContext: request.toolUseContext,
+        cacheSafeParams: request.cacheSafeParams,
+        querySource: request.querySource,
+        tokenCount,
+        autoCompactThreshold: getAutoCompactThreshold(request.model),
+      }),
+      shake: createShakeReducer(),
+      // `/compact` must return a legacy CompactionResult. A non-soft compacted
+      // outcome without one falls through to soft (which always carries it).
+      canAcceptOutcome: outcome =>
+        outcome.kind !== 'compacted' ||
+        getLegacyCompactionResult(outcome) !== undefined,
+      resolveWindowTokens: getEffectiveContextWindowSize,
+    },
+  )
+  return getLegacyCompactionResult(result.outcome)
 }
 
 export interface IdleCompactionV2Request {

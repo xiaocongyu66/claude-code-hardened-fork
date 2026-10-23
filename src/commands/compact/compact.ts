@@ -87,6 +87,50 @@ export const call: LocalCommandCall = async (args, context) => {
       }
     }
 
+    // COMPACTION_V2: manual compaction runs the v2 method chain first
+    // (trigger 'manual', carrying [instructions]). Any failure or a chain
+    // that produces no legacy CompactionResult falls back to the legacy path
+    // below, so flag-off behavior is unchanged.
+    if (feature('COMPACTION_V2')) {
+      try {
+        /* eslint-disable @typescript-eslint/no-require-imports */
+        const { runManualCompactionV2 } =
+          require('../../services/compaction2/orchestrator.js') as typeof import('../../services/compaction2/orchestrator.js')
+        /* eslint-enable @typescript-eslint/no-require-imports */
+        const v2Result = await runManualCompactionV2({
+          messages,
+          model: context.options.mainLoopModel,
+          toolUseContext: context,
+          cacheSafeParams: await getCacheSharingParams(context, messages),
+          querySource: context.options.querySource,
+          instructions: customInstructions || undefined,
+        })
+        if (v2Result) {
+          // Mirrors the legacy post-success cleanup in `call`.
+          setLastSummarizedMessageId(undefined)
+          suppressCompactWarning()
+          getUserContext.cache.clear?.()
+          runPostCompactCleanup()
+          return {
+            type: 'compact',
+            compactionResult: v2Result,
+            displayText: buildDisplayText(
+              context,
+              v2Result.userDisplayMessage,
+              {
+                pre: v2Result.preCompactTokenCount,
+                post: v2Result.truePostCompactTokenCount,
+              },
+            ),
+          }
+        }
+      } catch (error) {
+        // Fall through to legacy compaction. Aborts are translated by the
+        // outer catch if the legacy path re-observes them.
+        logError(error)
+      }
+    }
+
     // Reactive-only mode: route /compact through the reactive path.
     // Checked after session-memory (that path is cheap and orthogonal).
     if (reactiveCompact?.isReactiveOnlyMode()) {
