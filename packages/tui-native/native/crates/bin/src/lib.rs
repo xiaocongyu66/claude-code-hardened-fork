@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use cch_tui_core::TextBuffer;
+use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer};
 use cch_tui_dialog::PermissionDialog;
 use cch_tui_fullscreen::TranscriptModel;
 use cch_tui_keymap::{
@@ -133,6 +133,7 @@ pub fn run_with_deadline(
     let mut history = PromptHistory::default();
     let mut transcript = TranscriptModel::new();
     let mut dialog: Option<PermissionDialog> = None;
+    let mut search: Option<HistorySearch> = None;
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
 
@@ -207,6 +208,56 @@ pub fn run_with_deadline(
             }
             Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // History search owns the keyboard while it is open.
+                if search.is_some() {
+                    let mut close = false;
+                    if let Some(active) = search.as_mut() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                active.cancel();
+                                close = true;
+                            }
+                            KeyCode::Enter => {
+                                if let Some(entry) = active.accept() {
+                                    buffer.set_text(entry);
+                                }
+                                close = true;
+                            }
+                            KeyCode::Up => {
+                                active.prev();
+                            }
+                            KeyCode::Down => {
+                                active.next();
+                            }
+                            KeyCode::Backspace => {
+                                let mut query = active.query.clone();
+                                query.pop();
+                                active.set_query(query, &history.entries);
+                            }
+                            KeyCode::Char(ch)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                let mut query = active.query.clone();
+                                query.push(ch);
+                                active.set_query(query, &history.entries);
+                            }
+                            _ => {}
+                        }
+                        if !close {
+                            let total = active.matches.len();
+                            let position = if total == 0 { 0 } else { active.index + 1 };
+                            view.status =
+                                Some(format!("search: {} ({position}/{total})", active.query));
+                        }
+                    }
+                    if close {
+                        search = None;
+                        view.status = None;
+                    }
                     continue;
                 }
 
@@ -346,7 +397,13 @@ pub fn run_with_deadline(
                                 }
                             }
                         } else if action == Action::HISTORY_SEARCH {
-                            view.status = Some("history search: not wired yet".into());
+                            let candidates: Vec<String> =
+                                history.entries().iter().rev().cloned().collect();
+                            search = Some(HistorySearch::with_matches(
+                                HistoryScope::Global,
+                                candidates,
+                            ));
+                            view.status = Some("search: (0/0)".into());
                         }
                     }
                 }
@@ -462,6 +519,10 @@ impl PromptHistory {
 
     fn reset(&mut self) {
         self.index = None;
+    }
+
+    fn entries(&self) -> &[String] {
+        &self.entries
     }
 }
 
