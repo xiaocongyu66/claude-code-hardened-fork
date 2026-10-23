@@ -97,19 +97,13 @@ impl ChatView {
                 Vec::new()
             }
             EngineEvent::User { extra } => {
-                let text = message_text(extra.get("message"));
-                if text.is_empty() {
-                    return Vec::new();
-                }
-                self.user_messages_pushed(text)
+                let rows = message_rows(extra.get("message"), false);
+                self.completed.extend(rows.clone());
+                rows
             }
             EngineEvent::Assistant { extra } => {
-                let text = message_text(extra.get("message"));
                 self.live_text.clear();
-                if text.is_empty() {
-                    return Vec::new();
-                }
-                let rows = vec![Row::new(RowStyle::Assistant, text)];
+                let rows = message_rows(extra.get("message"), true);
                 self.completed.extend(rows.clone());
                 rows
             }
@@ -143,15 +137,6 @@ impl ChatView {
             | EngineEvent::KeepAlive
             | EngineEvent::Unknown => Vec::new(),
         }
-    }
-
-    fn user_messages_pushed(&mut self, text: String) -> Vec<Row> {
-        let rows = text
-            .lines()
-            .map(|line| Row::new(RowStyle::User, format!("> {line}")))
-            .collect::<Vec<_>>();
-        self.completed.extend(rows.clone());
-        rows
     }
 
     /// Submit the current input buffer as a frozen user row.
@@ -206,6 +191,94 @@ impl SessionView {
     }
 }
 
+/// Turn an SDK message payload into transcript rows.
+///
+/// Text blocks become assistant/user prose; `tool_use` and `tool_result`
+/// blocks become compact tool rows so the transcript shows what ran without
+/// dumping full payloads.
+fn message_rows(message: Option<&Value>, assistant: bool) -> Vec<Row> {
+    let Some(message) = message else {
+        return Vec::new();
+    };
+    match message.get("content") {
+        Some(Value::String(text)) => text_rows(text, assistant),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .flat_map(|block| block_rows(block, assistant))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn text_rows(text: &str, assistant: bool) -> Vec<Row> {
+    if assistant {
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        return vec![Row::new(RowStyle::Assistant, text)];
+    }
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| Row::new(RowStyle::User, format!("> {line}")))
+        .collect()
+}
+
+fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| text_rows(text, assistant))
+            .unwrap_or_default(),
+        Some("tool_use") => {
+            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let summary = block
+                .get("input")
+                .map(summarize_tool_input)
+                .unwrap_or_default();
+            vec![Row::new(RowStyle::Tool, format!("● {name} {summary}"))]
+        }
+        Some("tool_result") => {
+            let text = block
+                .get("content")
+                .map(tool_result_text)
+                .unwrap_or_default();
+            if text.is_empty() {
+                vec![Row::new(RowStyle::Tool, "  ⎿ (no output)".to_string())]
+            } else {
+                text.lines()
+                    .take(3)
+                    .map(|line| Row::new(RowStyle::Tool, format!("  ⎿ {line}")))
+                    .collect()
+            }
+        }
+        // Thinking/redacted blocks are not shown in the transcript.
+        _ => Vec::new(),
+    }
+}
+
+/// One-line description of a tool call's input.
+fn summarize_tool_input(input: &Value) -> String {
+    let compact = input.to_string();
+    let mut summary: String = compact.chars().take(80).collect();
+    if compact.chars().count() > 80 {
+        summary.push('…');
+    }
+    summary
+}
+
+fn tool_result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 fn string_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     extra
         .get(key)
@@ -215,26 +288,6 @@ fn string_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<Str
 
 fn number_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
     extra.get(key).and_then(Value::as_u64)
-}
-
-/// Concatenate the text blocks of an SDK message payload.
-fn message_text(message: Option<&Value>) -> String {
-    let Some(message) = message else {
-        return String::new();
-    };
-    match message.get("content") {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|block| {
-                (block.get("type")?.as_str()? == "text")
-                    .then(|| block.get("text")?.as_str().map(ToOwned::to_owned))
-                    .flatten()
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
 }
 
 /// Extract a text delta from a raw stream event.
@@ -306,6 +359,44 @@ mod tests {
         // The result frame flushed the streamed text into a frozen row.
         assert!(view.completed.iter().any(|row| row.text == "more"));
         assert!(view.live_text.is_empty());
+    }
+
+    #[test]
+    fn tool_calls_and_results_become_compact_rows() {
+        let mut view = ChatView::new();
+        view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls -la"}}]}}"#,
+            )
+            .unwrap(),
+        );
+
+        let texts: Vec<&str> = view.completed.iter().map(|row| row.text.as_str()).collect();
+        assert!(texts.contains(&"checking"), "{texts:?}");
+        let call = texts
+            .iter()
+            .find(|text| text.contains("Bash"))
+            .expect("tool row");
+        assert!(call.contains("ls -la"), "{call}");
+
+        view.ingest(
+            &parse_line(
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt\nb.txt\nc.txt\nd.txt"}]}}"#,
+            )
+            .unwrap(),
+        );
+        let results: Vec<&str> = view
+            .completed
+            .iter()
+            .map(|row| row.text.as_str())
+            .filter(|text| text.contains('⎿'))
+            .collect();
+        assert_eq!(
+            results.len(),
+            3,
+            "results are capped at three lines: {results:?}"
+        );
+        assert!(results[0].contains("a.txt"));
     }
 
     #[test]
