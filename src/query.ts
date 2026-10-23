@@ -494,7 +494,11 @@ async function* queryLoop(
   // original model; `promotionRetryInFlight` marks the one request that
   // follows the switch (cleared as soon as that request settles).
   let promotionAttempt:
-    | { originalModel: string; targetModel: string; originalError: Message }
+    | {
+        originalModel: string
+        targetModel: string
+        originalError: AssistantMessage
+      }
     | undefined
   let promotionRetryInFlight = false
 
