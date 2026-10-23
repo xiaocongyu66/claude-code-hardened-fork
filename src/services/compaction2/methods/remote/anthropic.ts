@@ -1,16 +1,23 @@
 // Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import type { Message } from '../../../../types/message.js'
 import type { APIProvider } from '../../../../utils/model/providerClassification.js'
+import { computeRemoteCut } from './index.js'
 import type { RemoteLaneRequest, RemoteLaneResult } from './index.js'
 
 /**
  * Anthropic on-demand compaction (`compact-2026-09-04` beta).
  *
- * The request sends the prefix to summarize with a top-level
- * `compaction: { type: "summarize", instructions }` parameter. The API answers
- * with one signed `compaction` content block; the block (content, signature and
- * optional `tool_changes`) is persisted in `preserveData` so a later turn on a
- * compaction-capable endpoint can replay it verbatim.
+ * The request sends only the prefix to summarize (the cut boundary) with a
+ * top-level `compaction: { type: "summarize", instructions }` parameter; the
+ * retained tail is never sent. The API answers with one signed `compaction`
+ * content block; the block (content, signature and optional `tool_changes`) is
+ * persisted in `preserveData` so a later turn on a compaction-capable endpoint
+ * can replay it verbatim.
+ *
+ * Difference from oh-my-pi: `CompactionContext` exposes the message array
+ * only. It carries no system prompt, tool definitions, or thinking settings,
+ * so this request summarizes the cut prefix alone. omp replays those live
+ * request bytes; we deliberately do not fabricate them here.
  *
  * Header name verified against the reference implementation:
  * `anthropic-beta` (Vertex rawPredict instead carries `anthropic_beta` in the
@@ -432,9 +439,14 @@ export async function runAnthropicCompactionLane(
   if (!fetchImpl) return { skipped: 'anthropic-transport-missing' }
 
   const vertex = request.provider === 'vertex'
+  // Serialize the summarized prefix only. The method computes the cut once
+  // before dispatch; a direct lane call falls back to computing it here so the
+  // request never regresses to the full history.
+  const cut = request.cut ?? computeRemoteCut(request.ctx)
+  if (cut.messages.length === 0) return { skipped: 'anthropic-empty-prefix' }
   const built = buildAnthropicCompactionRequest({
     model: request.ctx.model,
-    messages: request.ctx.messages,
+    messages: cut.messages,
     instructions: request.instructions,
     vertex,
   })
