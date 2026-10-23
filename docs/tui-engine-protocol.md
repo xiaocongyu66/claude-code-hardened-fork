@@ -118,3 +118,42 @@ Rules:
   (`isTuiPassthroughSystemMessage` in `src/cli/print.ts`), so they are always
   emitted on the stream-json path. The TUI still tolerates their absence for
   older engines/sessions.
+
+## E2E test
+
+`tests/integration/tui-engine-e2e.test.ts` exercises the process model above
+without the real API:
+
+- `scripts/mock-anthropic-server.ts` is a local HTTP server that answers
+  `POST /v1/messages` with a minimal SSE stream: `message_start`,
+  `content_block_start` (text), text deltas, `content_block_stop`,
+  `message_delta` (`stop_reason: "end_turn"` + usage), and `message_stop`.
+  Request bodies are drained but not validated. Run it standalone with
+  `bun scripts/mock-anthropic-server.ts`; it listens on a random port, prints
+  `READY <port>`, and exits on SIGTERM/SIGINT.
+- The test imports the server in-process, spawns
+  `bun src/entrypoints/cli.tsx --print --input-format stream-json
+  --output-format stream-json --include-partial-messages --verbose`, writes one
+  user frame to stdin, and asserts the stdout NDJSON contains `system:init`
+  (with `session_id`/`model`), `assistant` (whose text contains the mock
+  reply), and `result` (`subtype: "success"`), in that order, plus at least one
+  `stream_event`. It runs in a temp cwd/config dir and sets
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`, `ANTHROPIC_API_KEY=test`, and
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. `--verbose` is required for
+  stream-json output (`src/cli/print.ts`). No trust flag is needed: `-p` skips
+  the trust dialog and the mocked turn is text-only, so no tool permission
+  prompt can fire.
+- Timeout is 30s for the turn; on failure the test dumps every frame read so
+  far and the CLI's stderr.
+
+Run locally:
+
+```bash
+bun install
+bun test tests/integration/tui-engine-e2e.test.ts
+```
+
+The CI `quality` job runs the same command as a non-blocking step with
+`TUI_E2E=1`. The earlier full-suite sweep runs with `CI=true`, where the test
+skips itself so an engine flake cannot gate packaging; the dedicated step is
+the only CI place it runs.
