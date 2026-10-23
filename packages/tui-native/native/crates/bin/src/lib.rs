@@ -15,6 +15,7 @@ use cch_tui_keymap::{
     Action, Context, ContextStack, Key, KeyCode as KmKeyCode, Keymap, Modifiers as KmModifiers,
     Resolution, Resolver,
 };
+use cch_tui_panel::TaskPanel;
 use cch_tui_proto::{ControlRequest, EngineEvent, parse_line};
 use cch_tui_render::{DEFAULT_INLINE_HEIGHT, TerminalSession};
 use cch_tui_ui::{ChatView, Row, RowStyle, SessionView};
@@ -137,6 +138,7 @@ pub fn run_with_deadline(
     let mut transcript = TranscriptModel::new();
     let mut dialog: Option<PermissionDialog> = None;
     let mut search: Option<HistorySearch> = None;
+    let mut panel = TaskPanel::new();
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
 
@@ -170,6 +172,7 @@ pub fn run_with_deadline(
                         }
                         _ => {}
                     }
+                    panel.apply_engine_event(&event);
                     let frozen = view.ingest(&event);
                     freeze(&mut session, &mut transcript, fullscreen, &frozen)?;
                 }
@@ -191,6 +194,7 @@ pub fn run_with_deadline(
         if engine_closed {
             view.status = Some("engine exited — press q".into());
         }
+        view.panel_summary = Some(panel.summary_line()).filter(|line| !line.is_empty());
         view.input = buffer.text().to_string();
 
         match (dialog.as_ref(), fullscreen) {

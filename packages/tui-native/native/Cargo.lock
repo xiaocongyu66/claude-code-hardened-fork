@@ -164,6 +164,7 @@ dependencies = [
  "cch-tui-dialog",
  "cch-tui-fullscreen",
  "cch-tui-keymap",
+ "cch-tui-panel",
  "cch-tui-proto",
  "cch-tui-render",
  "cch-tui-ui",

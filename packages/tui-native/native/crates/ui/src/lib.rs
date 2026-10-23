@@ -69,6 +69,8 @@ pub struct ChatView {
     pub completed: Vec<Row>,
     /// Transient status, e.g. "waiting for permission".
     pub status: Option<String>,
+    /// One-line task/agent summary appended to the status line.
+    pub panel_summary: Option<String>,
 }
 
 impl ChatView {
@@ -157,7 +159,12 @@ impl ChatView {
         }
         let model = self.session.model.as_deref().unwrap_or("unknown model");
         let session = self.session.session_id.as_deref().unwrap_or("-");
-        format!("{model} · session {session}")
+        match &self.panel_summary {
+            Some(summary) if !summary.is_empty() => {
+                format!("{model} · session {session} · {summary}")
+            }
+            _ => format!("{model} · session {session}"),
+        }
     }
 }
 
@@ -359,6 +366,18 @@ mod tests {
         // The result frame flushed the streamed text into a frozen row.
         assert!(view.completed.iter().any(|row| row.text == "more"));
         assert!(view.live_text.is_empty());
+    }
+
+    #[test]
+    fn status_line_includes_panel_summary() {
+        let mut view = ChatView::new();
+        view.panel_summary = Some("2 running".into());
+        let line = view.status_line();
+        assert!(line.ends_with("· 2 running"), "{line}");
+
+        // An explicit transient status wins over the summary.
+        view.status = Some("search: x (1/2)".into());
+        assert_eq!(view.status_line(), "search: x (1/2)");
     }
 
     #[test]
