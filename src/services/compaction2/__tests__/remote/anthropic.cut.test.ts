@@ -113,9 +113,9 @@ describe('computeRemoteCut', () => {
       tokensOf(messages[4]!) + tokensOf(messages[3]!) + tokensOf(messages[2]!)
     const cut = computeRemoteCut(ctx(messages, keepRecent))
     expect(cut.index).toBe(2)
-    expect(cut.messages.map(m => m.uuid)).toEqual(['u1', 'a1'])
-    expect(cut.kept.map(m => m.uuid)).toEqual(['u2', 'a2', 'u3'])
-    expect(cut.cutPoint.firstKeptEntryId).toBe('u2')
+    expect(cut.messages.map(m => String(m.uuid))).toEqual(['u1', 'a1'])
+    expect(cut.kept.map(m => String(m.uuid))).toEqual(['u2', 'a2', 'u3'])
+    expect(String(cut.cutPoint.firstKeptEntryId)).toBe('u2')
   })
 
   test('never splits an assistant tool call from its tool result', () => {
@@ -132,8 +132,8 @@ describe('computeRemoteCut', () => {
       tokensOf(messages[4]!) + tokensOf(messages[3]!) + tokensOf(messages[2]!)
     const cut = computeRemoteCut(ctx(messages, keepRecent))
     expect(cut.index).toBe(1)
-    expect(cut.kept.map(m => m.uuid)).toEqual(['a1', 'u2', 'a3', 'u4'])
-    expect(cut.messages.map(m => m.uuid)).toEqual(['u1'])
+    expect(cut.kept.map(m => String(m.uuid))).toEqual(['a1', 'u2', 'a3', 'u4'])
+    expect(cut.messages.map(m => String(m.uuid))).toEqual(['u1'])
   })
 
   test('counts CJK with the tokenizer, not JSON length / 4', () => {
@@ -150,7 +150,7 @@ describe('computeRemoteCut', () => {
     // the tokenizer-aware estimate keeps only the newest one.
     const cut = computeRemoteCut(ctx(messages, 250))
     expect(cut.index).toBe(3)
-    expect(cut.kept.map(m => m.uuid)).toEqual(['c4'])
+    expect(cut.kept.map(m => String(m.uuid))).toEqual(['c4'])
   })
 })
 
