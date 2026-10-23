@@ -119,9 +119,9 @@ describe('get_context_usage control protocol', () => {
 
   test('success response carries the TUI summary shape', () => {
     const message = {
-      type: 'control_response',
+      type: 'control_response' as const,
       response: {
-        subtype: 'success',
+        subtype: 'success' as const,
         request_id: 'req-1',
         response: {
           context_tokens: 1200,

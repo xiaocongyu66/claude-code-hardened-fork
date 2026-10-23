@@ -137,9 +137,15 @@ export function enrichSdkTaskEvent(event: SdkEvent): SdkEvent {
     return event
   }
   const record = getTaskHandleRecord(event.task_id)
+  // task_notification frames carry no `description` field of their own; the
+  // registry supplies it. `in` keeps the union narrowing explicit.
+  const frameDescription =
+    'description' in event && typeof event.description === 'string'
+      ? event.description
+      : undefined
   const common = {
     task_type: event.task_type ?? record?.type ?? 'unknown',
-    description: event.description ?? record?.description ?? '',
+    description: frameDescription ?? record?.description ?? '',
   }
   if (event.subtype === 'task_notification') {
     const output = event.output ?? event.output_file ?? record?.outputFile
