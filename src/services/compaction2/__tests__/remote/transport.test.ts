@@ -249,4 +249,24 @@ describe('buildRemoteTransport provider branches', () => {
       }),
     ).toBeUndefined()
   })
+
+  test('bedrock stays undefined when the lane gate is off, without probing the SDK', () => {
+    // No injected getter and no CCH_BEDROCK_COMPACTION=1: the transport must
+    // not depend on whether @aws-sdk/client-bedrock-runtime happens to be
+    // installed in the test environment.
+    expect(
+      buildRemoteTransport({
+        provider: 'bedrock',
+        env: { AWS_REGION: 'us-east-1' },
+        fetch: captureFetch().fetch,
+      }),
+    ).toBeUndefined()
+    expect(
+      buildRemoteTransport({
+        provider: 'bedrock',
+        env: { AWS_REGION: 'us-east-1', CCH_BEDROCK_COMPACTION: '0' },
+        fetch: captureFetch().fetch,
+      }),
+    ).toBeUndefined()
+  })
 })

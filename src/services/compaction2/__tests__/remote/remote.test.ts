@@ -126,7 +126,7 @@ describe('remote method availability', () => {
     ).toBe(true)
   })
 
-  test('Bedrock needs its own gate, a region and a capable model', () => {
+  test('Bedrock needs its own gate, a region and a Claude model', () => {
     const gated = createRemoteMethod({
       env: {
         CCH_REMOTE_COMPACTION: '1',
@@ -136,7 +136,10 @@ describe('remote method availability', () => {
       provider: 'bedrock',
     })
     expect(gated.isAvailable(ctx({ model: 'claude-sonnet-4-6' }))).toBe(true)
-    expect(gated.isAvailable(ctx({ model: 'claude-sonnet-4-5' }))).toBe(false)
+    // Converse summarization does not depend on the Anthropic server-compaction
+    // beta catalog, so older Claude models on Bedrock are still eligible.
+    expect(gated.isAvailable(ctx({ model: 'claude-sonnet-4-5' }))).toBe(true)
+    expect(gated.isAvailable(ctx({ model: 'meta.llama3-70b' }))).toBe(false)
 
     const remoteOnly = createRemoteMethod({
       env: { CCH_REMOTE_COMPACTION: '1', AWS_REGION: 'us-east-1' },

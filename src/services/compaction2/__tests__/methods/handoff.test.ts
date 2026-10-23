@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { CompactionResult } from '../../../compact/compact.js'
 import type { Message } from '../../../../types/message.js'
 import {
   DEFAULT_COMPACTION_SETTINGS,
@@ -11,7 +12,12 @@ import {
   DEFAULT_HANDOFF_INSTRUCTIONS,
   HANDOFF_DOCUMENT_VERSION,
 } from '../../methods/handoff.js'
-import { runCompactionV2 } from '../../orchestrator.js'
+import {
+  applyCompactionOutcome,
+  createLegacyHandoffDeps,
+  type LegacySoftDepsInput,
+  runCompactionV2,
+} from '../../orchestrator.js'
 
 function userText(uuid: string, text: string): Message {
   return {
@@ -216,6 +222,323 @@ describe('handoff method run', () => {
       method: 'handoff',
       reason: 'handoff-empty-document',
     })
+  })
+})
+
+const legacyResult: CompactionResult = {
+  boundaryMarker: { uuid: 'boundary' } as never,
+  summaryMessages: [
+    {
+      type: 'user',
+      message: { role: 'user', content: '## Recent goals\nShip it' },
+      uuid: 'summary',
+      isCompactSummary: true,
+      isVisibleInTranscriptOnly: true,
+    } as never,
+  ],
+  attachments: [{ uuid: 'attach' } as never],
+  hookResults: [{ uuid: 'hook' } as never],
+  messagesToKeep: [userText('keep1', 'recent tail'), userText('keep2', 'more')],
+  userDisplayMessage: '## Recent goals\nShip it',
+  preCompactTokenCount: 180_000,
+  truePostCompactTokenCount: 80_000,
+}
+
+interface HandoffSpies {
+  compactCalls: number
+  cleanupCalls: number
+  resetCalls: number
+  sideEffectCalls: number
+  persistCalls: number
+  seenDefer: boolean | undefined
+}
+
+function makeSpies(): HandoffSpies {
+  return {
+    compactCalls: 0,
+    cleanupCalls: 0,
+    resetCalls: 0,
+    sideEffectCalls: 0,
+    persistCalls: 0,
+    seenDefer: undefined,
+  }
+}
+
+function legacyHandoffInput(
+  spies: HandoffSpies,
+  deferApply = false,
+): LegacySoftDepsInput {
+  return {
+    toolUseContext: {} as never,
+    cacheSafeParams: {} as never,
+    querySource: 'repl_main_thread',
+    tokenCount: 180_000,
+    autoCompactThreshold: 170_000,
+    deferApply,
+    compactConversation: (async (
+      _messages: unknown,
+      _context: unknown,
+      _cache: unknown,
+      _suppress: unknown,
+      _instructions: unknown,
+      _isAuto: unknown,
+      _info: unknown,
+      options: { deferApply?: boolean } | undefined,
+    ) => {
+      spies.compactCalls++
+      spies.seenDefer = options?.deferApply
+      return legacyResult
+    }) as unknown as LegacySoftDepsInput['compactConversation'],
+    runPostCompactCleanup: () => {
+      spies.cleanupCalls++
+    },
+    setLastSummarizedMessageId: () => {
+      spies.resetCalls++
+    },
+  }
+}
+
+describe('handoff legacy result preservation', () => {
+  test('carries the full CompactionResult in preserveData', async () => {
+    const outcome = await createHandoffMethod({
+      summarize: async () => ({
+        document: '## Recent goals\nShip it',
+        legacyCompactionResult: legacyResult,
+      }),
+    }).run(ctx())
+    expect(outcome.kind).toBe('compacted')
+    if (outcome.kind !== 'compacted') return
+    expect(outcome.preserveData?.legacyCompactionResult).toBe(legacyResult)
+    // The handoff document is still present alongside the legacy result.
+    expect(outcome.preserveData?.handoff).toMatchObject({
+      version: HANDOFF_DOCUMENT_VERSION,
+      document: '## Recent goals\nShip it',
+    })
+  })
+
+  test('legacy deps always summarize with deferApply and return the full result', async () => {
+    const spies = makeSpies()
+    // The outer request is direct (deferApply: false); handoff must still
+    // compute without side effects.
+    const deps = createLegacyHandoffDeps(legacyHandoffInput(spies, false))
+    const summarized = await deps.summarize?.(ctx(), {
+      instructions: DEFAULT_HANDOFF_INSTRUCTIONS,
+    })
+    expect(spies.compactCalls).toBe(1)
+    expect(spies.seenDefer).toBe(true)
+    expect(spies.cleanupCalls).toBe(0)
+    expect(spies.resetCalls).toBe(0)
+    if (!summarized || typeof summarized === 'string') {
+      throw new Error('expected a structured handoff summary')
+    }
+    expect(summarized.document).toContain('## Recent goals')
+    expect(summarized.legacyCompactionResult).toBe(legacyResult)
+  })
+
+  test('a guard-blocked handoff leaves zero side effects and falls through', async () => {
+    const spies = makeSpies()
+    const messages = [
+      userText('u1', 'goal: ship the lane with a full end-to-end test suite'),
+      userText('u2', 'todo: add tests for the prefix cut and guard paths'),
+      userText('u3', 'constraint: no new dependencies and no extra API calls'),
+    ]
+    const soft: CompactionMethod = {
+      name: 'soft',
+      isAvailable: () => true,
+      run: async () => ({
+        kind: 'compacted',
+        method: 'soft',
+        cutPoint: {
+          firstKeptEntryId: 'u1',
+          tokensBefore: 180_000,
+          boundaryMessage: {} as never,
+        },
+        tokensSaved: 100_000,
+        headroomTokens: 0,
+        summary: 'soft summary',
+      }),
+    }
+    const result = await runCompactionV2(
+      {
+        model: 'test-model',
+        trigger: 'threshold',
+        messages,
+        windowTokens: 200_000,
+        tokenCount: 180_000,
+        // Keep the newest one or two messages → handoff saves only 10k and
+        // fails the 80% progress guard (170k > 136k).
+        settings: { methodOrder: ['handoff', 'soft'], keepRecentTokens: 100 },
+      },
+      {
+        methods: [
+          createHandoffMethod(
+            createLegacyHandoffDeps(legacyHandoffInput(spies)),
+          ),
+          soft,
+        ],
+        countTokens: input => (input.length >= 3 ? 180_000 : 170_000),
+        applySideEffects: () => {
+          spies.sideEffectCalls++
+        },
+        applyDeps: {
+          resetLastSummarizedMessageId: () => {
+            spies.resetCalls++
+          },
+          cleanup: () => {
+            spies.cleanupCalls++
+          },
+        },
+        persist: async () => {
+          spies.persistCalls++
+          return null
+        },
+        env: {},
+      },
+    )
+
+    expect(result.outcome?.method).toBe('soft')
+    expect(result.trace.some(entry => entry.outcome === 'guard-blocked')).toBe(
+      true,
+    )
+    // The summary was computed compute-only; nothing was applied.
+    expect(spies.compactCalls).toBe(1)
+    expect(spies.seenDefer).toBe(true)
+    expect(spies.sideEffectCalls).toBe(0)
+    expect(spies.resetCalls).toBe(0)
+    expect(spies.cleanupCalls).toBe(0)
+    // Only the accepted soft journal write happened.
+    expect(spies.persistCalls).toBe(1)
+  })
+
+  test('an accepted direct handoff applies its legacy side effects once', async () => {
+    const spies = makeSpies()
+    const messages = [
+      userText('u1', 'goal: ship the lane'),
+      userText('u2', 'todo: add tests'),
+      userText('u3', 'constraint: no new deps'),
+    ]
+    const result = await runCompactionV2(
+      {
+        model: 'test-model',
+        trigger: 'threshold',
+        messages,
+        windowTokens: 200_000,
+        tokenCount: 180_000,
+        settings: { methodOrder: ['handoff'], keepRecentTokens: 0 },
+      },
+      {
+        methods: [
+          createHandoffMethod(
+            createLegacyHandoffDeps(legacyHandoffInput(spies)),
+          ),
+        ],
+        countTokens: () => 180_000,
+        applySideEffects: () => {
+          spies.sideEffectCalls++
+        },
+        applyDeps: {
+          resetLastSummarizedMessageId: () => {
+            spies.resetCalls++
+          },
+          cleanup: () => {
+            spies.cleanupCalls++
+          },
+        },
+        persist: async () => {
+          spies.persistCalls++
+          return null
+        },
+        env: {},
+      },
+    )
+
+    expect(result.outcome?.method).toBe('handoff')
+    expect(spies.compactCalls).toBe(1)
+    expect(spies.seenDefer).toBe(true)
+    expect(spies.sideEffectCalls).toBe(1)
+    expect(spies.resetCalls).toBe(1)
+    expect(spies.cleanupCalls).toBe(1)
+    expect(spies.persistCalls).toBe(1)
+  })
+
+  test('a preview handoff applies its legacy side effects only at commit', async () => {
+    const spies = makeSpies()
+    const messages = [
+      userText('u1', 'goal: ship the lane'),
+      userText('u2', 'todo: add tests'),
+      userText('u3', 'constraint: no new deps'),
+    ]
+    const result = await runCompactionV2(
+      {
+        model: 'test-model',
+        trigger: 'threshold',
+        messages,
+        windowTokens: 200_000,
+        tokenCount: 180_000,
+        settings: { methodOrder: ['handoff'], keepRecentTokens: 0 },
+      },
+      {
+        methods: [
+          createHandoffMethod(
+            createLegacyHandoffDeps(legacyHandoffInput(spies)),
+          ),
+        ],
+        countTokens: () => 180_000,
+        deferApply: true,
+        applySideEffects: () => {
+          spies.sideEffectCalls++
+        },
+        applyDeps: {
+          resetLastSummarizedMessageId: () => {
+            spies.resetCalls++
+          },
+          cleanup: () => {
+            spies.cleanupCalls++
+          },
+        },
+        persist: async () => {
+          spies.persistCalls++
+          return null
+        },
+        env: {},
+      },
+    )
+
+    expect(result.outcome?.method).toBe('handoff')
+    // Nothing applied during the preview.
+    expect(spies.sideEffectCalls).toBe(0)
+    expect(spies.resetCalls).toBe(0)
+    expect(spies.cleanupCalls).toBe(0)
+    expect(spies.persistCalls).toBe(0)
+    expect(result.deferredApply?.outcome).toBe(result.outcome)
+
+    await applyCompactionOutcome(
+      result.outcome,
+      {
+        messages,
+        querySource: 'repl_main_thread',
+        applySideEffects: () => {
+          spies.sideEffectCalls++
+        },
+      },
+      {
+        resetLastSummarizedMessageId: () => {
+          spies.resetCalls++
+        },
+        cleanup: () => {
+          spies.cleanupCalls++
+        },
+        persist: async () => {
+          spies.persistCalls++
+          return null
+        },
+      },
+    )
+    // Committed exactly once.
+    expect(spies.sideEffectCalls).toBe(1)
+    expect(spies.resetCalls).toBe(1)
+    expect(spies.cleanupCalls).toBe(1)
+    expect(spies.persistCalls).toBe(1)
   })
 })
 

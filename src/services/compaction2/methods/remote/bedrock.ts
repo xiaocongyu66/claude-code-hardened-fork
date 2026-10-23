@@ -1,7 +1,7 @@
 // Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import type { Message } from '../../../../types/message.js'
+import { computeRemoteCut } from './index.js'
 import type { RemoteLaneRequest, RemoteLaneResult } from './index.js'
-import { supportsAnthropicServerCompaction } from './anthropic.js'
 
 /**
  * Amazon Bedrock Converse compaction lane.
@@ -31,6 +31,25 @@ export const BEDROCK_COMPACTION_EMPTY_REASON =
 
 const DEFAULT_MAX_TOKENS = 8192
 
+/** Placeholder for tool results whose text payload is empty. Converse rejects
+ * empty `text` blocks, so an omitted/empty result must not be sent verbatim. */
+export const BEDROCK_EMPTY_TOOL_RESULT_TEXT = '(no output)'
+
+/** Converse stop reasons that represent a completed completion. Anything else
+ * (`max_tokens`, `content_filtered`, `guardrail_intervened`, …) means the
+ * summary is truncated or withheld and must degrade instead of being accepted. */
+const SUCCESSFUL_STOP_REASONS = new Set(['end_turn', 'stop_sequence'])
+
+/**
+ * Bedrock Converse summaries do not use Anthropic's server-side compaction
+ * beta, so the Anthropic model catalog (Opus/Sonnet 4.6+, …) does not apply.
+ * Any Claude model reachable through Converse can be summarized; only a
+ * clearly non-Claude model id is skipped.
+ */
+export function supportsBedrockConverseCompaction(model: string): boolean {
+  return /claude[-.]/.test(model.toLowerCase())
+}
+
 export function isBedrockCompactionEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
@@ -44,7 +63,7 @@ export function isBedrockCompactionLaneAvailable(input: {
 }): boolean {
   if (!input.region || input.region.trim().length === 0) return false
   if (input.env && !isBedrockCompactionEnabled(input.env)) return false
-  return supportsAnthropicServerCompaction(input.model)
+  return supportsBedrockConverseCompaction(input.model)
 }
 
 /** Shape a Converse side request would take once a transport is available. */
@@ -53,6 +72,8 @@ export interface BedrockConverseCompactionSideRequest {
   body: Record<string, unknown>
   contentType: 'application/json'
   accept: 'application/json'
+  /** Unsupported blocks dropped from the request (non-fatal). */
+  skippedBlocks?: number
 }
 
 export type BedrockConverseContentBlock =
@@ -74,6 +95,8 @@ export interface BedrockConverseMessage {
 export interface BedrockConverseMapping {
   messages: BedrockConverseMessage[]
   unsupported?: string
+  /** Blocks with no Converse equivalent that were dropped (non-fatal). */
+  skippedBlocks?: number
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -100,14 +123,16 @@ function textOf(content: unknown): string {
  *
  * Only text, tool_use and tool_result are translated. Images are not needed
  * for a summary and image sources differ between the two APIs; reasoning
- * blocks are provider-private. `system` and `tools` are deliberately omitted:
- * `CompactionContext` carries neither, and the summary request does not need
- * the live tool schema.
+ * blocks are provider-private. Blocks with no Converse equivalent (document,
+ * web_search_tool_result, …) are skipped and counted rather than failing the
+ * whole request. `tools` is deliberately omitted: `CompactionContext` carries
+ * no tool schema and the summary request does not need it.
  */
 export function toBedrockConverseMessages(
   messages: readonly Message[],
 ): BedrockConverseMapping {
   const converted: BedrockConverseMessage[] = []
+  let skippedBlocks = 0
   const push = (
     role: 'user' | 'assistant',
     block: BedrockConverseContentBlock,
@@ -165,10 +190,18 @@ export function toBedrockConverseMessages(
               unsupported: 'bedrock-tool-result-in-assistant-message',
             }
           }
+          const resultText = textOf(block.content)
           push(role, {
             toolResult: {
               toolUseId: String(block.tool_use_id ?? ''),
-              content: [{ text: textOf(block.content) }],
+              content: [
+                {
+                  text:
+                    resultText.trim().length > 0
+                      ? resultText
+                      : BEDROCK_EMPTY_TOOL_RESULT_TEXT,
+                },
+              ],
               ...(block.is_error === true
                 ? { status: 'error' as const }
                 : { status: 'success' as const }),
@@ -181,29 +214,41 @@ export function toBedrockConverseMessages(
           // Not part of a summary request.
           break
         default:
-          // Unknown block types cannot be replayed safely.
-          return {
-            messages: [],
-            unsupported: 'bedrock-unsupported-content-block',
-          }
+          // Unknown block types (document, web_search_tool_result, …) have no
+          // Converse equivalent. Drop the block and keep the rest — a summary
+          // of an older prefix need not include every provider-private
+          // artefact.
+          skippedBlocks++
+          break
       }
     }
   }
   if (converted.length === 0) {
     return { messages: [], unsupported: BEDROCK_COMPACTION_EMPTY_REASON }
   }
-  return { messages: converted }
+  return skippedBlocks > 0
+    ? { messages: converted, skippedBlocks }
+    : { messages: converted }
 }
 
 export function buildBedrockConverseCompactionSideRequest(
   request: RemoteLaneRequest,
-  options: { maxTokens?: number } = {},
+  options: { maxTokens?: number; messages?: readonly Message[] } = {},
 ): BedrockConverseCompactionSideRequest | undefined {
-  const converted = toBedrockConverseMessages(request.ctx.messages)
+  // Summarize the cut prefix, never the full live history. Direct callers
+  // without a precomputed cut fall back to the same boundary the method uses.
+  const messages =
+    options.messages ?? request.cut?.messages ?? request.ctx.messages
+  const converted = toBedrockConverseMessages(messages)
   if (converted.unsupported) return undefined
+  const instructions = request.instructions.trim()
   return {
     modelId: request.ctx.model,
     body: {
+      // Converse has no `compaction.instructions` field; the equivalent is a
+      // system prompt that explicitly asks for a summary. Without it the model
+      // merely continues the conversation and the text is not a summary.
+      ...(instructions.length > 0 ? { system: [{ text: instructions }] } : {}),
       messages: converted.messages,
       inferenceConfig: {
         maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -211,6 +256,9 @@ export function buildBedrockConverseCompactionSideRequest(
     },
     contentType: 'application/json',
     accept: 'application/json',
+    ...(converted.skippedBlocks !== undefined
+      ? { skippedBlocks: converted.skippedBlocks }
+      : {}),
   }
 }
 
@@ -289,9 +337,18 @@ export async function runBedrockCompactionLane(
   const fetchImpl = request.transport.fetch
   if (!fetchImpl) return { skipped: BEDROCK_COMPACTION_SKIPPED_REASON }
 
-  const built = buildBedrockConverseCompactionSideRequest(request)
+  // Serialize the summarized prefix only, matching the Anthropic lane. The
+  // method computes the cut once before dispatch; a direct lane call falls
+  // back to computing it here so the request never regresses to full history.
+  const cut = request.cut ?? computeRemoteCut(request.ctx)
+  if (cut.messages.length === 0) {
+    return { skipped: BEDROCK_COMPACTION_EMPTY_REASON }
+  }
+  const built = buildBedrockConverseCompactionSideRequest(request, {
+    messages: cut.messages,
+  })
   if (!built) {
-    const mapped = toBedrockConverseMessages(request.ctx.messages)
+    const mapped = toBedrockConverseMessages(cut.messages)
     return {
       skipped: mapped.unsupported ?? BEDROCK_COMPACTION_EMPTY_REASON,
     }
@@ -351,11 +408,22 @@ export async function runBedrockCompactionLane(
       )
     }
     const payload = (await response.json()) as unknown
+    const stopReason = recordOf(payload)?.stopReason
+    // A truncated (`max_tokens`) or filtered (`content_filtered`,
+    // `guardrail_intervened`) generation is not a usable summary, even if the
+    // returned text is non-empty: degrade to the next method instead.
+    if (
+      typeof stopReason === 'string' &&
+      !SUCCESSFUL_STOP_REASONS.has(stopReason)
+    ) {
+      throw new Error(
+        `Bedrock Converse compaction stopped with reason "${stopReason}"`,
+      )
+    }
     const summary = extractBedrockConverseSummary(payload)
     if (!summary) {
       throw new Error('Bedrock Converse compaction returned no summary')
     }
-    const stopReason = recordOf(payload)?.stopReason
     return {
       summary,
       preserveData: buildBedrockPreserveData({
@@ -366,6 +434,11 @@ export async function runBedrockCompactionLane(
         ...(typeof stopReason === 'string' ? { stopReason } : {}),
         ...usageOf(payload),
       }),
+      ...(built.skippedBlocks !== undefined
+        ? {
+            warning: `bedrock-skipped-unsupported-blocks:${built.skippedBlocks}`,
+          }
+        : {}),
     }
   } finally {
     if (timer) clearTimeout(timer)

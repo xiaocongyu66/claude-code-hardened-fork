@@ -7,11 +7,13 @@ import {
 import {
   BEDROCK_COMPACTION_DISABLED_REASON,
   BEDROCK_COMPACTION_SKIPPED_REASON,
+  BEDROCK_EMPTY_TOOL_RESULT_TEXT,
   buildBedrockConverseCompactionSideRequest,
   extractBedrockConverseSummary,
   isBedrockCompactionEnabled,
   isBedrockCompactionLaneAvailable,
   runBedrockCompactionLane,
+  supportsBedrockConverseCompaction,
   toBedrockConverseMessages,
 } from '../../methods/remote/bedrock.js'
 import {
@@ -71,9 +73,21 @@ function laneRequest(overrides: {
   fetch?: RemoteFetch
   env?: Record<string, string | undefined>
   messages?: readonly Message[]
+  cut?: {
+    messages: Message[]
+    index: number
+    kept: Message[]
+    tokensAfter: number
+    cutPoint: {
+      firstKeptEntryId: string
+      tokensBefore: number
+      boundaryMessage: never
+    }
+  }
 }) {
   return {
     ctx: ctx(overrides.messages),
+    ...(overrides.cut ? { cut: overrides.cut } : {}),
     instructions: 'summarize',
     env: overrides.env ?? {
       CCH_BEDROCK_COMPACTION: '1',
@@ -124,7 +138,7 @@ describe('Bedrock compaction gate', () => {
     ).toBe(true)
   })
 
-  test('requires a region and a capable model', () => {
+  test('requires a region and a Claude model', () => {
     expect(
       isBedrockCompactionLaneAvailable({
         model: MODEL,
@@ -133,11 +147,35 @@ describe('Bedrock compaction gate', () => {
     ).toBe(false)
     expect(
       isBedrockCompactionLaneAvailable({
-        model: 'claude-sonnet-4-5',
+        model: 'meta.llama3-70b-instruct-v1:0',
         region: 'us-east-1',
         env: { CCH_BEDROCK_COMPACTION: '1' },
       }),
     ).toBe(false)
+  })
+
+  test('does not exclude Bedrock models the Anthropic beta catalog lacks', () => {
+    // The Converse lane summarizes, it does not use the Anthropic server
+    // compaction beta, so its version gate must not apply here.
+    expect(supportsBedrockConverseCompaction('claude-sonnet-4-5')).toBe(true)
+    expect(
+      supportsBedrockConverseCompaction(
+        'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      ),
+    ).toBe(true)
+    expect(
+      supportsBedrockConverseCompaction(
+        'arn:aws:bedrock:us-east-1:1:inference-profile/us.anthropic.claude-sonnet-4-6-v1:0',
+      ),
+    ).toBe(true)
+    expect(supportsBedrockConverseCompaction('gpt-5')).toBe(false)
+    expect(
+      isBedrockCompactionLaneAvailable({
+        model: 'claude-sonnet-4-5',
+        region: 'us-east-1',
+        env: { CCH_BEDROCK_COMPACTION: '1' },
+      }),
+    ).toBe(true)
   })
 })
 
@@ -205,7 +243,8 @@ describe('Converse request mapping', () => {
           {
             toolResult: {
               toolUseId: 't1',
-              content: [{ text: '' }],
+              // Converse rejects empty text blocks.
+              content: [{ text: BEDROCK_EMPTY_TOOL_RESULT_TEXT }],
               status: 'error',
             },
           },
@@ -224,17 +263,25 @@ describe('Converse request mapping', () => {
     ])
   })
 
-  test('refuses unknown blocks and empty history', () => {
-    expect(
-      toBedrockConverseMessages([userBlocks('u1', [{ type: 'mystery' }])])
-        .unsupported,
-    ).toBe('bedrock-unsupported-content-block')
+  test('skips and counts unknown blocks instead of failing', () => {
+    const mapped = toBedrockConverseMessages([
+      userBlocks('u1', [
+        { type: 'web_search_tool_result', content: [] },
+        { type: 'text', text: 'kept' },
+        { type: 'document', source: { type: 'base64' } },
+      ]),
+    ])
+    expect(mapped.unsupported).toBeUndefined()
+    expect(mapped.skippedBlocks).toBe(2)
+    expect(mapped.messages).toEqual([
+      { role: 'user', content: [{ text: 'kept' }] },
+    ])
     expect(toBedrockConverseMessages([]).unsupported).toBe(
       'bedrock-no-summarizable-messages',
     )
   })
 
-  test('builds a Converse body without system/tools', () => {
+  test('builds a Converse body that requests a summary via system', () => {
     const built = buildBedrockConverseCompactionSideRequest(
       laneRequest({ messages: [userText('u1', 'hello')] }),
       { maxTokens: 256 },
@@ -243,11 +290,36 @@ describe('Converse request mapping', () => {
     expect(built?.contentType).toBe('application/json')
     expect(built?.accept).toBe('application/json')
     expect(built?.body).toEqual({
+      system: [{ text: 'summarize' }],
       messages: [{ role: 'user', content: [{ text: 'hello' }] }],
       inferenceConfig: { maxTokens: 256 },
     })
-    expect(built?.body).not.toHaveProperty('system')
     expect(built?.body).not.toHaveProperty('toolConfig')
+  })
+
+  test('summarizes the cut prefix rather than the full history', () => {
+    const full = [
+      userText('u1', 'old one'),
+      userText('u2', 'old two'),
+      userText('u3', 'recent tail'),
+    ]
+    const built = buildBedrockConverseCompactionSideRequest({
+      ...laneRequest({ messages: full }),
+      cut: {
+        messages: [full[0]!, full[1]!],
+        index: 2,
+        kept: [full[2]!],
+        tokensAfter: 10,
+        cutPoint: {
+          firstKeptEntryId: 'u3',
+          tokensBefore: 30,
+          boundaryMessage: {} as never,
+        },
+      },
+    })
+    expect(built?.body.messages).toEqual([
+      { role: 'user', content: [{ text: 'old one' }, { text: 'old two' }] },
+    ])
   })
 })
 
@@ -317,9 +389,83 @@ describe('Bedrock compaction lane', () => {
       `https://bedrock-runtime.us-east-1.amazonaws.com/model/${encodeURIComponent(MODEL)}/converse`,
     )
     const body = JSON.parse(String(calls[0]?.init.body)) as {
+      system?: Array<{ text: string }>
       messages: unknown[]
     }
     expect(body.messages).toHaveLength(1)
+    // The summary instruction must reach the model; without it Converse only
+    // continues the conversation.
+    expect(body.system).toEqual([{ text: 'summarize' }])
+  })
+
+  test('sends the cut prefix, not the full history', async () => {
+    const full = [
+      userText('u1', 'old one'),
+      userText('u2', 'old two'),
+      userText('u3', 'recent tail'),
+    ]
+    const bodies: Array<{ messages: Array<{ content: unknown[] }> }> = []
+    await runBedrockCompactionLane(
+      laneRequest({
+        messages: full,
+        cut: {
+          messages: [full[0]!, full[1]!],
+          index: 2,
+          kept: [full[2]!],
+          tokensAfter: 10,
+          cutPoint: {
+            firstKeptEntryId: 'u3',
+            tokensBefore: 30,
+            boundaryMessage: {} as never,
+          },
+        },
+        fetch: async (_url, init) => {
+          bodies.push(JSON.parse(String(init.body)))
+          return new Response(converseResponse, { status: 200 })
+        },
+      }),
+    )
+    expect(bodies[0]?.messages).toHaveLength(2)
+    expect(JSON.stringify(bodies[0]?.messages)).not.toContain('recent tail')
+  })
+
+  test('throws when the completion stopped abnormally', async () => {
+    await expect(
+      runBedrockCompactionLane(
+        laneRequest({
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                output: {
+                  message: {
+                    role: 'assistant',
+                    content: [{ text: 'cut off' }],
+                  },
+                },
+                stopReason: 'max_tokens',
+              }),
+              { status: 200 },
+            ),
+        }),
+      ),
+    ).rejects.toThrow('stopped with reason "max_tokens"')
+  })
+
+  test('reports skipped unknown content blocks as a warning', async () => {
+    const result = await runBedrockCompactionLane(
+      laneRequest({
+        messages: [
+          userBlocks('u1', [
+            { type: 'web_search_tool_result', content: [] },
+            { type: 'text', text: 'kept' },
+          ]),
+        ],
+        fetch: async () => new Response(converseResponse, { status: 200 }),
+      }),
+    )
+    expect('skipped' in result).toBe(false)
+    if ('skipped' in result) return
+    expect(result.warning).toBe('bedrock-skipped-unsupported-blocks:1')
   })
 
   test('throws on a non-2xx response', async () => {
@@ -440,6 +586,30 @@ describe('Bedrock transport', () => {
         getBedrockConverseRuntime: () => undefined,
       }),
     ).toBeUndefined()
+  })
+
+  test('retries runtime resolution after a failed attempt', async () => {
+    let attempts = 0
+    const { runtime } = stubRuntime()
+    const transport = buildRemoteTransport({
+      provider: 'bedrock',
+      env: { AWS_REGION: 'us-east-1' },
+      getBedrockConverseRuntime: () => {
+        attempts++
+        return attempts === 1
+          ? Promise.reject(new Error('credentials unavailable'))
+          : runtime
+      },
+    })
+    expect(transport).toBeDefined()
+    const url = `${transport?.baseUrl}/model/${encodeURIComponent(MODEL)}/converse`
+    await expect(transport?.fetch(url, { method: 'POST' })).rejects.toThrow(
+      'credentials unavailable',
+    )
+    // The failed promise must not be cached: fixing credentials retries.
+    const response = await transport?.fetch(url, { method: 'POST' })
+    expect(response?.ok).toBe(true)
+    expect(attempts).toBe(2)
   })
 
   test('honors a Bedrock base URL override', () => {

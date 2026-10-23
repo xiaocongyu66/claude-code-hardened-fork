@@ -20,6 +20,7 @@ import type { PayloadRejectionEvidence } from './guards/payload.js'
 import {
   createHandoffMethod,
   type HandoffMethodDeps,
+  type HandoffSummary,
 } from './methods/handoff.js'
 import { indexMethods, resolveMethodOrder } from './methods/registry.js'
 import {
@@ -157,6 +158,12 @@ export interface CompactionV2Options {
     outcome: CompactionOutcome,
     messages: readonly Message[],
   ) => Promise<unknown>
+  /** Compacting query source, forwarded to commit-time cleanup. */
+  querySource?: QuerySource
+  /** Test seam for the handoff commit-time transcript writes. */
+  applySideEffects?: (messages: readonly Message[]) => void
+  /** Test seams for the handoff commit-time reset/cleanup. */
+  applyDeps?: ApplyCompactionOutcomeDeps
 }
 
 export interface CompactionV2Result {
@@ -503,6 +510,26 @@ export async function runCompactionV2(
           outcome,
           messages: [...request.messages],
         }
+      } else if (outcome.method === 'handoff') {
+        // Handoff always summarizes with `deferApply: true` (its internal
+        // runner must not write while the outcome can still be guard-blocked).
+        // The outcome was accepted here, so commit those writes now.
+        applyLegacyOutcomeSideEffects(
+          outcome,
+          request.messages,
+          options.querySource,
+          {
+            ...(options.applySideEffects
+              ? { applySideEffects: options.applySideEffects }
+              : {}),
+            ...(options.applyDeps ?? {}),
+          },
+        )
+        if (options.persist) {
+          await options.persist(outcome, request.messages)
+        } else if (feature('COMPACTION_V2')) {
+          await persistCompactionEntry(outcome, request.messages)
+        }
       } else if (options.persist) {
         await options.persist(outcome, request.messages)
       } else if (feature('COMPACTION_V2')) {
@@ -597,16 +624,18 @@ export interface ApplyCompactionOutcomeDeps {
   ) => Promise<unknown>
   resetLastSummarizedMessageId?: (id: undefined) => void
   cleanup?: (querySource?: QuerySource) => void
+  applySideEffects?: (messages: readonly Message[]) => void
 }
 
 /**
  * Commit a preview outcome: apply the same effects the direct path performs
  * inside `compactConversation` / the soft runner, then journal the entry.
  *
- * Soft compactions own the legacy transcript/session writes (session metadata,
- * transcript segment, post-compaction marker, summarized-id reset, cleanup);
- * other compacted methods only journal. Call exactly once per committed
- * preview — discarded previews must never reach this function.
+ * Soft and legacy-runner handoff compactions own the legacy transcript/session
+ * writes (session metadata, transcript segment, post-compaction marker,
+ * summarized-id reset, cleanup); other compacted methods only journal. Call
+ * exactly once per committed preview — discarded previews must never reach
+ * this function.
  */
 export async function applyCompactionOutcome(
   outcome: CompactionOutcome | undefined,
@@ -615,20 +644,55 @@ export async function applyCompactionOutcome(
 ): Promise<CompactionSessionEntry | null> {
   if (outcome?.kind !== 'compacted') return null
   const messages = ctx.messages ?? []
-  if (outcome.method === 'soft') {
-    const applySideEffects =
-      ctx.applySideEffects ?? loadCompact().applyCompactConversationSideEffects
-    applySideEffects(messages)
-    const reset =
-      deps.resetLastSummarizedMessageId ??
-      loadSessionMemory().setLastSummarizedMessageId
-    reset(undefined)
-    const cleanup =
-      deps.cleanup ?? loadPostCompactCleanup().runPostCompactCleanup
-    cleanup(ctx.querySource)
+  if (isLegacyBackedOutcome(outcome)) {
+    applyLegacyOutcomeSideEffects(outcome, messages, ctx.querySource, {
+      ...(ctx.applySideEffects
+        ? { applySideEffects: ctx.applySideEffects }
+        : {}),
+      ...deps,
+    })
   }
   const persist = deps.persist ?? persistCompactionEntry
   return (await persist(outcome, messages)) as CompactionSessionEntry | null
+}
+
+/**
+ * Methods whose accepted outcome owns the legacy transcript/session writes.
+ * Soft is direct; handoff reuses the same runner with `deferApply: true`, so
+ * its writes are committed only once the outcome survives the guard.
+ */
+function isLegacyBackedOutcome(
+  outcome: Extract<CompactionOutcome, { kind: 'compacted' }>,
+): boolean {
+  if (outcome.method === 'soft') return true
+  if (outcome.method !== 'handoff') return false
+  // Only a handoff that actually ran the legacy runner owns transcript
+  // writes; a custom summarizer that returned a bare document does not.
+  const candidate = outcome.preserveData?.legacyCompactionResult
+  return (
+    typeof candidate === 'object' &&
+    candidate !== null &&
+    'boundaryMarker' in candidate &&
+    'summaryMessages' in candidate
+  )
+}
+
+function applyLegacyOutcomeSideEffects(
+  outcome: Extract<CompactionOutcome, { kind: 'compacted' }>,
+  messages: readonly Message[],
+  querySource: QuerySource | undefined,
+  deps: ApplyCompactionOutcomeDeps,
+): void {
+  if (!isLegacyBackedOutcome(outcome)) return
+  const applySideEffects =
+    deps.applySideEffects ?? loadCompact().applyCompactConversationSideEffects
+  applySideEffects(messages)
+  const reset =
+    deps.resetLastSummarizedMessageId ??
+    loadSessionMemory().setLastSummarizedMessageId
+  reset(undefined)
+  const cleanup = deps.cleanup ?? loadPostCompactCleanup().runPostCompactCleanup
+  cleanup(querySource)
 }
 
 function resolveCompactionSummary(
@@ -833,7 +897,7 @@ export async function runCompactionV2ForQuery(
   const remote = isRemoteCompactionEnabled()
     ? createQueryRemoteDeps(request.model)
     : null
-  const soft = createLegacySoftDeps({
+  const softInput: LegacySoftDepsInput = {
     toolUseContext: request.toolUseContext,
     cacheSafeParams: request.cacheSafeParams,
     querySource: request.querySource,
@@ -841,7 +905,8 @@ export async function runCompactionV2ForQuery(
     autoCompactThreshold,
     tracking: request.tracking,
     deferApply: request.deferApply,
-  })
+  }
+  const soft = createLegacySoftDeps(softInput)
 
   const result = await runCompactionV2(
     {
@@ -861,9 +926,10 @@ export async function runCompactionV2ForQuery(
     },
     {
       soft,
-      handoff: createLegacyHandoffDeps(soft, request.instructions),
+      handoff: createLegacyHandoffDeps(softInput, request.instructions),
       shake: createShakeReducer(),
       remote,
+      querySource: request.querySource,
       // Promotion is a decision only; the caller owns the model switch/retry.
       // Both knobs are set so the settings read is skipped once promotion is
       // spent and the gate still applies to every trigger.
@@ -958,13 +1024,14 @@ export async function runManualCompactionV2(
   const { getEffectiveContextWindowSize, getAutoCompactThreshold } =
     loadAutoCompact()
   const tokenCount = defaultCountTokens(request.messages)
-  const soft = createLegacySoftDeps({
+  const softInput: LegacySoftDepsInput = {
     toolUseContext: request.toolUseContext,
     cacheSafeParams: request.cacheSafeParams,
     querySource: request.querySource,
     tokenCount,
     autoCompactThreshold: getAutoCompactThreshold(request.model),
-  })
+  }
+  const soft = createLegacySoftDeps(softInput)
   const result = await runCompactionV2(
     {
       model: request.model,
@@ -979,8 +1046,9 @@ export async function runManualCompactionV2(
     },
     {
       soft,
-      handoff: createLegacyHandoffDeps(soft, request.instructions),
+      handoff: createLegacyHandoffDeps(softInput, request.instructions),
       shake: createShakeReducer(),
+      querySource: request.querySource,
       // `/compact` must return a legacy CompactionResult. A non-soft compacted
       // outcome without one falls through to soft (which always carries it).
       canAcceptOutcome: outcome =>
@@ -1045,13 +1113,14 @@ export async function runIdleCompactionV2(
     return { compacted: false, trace: [] }
   }
   const tokenCount = defaultCountTokens(request.messages)
-  const soft = createLegacySoftDeps({
+  const softInput: LegacySoftDepsInput = {
     toolUseContext: request.toolUseContext,
     cacheSafeParams: request.cacheSafeParams,
     querySource: request.querySource,
     tokenCount,
     autoCompactThreshold: getAutoCompactThreshold(request.model),
-  })
+  }
+  const soft = createLegacySoftDeps(softInput)
   const result = await runCompactionV2(
     {
       model: request.model,
@@ -1069,7 +1138,8 @@ export async function runIdleCompactionV2(
     },
     {
       soft,
-      handoff: createLegacyHandoffDeps(soft),
+      handoff: createLegacyHandoffDeps(softInput),
+      querySource: request.querySource,
       resolveWindowTokens: getEffectiveContextWindowSize,
       compactionSettings,
     },
@@ -1290,15 +1360,22 @@ function extractLegacySummaryText(result: CompactionResult): string {
  * Handoff reuses the soft runner so there is no second API client. The runner
  * receives the handoff prompt as `/compact` custom instructions; its summary
  * messages become the handoff document.
+ *
+ * The internal run is ALWAYS compute-only (`deferApply: true`): the outcome can
+ * still be rejected by the progress guard, and a rejected handoff must leave
+ * zero transcript/hook/cleanup trace. The full legacy result travels back on
+ * the outcome's `preserveData` so an accepted handoff keeps `messagesToKeep`,
+ * attachments and hook results, and the orchestrator commits its side effects
+ * exactly once.
  */
-function createLegacyHandoffDeps(
-  soft: SoftMethodDeps | null | undefined,
+export function createLegacyHandoffDeps(
+  input: LegacySoftDepsInput,
   instructions?: string,
-): HandoffMethodDeps | null {
-  if (!soft) return null
+): HandoffMethodDeps {
+  const soft = createLegacySoftDeps({ ...input, deferApply: true })
   return {
     ...(instructions ? { instructions } : {}),
-    summarize: async (ctx, request) => {
+    summarize: async (ctx, request): Promise<HandoffSummary> => {
       const run = await soft.run({
         messages: [...ctx.messages],
         instructions: request.instructions,
@@ -1309,7 +1386,7 @@ function createLegacyHandoffDeps(
       if (summary.length === 0) {
         throw new Error('handoff summary was empty')
       }
-      return summary
+      return { document: summary, legacyCompactionResult: run.result }
     },
   }
 }

@@ -241,7 +241,15 @@ function bedrockConverseFetch(
 ): RemoteFetch {
   let runtimePromise: Promise<BedrockConverseRuntime> | undefined
   const runtime = (): Promise<BedrockConverseRuntime> => {
-    runtimePromise ??= getRuntime()
+    if (!runtimePromise) {
+      const attempt = getRuntime()
+      runtimePromise = attempt
+      // A failed client/credential resolution must not be cached forever:
+      // after the user fixes credentials the next compaction retries.
+      attempt.catch(() => {
+        if (runtimePromise === attempt) runtimePromise = undefined
+      })
+    }
     return runtimePromise
   }
   return async (input, init) => {
@@ -366,20 +374,47 @@ export function buildRemoteTransport(
   }
 
   if (input.provider === 'bedrock') {
-    // An injected getter is authoritative; the default path only exists when
-    // the Bedrock Runtime SDK is installed. Either way the client/credential
-    // resolution happens lazily on first request.
+    const baseUrl = resolveBedrockBaseUrl({ baseUrl: input.baseUrl, env })
+    // An injected getter is authoritative and keeps tests/embedders detached
+    // from whether the SDK happens to be installed. Resolve it once so a
+    // missing runtime deterministically disables the transport (the type also
+    // permits an async getter, which stays lazy).
     const injected = input.getBedrockConverseRuntime
-    if (!injected && !isBedrockRuntimeSdkAvailable()) return undefined
+    if (injected) {
+      const initial = injected()
+      if (initial === undefined) return undefined
+      if (typeof (initial as { then?: unknown }).then === 'function') {
+        const initialPromise = initial as Promise<
+          BedrockConverseRuntime | undefined
+        >
+        let pending: Promise<BedrockConverseRuntime | undefined> | undefined =
+          initialPromise
+        initialPromise.catch(() => {
+          if (pending === initialPromise) pending = undefined
+        })
+        return {
+          fetch: bedrockConverseFetch(async () => {
+            pending ??= Promise.resolve(injected())
+            const runtime = await pending
+            if (!runtime) {
+              throw new Error('Bedrock Converse runtime unavailable')
+            }
+            return runtime
+          }),
+          baseUrl,
+        }
+      }
+      const runtime = initial as BedrockConverseRuntime
+      return { fetch: bedrockConverseFetch(async () => runtime), baseUrl }
+    }
+    // No injected runtime: probe the SDK only when the lane is explicitly
+    // enabled. `CCH_BEDROCK_COMPACTION !== '1'` must not pay a module
+    // resolution probe on every compaction pass.
+    if (env.CCH_BEDROCK_COMPACTION !== '1') return undefined
+    if (!isBedrockRuntimeSdkAvailable()) return undefined
     return {
-      fetch: bedrockConverseFetch(async () => {
-        const runtime = injected
-          ? await injected()
-          : await defaultBedrockConverseRuntime()
-        if (!runtime) throw new Error('Bedrock Converse runtime unavailable')
-        return runtime
-      }),
-      baseUrl: resolveBedrockBaseUrl({ baseUrl: input.baseUrl, env }),
+      fetch: bedrockConverseFetch(defaultBedrockConverseRuntime),
+      baseUrl,
     }
   }
 

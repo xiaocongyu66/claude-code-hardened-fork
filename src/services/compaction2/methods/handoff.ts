@@ -34,12 +34,26 @@ export interface HandoffSummaryRequest {
   instructions: string
 }
 
+/**
+ * Result of a handoff summarization. Custom/`run`-less embedders may return a
+ * bare string; the orchestrator's legacy runner also returns the full
+ * `CompactionResult` so the committed outcome keeps `messagesToKeep`,
+ * attachments and hook results instead of rebuilding a summary-only result.
+ */
+export interface HandoffSummary {
+  document: string
+  /** Full legacy CompactionResult (type-erased to keep contracts independent). */
+  legacyCompactionResult?: unknown
+}
+
+export type HandoffSummaryValue = string | HandoffSummary
+
 export interface HandoffMethodDeps {
   /** Produce the handoff document. Injected by the orchestrator (soft path). */
   summarize?(
     ctx: CompactionContext,
     request: HandoffSummaryRequest,
-  ): Promise<string>
+  ): Promise<HandoffSummaryValue>
   /** `/compact [instructions]` focus text appended to the base prompt. */
   instructions?: string
   isAvailable?(ctx: CompactionContext): boolean
@@ -92,10 +106,11 @@ export function createHandoffMethod(
             reason: 'handoff-empty-prefix',
           }
         }
+        const summarized = await summarize(ctx, {
+          instructions: buildHandoffInstructions(deps?.instructions),
+        })
         const document = (
-          await summarize(ctx, {
-            instructions: buildHandoffInstructions(deps?.instructions),
-          })
+          typeof summarized === 'string' ? summarized : summarized.document
         ).trim()
         if (document.length === 0) {
           return {
@@ -109,6 +124,10 @@ export function createHandoffMethod(
           version: HANDOFF_DOCUMENT_VERSION,
           document,
         }
+        const legacyCompactionResult =
+          typeof summarized === 'string'
+            ? undefined
+            : summarized.legacyCompactionResult
         return {
           kind: 'compacted',
           method: 'handoff',
@@ -116,7 +135,16 @@ export function createHandoffMethod(
           tokensSaved: Math.max(0, cut.cutPoint.tokensBefore - cut.tokensAfter),
           headroomTokens: threshold > 0 ? threshold - cut.tokensAfter : 0,
           summary: document,
-          preserveData: { [HANDOFF_PRESERVE_KEY]: preserve },
+          preserveData: {
+            [HANDOFF_PRESERVE_KEY]: preserve,
+            // The legacy runner's full result carries messagesToKeep,
+            // attachments and hookResults. Keeping it lets
+            // `getLegacyCompactionResult` return it directly rather than
+            // synthesizing a summary-only result that drops the retained tail.
+            ...(legacyCompactionResult !== undefined
+              ? { legacyCompactionResult }
+              : {}),
+          },
         }
       } catch (error) {
         return {
