@@ -133,13 +133,46 @@ impl TranscriptSearch {
             .iter()
             .take(max_visible)
             .enumerate()
+            .map(|(index, found)| self.result_line(index + 1, total, found, width))
+            .collect()
+    }
+
+    /// Overlay rows for the active query, each flagged when it is the current
+    /// match.
+    ///
+    /// Text has the same `N/M  <matched line summary>` shape as
+    /// [`rows`](Self::rows), but the list comes from the active query and the
+    /// `bool` tells the overlay which row to highlight. At most `max_visible`
+    /// rows are produced, truncated to `width` display columns.
+    pub fn overlay_lines(&self, width: usize, max_visible: usize) -> Vec<(String, bool)> {
+        if width == 0 || max_visible == 0 {
+            return Vec::new();
+        }
+        let total = self.matches.len();
+        self.matches
+            .iter()
+            .take(max_visible)
+            .enumerate()
             .map(|(index, found)| {
-                let prefix = format!("{}/{}  ", index + 1, total);
-                let available = width.saturating_sub(display_width(&prefix));
-                let summary = truncate_to_width(self.texts[found.row_index].trim(), available);
-                truncate_to_width(&format!("{prefix}{summary}"), width)
+                (
+                    self.result_line(index + 1, total, found, width),
+                    self.current == Some(index),
+                )
             })
             .collect()
+    }
+
+    /// Row index of the current match, for scrolling the transcript.
+    pub fn jump_target(&self) -> Option<usize> {
+        self.current().map(|found| found.row_index)
+    }
+
+    /// Render one `N/M  <summary>` result line, truncated to `width` columns.
+    fn result_line(&self, number: usize, total: usize, found: &Match, width: usize) -> String {
+        let prefix = format!("{number}/{total}  ");
+        let available = width.saturating_sub(display_width(&prefix));
+        let summary = truncate_to_width(self.texts[found.row_index].trim(), available);
+        truncate_to_width(&format!("{prefix}{summary}"), width)
     }
 
     /// Scan every non-blank row for `query`, case-insensitively.
@@ -466,6 +499,107 @@ mod tests {
         assert!(search.rows("", 40, 10).is_empty());
         assert!(search.rows("alpha", 0, 10).is_empty());
         assert!(search.rows("alpha", 40, 0).is_empty());
+    }
+
+    #[test]
+    fn overlay_lines_are_empty_without_matches() {
+        let rows = [row("alpha"), row("beta")];
+        let mut search = TranscriptSearch::new(&rows);
+        assert!(search.overlay_lines(40, 10).is_empty());
+
+        search.set_query("zzz");
+        assert!(search.overlay_lines(40, 10).is_empty());
+        assert!(search.overlay_lines(0, 10).is_empty());
+        assert!(search.overlay_lines(40, 0).is_empty());
+    }
+
+    #[test]
+    fn overlay_lines_mark_the_current_match() {
+        let rows = [row("foo one"), row("foo two"), row("foo three")];
+        let mut search = TranscriptSearch::new(&rows);
+        search.set_query("foo");
+
+        assert_eq!(
+            search.overlay_lines(40, 10),
+            vec![
+                ("1/3  foo one".to_owned(), true),
+                ("2/3  foo two".to_owned(), false),
+                ("3/3  foo three".to_owned(), false),
+            ]
+        );
+        assert_eq!(
+            search.overlay_lines(40, 2),
+            vec![
+                ("1/3  foo one".to_owned(), true),
+                ("2/3  foo two".to_owned(), false),
+            ]
+        );
+
+        search.next();
+        let selected: Vec<bool> = search
+            .overlay_lines(40, 10)
+            .into_iter()
+            .map(|(_, selected)| selected)
+            .collect();
+        assert_eq!(selected, vec![false, true, false]);
+
+        // Walking back reaches the first match, then wraps to the last.
+        search.prev();
+        let selected: Vec<bool> = search
+            .overlay_lines(40, 10)
+            .into_iter()
+            .map(|(_, selected)| selected)
+            .collect();
+        assert_eq!(selected, vec![true, false, false]);
+
+        search.prev();
+        let selected: Vec<bool> = search
+            .overlay_lines(40, 10)
+            .into_iter()
+            .map(|(_, selected)| selected)
+            .collect();
+        assert_eq!(selected, vec![false, false, true]);
+    }
+
+    #[test]
+    fn overlay_lines_truncate_cjk_by_display_width() {
+        let rows = [row("你好世界你好世界")];
+        let mut search = TranscriptSearch::new(&rows);
+        search.set_query("世界");
+
+        let lines = search.overlay_lines(12, 10);
+        assert_eq!(
+            lines,
+            vec![
+                ("1/2  你好世…".to_owned(), true),
+                ("2/2  你好世…".to_owned(), false),
+            ]
+        );
+        for (line, _) in &lines {
+            assert!(display_width(line) <= 12);
+            assert!(line.is_char_boundary(line.len()));
+        }
+    }
+
+    #[test]
+    fn jump_target_tracks_navigation() {
+        let rows = [row("foo"), row("bar foo"), row("foo baz")];
+        let mut search = TranscriptSearch::new(&rows);
+        assert_eq!(search.jump_target(), None);
+
+        search.set_query("foo");
+        assert_eq!(search.jump_target(), Some(0));
+        search.next();
+        assert_eq!(search.jump_target(), Some(1));
+        search.next();
+        assert_eq!(search.jump_target(), Some(2));
+        search.next();
+        assert_eq!(search.jump_target(), Some(0));
+        search.prev();
+        assert_eq!(search.jump_target(), Some(2));
+
+        search.set_query("zzz");
+        assert_eq!(search.jump_target(), None);
     }
 
     #[test]
