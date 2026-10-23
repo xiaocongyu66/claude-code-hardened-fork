@@ -225,6 +225,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cch-tui-panel"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-core",
+ "cch-tui-proto",
+ "cch-tui-ui",
+ "serde_json",
+]
+
+[[package]]
 name = "cch-tui-proto"
 version = "0.1.0"
 dependencies = [

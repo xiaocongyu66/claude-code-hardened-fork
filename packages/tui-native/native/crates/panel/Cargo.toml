@@ -1,0 +1,12 @@
+[package]
+name = "cch-tui-panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cch-tui-core = { path = "../core" }
+cch-tui-ui = { path = "../ui" }
+cch-tui-proto = { path = "../proto" }
+serde_json.workspace = true
