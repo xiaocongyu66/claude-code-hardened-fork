@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import type { Message } from '../../../../types/message.js'
-import { countTokensPreciseForMessages } from '../../../tokenEstimation.js'
+import { countTokensPrecise } from '../../../tokenEstimation.js'
 import { TOKENIZER_DIR_ENV, resetTokenizerCache } from '../../tokens/index.js'
 import { countContextTokens } from '../../tokens/contextCount.js'
 
@@ -278,12 +278,10 @@ describe('countContextTokens fallback chain', () => {
       const messages = [userMessage('hello world')]
       const result = countContextTokens(messages, MODEL)
       expect(result.source).toBe('fallback')
-      // Text-only fallback matches the legacy cl100k/rough message walk.
-      expect(result.tokens).toBe(
-        countTokensPreciseForMessages(
-          messages as Parameters<typeof countTokensPreciseForMessages>[0],
-        ),
-      )
+      // With no tokenizer data the tail reaches the cl100k counter (which
+      // itself degrades to the rough estimate when the native module is
+      // absent) — the same primitive, not a separate message-level estimate.
+      expect(result.tokens).toBe(countTokensPrecise('hello world'))
     } finally {
       process.env[TOKENIZER_DIR_ENV] = saved
       resetTokenizerCache()

@@ -145,6 +145,23 @@ export function buildOpenAiCompactionInput(
       continue
     }
     if (!Array.isArray(raw)) continue
+    // A message made only of reasoning blocks has nothing the OpenAI wire
+    // format can carry. Skipping them silently would drop the message and
+    // produce an empty summary request, so refuse it instead. Messages that
+    // mix reasoning with text/tool blocks keep the mappable parts.
+    const blockTypes = raw.map(item => recordOf(item)?.type)
+    const hasThinking = blockTypes.some(
+      type => type === 'thinking' || type === 'redacted_thinking',
+    )
+    const hasMappable = blockTypes.some(
+      type =>
+        type !== undefined &&
+        type !== 'thinking' &&
+        type !== 'redacted_thinking',
+    )
+    if (hasThinking && !hasMappable) {
+      return { input: [], unsupported: 'openai-unsupported-thinking-block' }
+    }
     const blocks: Array<Record<string, unknown>> = []
     for (const item of raw) {
       const block = recordOf(item)
