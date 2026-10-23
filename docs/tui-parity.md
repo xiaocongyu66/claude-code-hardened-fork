@@ -66,4 +66,4 @@ Verified against the Ink app; each row names the source of truth.
 | Diff colours | `theme.ts` `diffAdded`/`diffRemoved` used as **background** | `bg(diff_added_bg/diff_removed_bg)` | ✅ |
 | Palette values | `theme.ts` dark/light tables | exact RGB, line references in `crates/theme` | ✅ |
 | Message spacing | `marginTop={addMargin ? 1 : 0}` (`AssistantTextMessage.tsx:186`) | blank separator rows in both modes | ✅ |
-| Status line | `StatusLine.tsx` | model · session · ctx% · tasks | 🟡 layout differs |
+| Status line | `StatusLine.tsx` | model · session · ctx% · tasks · queue · spinner | 🟡 subset: Ink also shows cache hit rate, rate-limit windows and token budget, which the stream-json engine does not expose (Ink is settings-gated too) |
