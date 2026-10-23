@@ -525,6 +525,9 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
             let lead = if line_index == 0 { prefix } else { cont };
             let mut text = if lead.is_empty() {
                 styled.text.clone()
+            } else if line_index == 0 && row.style == RowStyle::Assistant {
+                // Ink reserves a 2-column gutter: bullet + one space.
+                format!("{lead} {}", styled.text)
             } else {
                 format!("{lead}{}", styled.text)
             };
@@ -1563,6 +1566,14 @@ mod tests {
             .decode(payload)
             .expect("base64");
         assert_eq!(String::from_utf8(decoded).expect("utf8"), "hello");
+    }
+
+    #[test]
+    fn frozen_assistant_rows_keep_the_gutter_space() {
+        let rows = vec![Row::new(RowStyle::Assistant, "hello")];
+        let lines = rows_to_lines(&rows, 40, &Theme::dark(), true);
+        let bullet = message_bullet();
+        assert_eq!(lines[0].to_string(), format!("{bullet} hello"));
     }
 
     #[test]
