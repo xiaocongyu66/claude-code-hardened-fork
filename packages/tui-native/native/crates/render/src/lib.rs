@@ -73,6 +73,14 @@ impl TerminalSession {
         self.theme = theme;
     }
 
+    /// Select a built-in theme by name (`dark`/`light`); unknown names keep
+    /// the current theme.
+    pub fn set_theme_name(&mut self, name: &str) {
+        if name.eq_ignore_ascii_case("dark") || name.eq_ignore_ascii_case("light") {
+            self.theme = Theme::from_name(name);
+        }
+    }
+
     /// Freeze `rows` into the terminal scrollback.
     ///
     /// Rows are wrapped to the current width first, so the inserted block has

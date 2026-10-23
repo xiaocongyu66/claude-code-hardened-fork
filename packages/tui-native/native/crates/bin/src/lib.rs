@@ -112,6 +112,9 @@ pub fn run_with_deadline(
     } else {
         TerminalSession::inline(DEFAULT_INLINE_HEIGHT)?
     };
+    if let Ok(name) = std::env::var("CCH_TUI_THEME") {
+        session.set_theme_name(&name);
+    }
     let mut view = ChatView::new();
     let mut engine: Option<EngineProcess> = None;
 
