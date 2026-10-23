@@ -80,6 +80,50 @@ impl CommandPalette {
         }
     }
 
+    /// Build an inactive palette from the engine's `init` command list.
+    ///
+    /// `slash_commands` carries names only, so every spec starts with no
+    /// description or argument hint. Richer metadata can be layered in later
+    /// with [`Self::merge_specs`].
+    pub fn from_slash_commands(names: &[String]) -> Self {
+        Self::new(
+            names
+                .iter()
+                .map(|name| CommandSpec::new(name.trim_start_matches('/')))
+                .collect(),
+        )
+    }
+
+    /// Merge richer command metadata into the palette, keyed by name.
+    ///
+    /// Names are compared case-insensitively with any leading slash ignored.
+    /// Duplicates keep the existing spec: a description or argument hint that
+    /// is already present is never overwritten, and a hidden command stays
+    /// hidden. Missing fields are filled from the incoming spec. New names are
+    /// appended in the order given.
+    pub fn merge_specs(&mut self, specs: Vec<CommandSpec>) {
+        for mut spec in specs {
+            spec.name = spec.name.trim_start_matches('/').to_string();
+            let key = spec.name.to_lowercase();
+            match self
+                .specs
+                .iter_mut()
+                .find(|existing| existing.name.trim_start_matches('/').to_lowercase() == key)
+            {
+                Some(existing) => {
+                    if existing.description.is_none() {
+                        existing.description = spec.description;
+                    }
+                    if existing.argument_hint.is_none() {
+                        existing.argument_hint = spec.argument_hint;
+                    }
+                    existing.hidden |= spec.hidden;
+                }
+                None => self.specs.push(spec),
+            }
+        }
+    }
+
     /// Update the input line. The palette only becomes (and stays) active when
     /// the input starts with `/`; any other input deactivates it. Changing the
     /// input resets the selection to the first match.
@@ -460,5 +504,84 @@ mod tests {
             rows.iter().any(|row| row.text.starts_with("> /cmd11")),
             "selected row must be in the window: {rows:?}"
         );
+    }
+
+    #[test]
+    fn from_slash_commands_builds_name_only_specs() {
+        let mut palette = CommandPalette::from_slash_commands(&[
+            "compact".to_string(),
+            "/diff".to_string(),
+            "help".to_string(),
+        ]);
+        assert!(!palette.is_active());
+        assert_eq!(
+            palette
+                .specs
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect::<Vec<_>>(),
+            ["compact", "diff", "help"]
+        );
+        assert!(palette.specs.iter().all(|spec| {
+            spec.description.is_none() && spec.argument_hint.is_none() && !spec.hidden
+        }));
+
+        palette.set_query("/");
+        assert_eq!(names(&palette), ["compact", "diff", "help"]);
+    }
+
+    #[test]
+    fn merge_specs_dedupes_by_name_and_keeps_existing_metadata() {
+        let mut palette = CommandPalette::new(vec![
+            CommandSpec::new("compact")
+                .with_description("Keep me")
+                .hide(),
+            CommandSpec::new("help"),
+        ]);
+        palette.merge_specs(vec![
+            CommandSpec::new("/COMPACT")
+                .with_description("Replace me")
+                .with_argument_hint("<mode>"),
+            CommandSpec::new("help").with_description("Show help"),
+            CommandSpec::new("diff").with_argument_hint("<file>"),
+            CommandSpec::new("diff").with_description("Show changes"),
+        ]);
+
+        let merged: Vec<_> = palette
+            .specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.name.as_str(),
+                    spec.description.as_deref(),
+                    spec.argument_hint.as_deref(),
+                    spec.hidden,
+                )
+            })
+            .collect();
+        assert_eq!(
+            merged,
+            [
+                ("compact", Some("Keep me"), Some("<mode>"), true),
+                ("help", Some("Show help"), None, false),
+                ("diff", Some("Show changes"), Some("<file>"), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_specs_applies_hidden_flag_to_init_commands() {
+        let mut palette =
+            CommandPalette::from_slash_commands(&["secret".to_string(), "status".to_string()]);
+        palette.merge_specs(vec![
+            CommandSpec::new("secret").hide(),
+            CommandSpec::new("status").with_description("Show status"),
+        ]);
+
+        assert!(palette.specs[0].hidden);
+        assert_eq!(palette.specs[1].description.as_deref(), Some("Show status"));
+
+        palette.set_query("/");
+        assert_eq!(names(&palette), ["status"]);
     }
 }
