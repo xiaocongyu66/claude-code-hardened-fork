@@ -41,6 +41,18 @@ impl PermissionOption {
     }
 }
 
+/// One row of the `ExitPlanMode` approval dialog. The order matches the
+/// rendered rows: auto-accept, manual approval, keep planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlanDecision {
+    /// Approve and switch the session to `acceptEdits`.
+    AutoAcceptEdits,
+    /// Approve but keep asking before edits.
+    ManualApprove,
+    /// Reject the plan and stay in plan mode.
+    KeepPlanning,
+}
+
 /// The terminal answer to a permission request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PermissionDecision {
@@ -166,6 +178,16 @@ impl PermissionDialog {
             .or_else(|| self.input.get("content").and_then(Value::as_str))
     }
 
+    /// Row selected in an `ExitPlanMode` dialog. Indices outside the three
+    /// plan rows clamp to [`PlanDecision::KeepPlanning`].
+    pub fn plan_decision(&self) -> PlanDecision {
+        match self.selected {
+            0 => PlanDecision::AutoAcceptEdits,
+            1 => PlanDecision::ManualApprove,
+            _ => PlanDecision::KeepPlanning,
+        }
+    }
+
     pub fn input(&self) -> &Extra {
         &self.input
     }
@@ -241,16 +263,20 @@ impl PermissionDialog {
         if self.closed {
             return None;
         }
-        let decision = match self.selected_option() {
-            PermissionOption::AllowOnce => PermissionDecision::Allow {
-                updated_input: self.input.clone(),
-                updated_permissions: Vec::new(),
-            },
-            PermissionOption::AllowAlways => PermissionDecision::Allow {
-                updated_input: self.input.clone(),
-                updated_permissions: self.suggestions.clone(),
-            },
-            PermissionOption::Deny => PermissionDecision::deny("Denied by user"),
+        let decision = if self.kind() == PermissionKind::ExitPlanMode {
+            self.resolve_plan()
+        } else {
+            match self.selected_option() {
+                PermissionOption::AllowOnce => PermissionDecision::Allow {
+                    updated_input: self.input.clone(),
+                    updated_permissions: Vec::new(),
+                },
+                PermissionOption::AllowAlways => PermissionDecision::Allow {
+                    updated_input: self.input.clone(),
+                    updated_permissions: self.suggestions.clone(),
+                },
+                PermissionOption::Deny => PermissionDecision::deny("Denied by user"),
+            }
         };
         self.decision = Some(decision.clone());
         self.closed = true;
@@ -288,7 +314,46 @@ impl PermissionDialog {
     }
 
     fn option_count(&self) -> usize {
-        if self.suggestions.is_empty() { 2 } else { 3 }
+        if self.kind() == PermissionKind::ExitPlanMode {
+            // The plan rows are fixed, regardless of engine suggestions.
+            3
+        } else if self.suggestions.is_empty() {
+            2
+        } else {
+            3
+        }
+    }
+
+    /// Build the terminal decision for the highlighted plan row.
+    fn resolve_plan(&self) -> PermissionDecision {
+        match self.plan_decision() {
+            PlanDecision::AutoAcceptEdits => PermissionDecision::Allow {
+                updated_input: self.input.clone(),
+                updated_permissions: self.accept_edits_update(),
+            },
+            PlanDecision::ManualApprove => PermissionDecision::Allow {
+                updated_input: self.input.clone(),
+                updated_permissions: Vec::new(),
+            },
+            PlanDecision::KeepPlanning => {
+                PermissionDecision::deny("User rejected the plan and kept planning")
+            }
+        }
+    }
+
+    /// The request's `setMode`/`acceptEdits` suggestion, when the engine
+    /// supplied one. Without it the approval stays an allow but carries no
+    /// mode change, so the session keeps asking before edits.
+    fn accept_edits_update(&self) -> Vec<Value> {
+        self.suggestions
+            .iter()
+            .find(|suggestion| {
+                suggestion.get("type").and_then(Value::as_str) == Some("setMode")
+                    && suggestion.get("mode").and_then(Value::as_str) == Some("acceptEdits")
+            })
+            .cloned()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -526,6 +591,106 @@ mod tests {
 
         let non_string = plan_request(Extra::from_iter([("plan".into(), json!(42))]));
         assert_eq!(PermissionDialog::new("req-1", non_string).plan_text(), None);
+    }
+
+    fn plan_dialog(suggestions: Option<Vec<Value>>) -> PermissionDialog {
+        let mut request = request(suggestions);
+        request.tool_name = "ExitPlanMode".into();
+        PermissionDialog::new("req-1", request)
+    }
+
+    fn accept_edits_suggestion() -> Value {
+        json!({
+            "type": "setMode",
+            "mode": "acceptEdits",
+            "destination": "session",
+        })
+    }
+
+    #[test]
+    fn plan_decisions_map_the_selected_row() {
+        let mut dialog = plan_dialog(None);
+        assert_eq!(dialog.plan_decision(), PlanDecision::AutoAcceptEdits);
+        dialog.select_next();
+        assert_eq!(dialog.plan_decision(), PlanDecision::ManualApprove);
+        dialog.select_next();
+        assert_eq!(dialog.plan_decision(), PlanDecision::KeepPlanning);
+        assert_eq!(dialog.selected(), 2, "all three plan rows are reachable");
+        dialog.select_next();
+        assert_eq!(dialog.plan_decision(), PlanDecision::AutoAcceptEdits);
+        dialog.select_previous();
+        assert_eq!(dialog.plan_decision(), PlanDecision::KeepPlanning);
+    }
+
+    #[test]
+    fn auto_accept_edits_reuses_the_accept_edits_suggestion() {
+        let mut dialog = plan_dialog(Some(vec![suggestion(), accept_edits_suggestion()]));
+        let decision = dialog.resolve().expect("first resolve");
+        let PermissionDecision::Allow {
+            updated_input,
+            updated_permissions,
+        } = &decision
+        else {
+            panic!("expected allow, got {decision:?}");
+        };
+        assert_eq!(updated_input.get("command"), Some(&json!("ls -la")));
+        assert_eq!(
+            updated_permissions,
+            &[accept_edits_suggestion()],
+            "only the setMode/acceptEdits suggestion is reused"
+        );
+    }
+
+    #[test]
+    fn auto_accept_edits_without_a_suggestion_still_allows() {
+        let mut dialog = plan_dialog(None);
+        let decision = dialog.resolve().expect("first resolve");
+        let PermissionDecision::Allow {
+            updated_permissions,
+            ..
+        } = &decision
+        else {
+            panic!("expected allow, got {decision:?}");
+        };
+        assert!(updated_permissions.is_empty(), "degrades to a plain allow");
+        let response = decision.to_response();
+        assert_eq!(response.get("behavior"), Some(&json!("allow")));
+        assert_eq!(response.get("updatedPermissions"), None);
+    }
+
+    #[test]
+    fn manual_approve_allows_without_mode_changes() {
+        let mut dialog = plan_dialog(Some(vec![accept_edits_suggestion()]));
+        dialog.select_next();
+        assert_eq!(dialog.plan_decision(), PlanDecision::ManualApprove);
+        let decision = dialog.resolve().expect("manual approve");
+        let PermissionDecision::Allow {
+            updated_permissions,
+            ..
+        } = &decision
+        else {
+            panic!("expected allow, got {decision:?}");
+        };
+        assert!(updated_permissions.is_empty());
+    }
+
+    #[test]
+    fn keep_planning_denies_with_the_plan_message() {
+        let mut dialog = plan_dialog(None);
+        dialog.select_next();
+        dialog.select_next();
+        let decision = dialog.resolve().expect("keep planning");
+        assert_eq!(
+            decision,
+            PermissionDecision::deny("User rejected the plan and kept planning")
+        );
+        assert_eq!(
+            decision.to_response(),
+            json!({
+                "behavior": "deny",
+                "message": "User rejected the plan and kept planning",
+            })
+        );
     }
 
     #[test]
