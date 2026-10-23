@@ -365,9 +365,15 @@ describe('handoff legacy result preservation', () => {
         messages,
         windowTokens: 200_000,
         tokenCount: 180_000,
-        // Keep the newest one or two messages → handoff saves only 10k and
-        // fails the 80% progress guard (170k > 136k).
-        settings: { methodOrder: ['handoff', 'soft'], keepRecentTokens: 100 },
+        // Keep exactly the newest message: `computeRemoteCut` always accepts
+        // the first (newest) message once `keepRecentTokens > 0`, so a value
+        // below one message's estimate still keeps a non-empty summarized
+        // prefix. Token estimates here are ~13 each, so a large keepRecent
+        // would retain all three and handoff would skip as an empty prefix
+        // instead of producing a guard-blocked outcome.
+        // Handoff then saves only 10k (kept tail counts as 170k) and fails
+        // the 80% progress guard (170k > 136k).
+        settings: { methodOrder: ['handoff', 'soft'], keepRecentTokens: 1 },
       },
       {
         methods: [
@@ -397,9 +403,12 @@ describe('handoff legacy result preservation', () => {
     )
 
     expect(result.outcome?.method).toBe('soft')
-    expect(result.trace.some(entry => entry.outcome === 'guard-blocked')).toBe(
-      true,
-    )
+    expect(
+      result.trace.some(
+        entry =>
+          entry.method === 'handoff' && entry.outcome === 'guard-blocked',
+      ),
+    ).toBe(true)
     // The summary was computed compute-only; nothing was applied.
     expect(spies.compactCalls).toBe(1)
     expect(spies.seenDefer).toBe(true)

@@ -425,8 +425,12 @@ describe('Bedrock compaction lane', () => {
         },
       }),
     )
-    expect(bodies[0]?.messages).toHaveLength(2)
-    expect(JSON.stringify(bodies[0]?.messages)).not.toContain('recent tail')
+    // Converse requires alternating roles, so two consecutive user messages
+    // in the prefix are merged into one message with two text blocks.
+    const sent = JSON.stringify(bodies[0]?.messages)
+    expect(sent).toContain('old one')
+    expect(sent).toContain('old two')
+    expect(sent).not.toContain('recent tail')
   })
 
   test('throws when the completion stopped abnormally', async () => {
