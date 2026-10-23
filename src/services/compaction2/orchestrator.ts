@@ -436,10 +436,8 @@ export interface CompactionV2QueryResult {
   wasCompacted: boolean
   compactionResult?: CompactionResult
   consecutiveFailures?: number
-  /** Mechanical reduction (shake/prune) to use for this request only. */
+  /** Mechanical reduction (shake) to use for this request only. */
   reducedMessages?: Message[]
-  /** Tokens removed by that reduction (for stale-usage adjustments). */
-  tokensSaved?: number
 }
 
 /**
@@ -454,12 +452,24 @@ export async function runCompactionV2ForQuery(
     getEffectiveContextWindowSize,
     getAutoCompactThreshold,
     isAutoCompactEnabled,
+    MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
   } = loadAutoCompact()
   // Same guards as legacy shouldAutoCompact: never compact inside the compact
   // or session-memory forks (the compact fork runs query() with
   // querySource='compact' and would otherwise re-enter this branch forever),
   // and honor DISABLE_COMPACT / DISABLE_AUTO_COMPACT / autoCompactEnabled.
   if (!isAutoCompactEnabled()) return { wasCompacted: false }
+  // Circuit breaker: stop retrying a compaction that has failed this many
+  // turns in a row, matching autoCompactIfNeeded.
+  if (
+    (request.tracking?.consecutiveFailures ?? 0) >=
+    MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+  ) {
+    return {
+      wasCompacted: false,
+      consecutiveFailures: request.tracking?.consecutiveFailures,
+    }
+  }
   if (
     request.querySource === 'compact' ||
     request.querySource === 'session_memory'
@@ -529,7 +539,6 @@ export async function runCompactionV2ForQuery(
     return {
       wasCompacted: false,
       reducedMessages: result.outcome.messages,
-      tokensSaved: result.outcome.tokensSaved,
     }
   }
   const legacyResult = getLegacyCompactionResult(result.outcome)

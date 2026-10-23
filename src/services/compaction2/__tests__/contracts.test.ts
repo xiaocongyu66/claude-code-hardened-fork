@@ -25,4 +25,8 @@ describe('resolveReserveTokens', () => {
     expect(resolveReserveTokens(19_000)).toBe(2_850)
     expect(resolveReserveTokens(20_000)).toBe(16_384)
   })
+
+  test('an explicit reserve is never reduced', () => {
+    expect(resolveReserveTokens(16_000, 16_384)).toBe(16_384)
+  })
 })

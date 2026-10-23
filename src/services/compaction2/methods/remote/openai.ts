@@ -1,5 +1,6 @@
 // Ported from oh-my-pi (MIT). See THIRD_PARTY_NOTICES.md in this directory.
 import type { Message } from '../../../../types/message.js'
+import { isAbortError } from '../../../../utils/errors.js'
 import type { RemoteLaneRequest, RemoteLaneResult } from './index.js'
 
 /**
@@ -673,8 +674,9 @@ export async function runOpenAiCompactionLane(
   try {
     return await runV2(request, built.input)
   } catch (error) {
-    // Never swallow an abort (user ESC) into a duplicate V1 request.
-    if (error instanceof Error && error.name === 'AbortError') throw error
+    // Never swallow an abort (user ESC) into a duplicate V1 request. DOMException
+    // from undici/bun is not an Error instance, so use the shared helper.
+    if (isAbortError(error)) throw error
     return runV1(request, built.input)
   }
 }
