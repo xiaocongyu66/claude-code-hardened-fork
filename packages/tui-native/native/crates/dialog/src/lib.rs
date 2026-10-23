@@ -39,6 +39,6 @@ mod permission;
 mod queue;
 mod state;
 
-pub use permission::{PermissionDecision, PermissionDialog, PermissionOption};
+pub use permission::{PermissionDecision, PermissionDialog, PermissionKind, PermissionOption};
 pub use queue::{Queue, QueuePriority, QueuedInput};
 pub use state::{InteractionPhase, InteractionState};

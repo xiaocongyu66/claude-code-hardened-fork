@@ -9,6 +9,16 @@
 use cch_tui_proto::{CanUseToolRequest, ControlRequest, Extra};
 use serde_json::{Map, Value, json};
 
+/// Which specialized layout a permission dialog should use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum PermissionKind {
+    /// The regular tool-call approval dialog.
+    #[default]
+    Generic,
+    /// Plan approval: show the plan text and the plan-specific options.
+    ExitPlanMode,
+}
+
 /// One selectable row in a permission dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PermissionOption {
@@ -135,6 +145,25 @@ impl PermissionDialog {
 
     pub fn tool_name(&self) -> &str {
         &self.tool_name
+    }
+
+    /// Which specialized layout this dialog should use. `ExitPlanMode` is
+    /// recognized case-insensitively.
+    pub fn kind(&self) -> PermissionKind {
+        if self.tool_name.eq_ignore_ascii_case("ExitPlanMode") {
+            PermissionKind::ExitPlanMode
+        } else {
+            PermissionKind::Generic
+        }
+    }
+
+    /// Plan body carried by an `ExitPlanMode` request: `input.plan`, falling
+    /// back to `input.content`. `None` when neither holds a string.
+    pub fn plan_text(&self) -> Option<&str> {
+        self.input
+            .get("plan")
+            .and_then(Value::as_str)
+            .or_else(|| self.input.get("content").and_then(Value::as_str))
     }
 
     pub fn input(&self) -> &Extra {
@@ -431,6 +460,72 @@ mod tests {
         assert!(!timed_out.timeout());
         assert_eq!(timed_out.resolve(), None);
         assert_eq!(timed_out.cancel(), None);
+    }
+
+    fn plan_request(input: Extra) -> CanUseToolRequest {
+        CanUseToolRequest {
+            tool_name: "ExitPlanMode".into(),
+            input,
+            ..request(None)
+        }
+    }
+
+    #[test]
+    fn recognizes_exit_plan_mode_case_insensitively_only() {
+        for name in ["ExitPlanMode", "exitplanmode", "EXITPLANMODE"] {
+            let mut req = request(None);
+            req.tool_name = name.into();
+            assert_eq!(
+                PermissionDialog::new("req-1", req).kind(),
+                PermissionKind::ExitPlanMode,
+                "tool name {name:?}"
+            );
+        }
+
+        assert_eq!(make_dialog(None).kind(), PermissionKind::Generic);
+        let mut v2 = request(None);
+        v2.tool_name = "ExitPlanModeV2".into();
+        assert_eq!(
+            PermissionDialog::new("req-1", v2).kind(),
+            PermissionKind::Generic,
+            "only the exact ExitPlanMode name is specialized"
+        );
+    }
+
+    #[test]
+    fn plan_text_prefers_plan_then_content() {
+        let plan = plan_request(Extra::from_iter([(
+            "plan".into(),
+            json!("# Plan\n\n1. Ship it"),
+        )]));
+        assert_eq!(
+            PermissionDialog::new("req-1", plan).plan_text(),
+            Some("# Plan\n\n1. Ship it")
+        );
+
+        let content = plan_request(Extra::from_iter([(
+            "content".into(),
+            json!("plan from content"),
+        )]));
+        assert_eq!(
+            PermissionDialog::new("req-1", content).plan_text(),
+            Some("plan from content")
+        );
+
+        let both = plan_request(Extra::from_iter([
+            ("plan".into(), json!("preferred")),
+            ("content".into(), json!("fallback")),
+        ]));
+        assert_eq!(
+            PermissionDialog::new("req-1", both).plan_text(),
+            Some("preferred")
+        );
+
+        let missing = plan_request(Extra::new());
+        assert_eq!(PermissionDialog::new("req-1", missing).plan_text(), None);
+
+        let non_string = plan_request(Extra::from_iter([("plan".into(), json!(42))]));
+        assert_eq!(PermissionDialog::new("req-1", non_string).plan_text(), None);
     }
 
     #[test]
