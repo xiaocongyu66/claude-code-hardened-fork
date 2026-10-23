@@ -1635,7 +1635,9 @@ async function* queryLoop(
       // prevents a spiral and the error surfaces.
       const isWithheldMedia =
         mediaRecoveryEnabled &&
-        reactiveCompact?.isWithheldMediaSizeError(lastMessage as Message)
+        reactiveCompact?.isWithheldMediaSizeError(
+          lastMessage as AssistantMessage,
+        )
       if (isWithheld413) {
         // A context-promotion retry that overflowed again: promotion is
         // single-shot, so revert to the original model and surface the
