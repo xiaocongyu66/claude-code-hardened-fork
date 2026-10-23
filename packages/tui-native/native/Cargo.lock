@@ -157,6 +157,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cch-tui-actions"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-ui",
+]
+
+[[package]]
 name = "cch-tui-bin"
 version = "0.1.0"
 dependencies = [
