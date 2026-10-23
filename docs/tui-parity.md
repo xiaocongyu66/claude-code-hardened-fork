@@ -24,12 +24,12 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | collapse 3 lines; inline is frozen |
 | Task / agent panel | `TaskListV2.tsx`, `components/tasks/*` | ✅ `crates/panel` | status line + fullscreen sidebar |
 | Spinner / activity | `Spinner.tsx` | ✅ status line | frame advances while a turn runs |
-| Plan mode | `ExitPlanModePermissionRequest/*` | ⬜ | renderer can reuse the dialog overlay |
+| Plan mode | `ExitPlanModePermissionRequest/*` | 🟡 view ready | `Ready to code?` + plan body; decision semantics in flight |
 | Queued input display | `REPL.tsx` prompt queue | ✅ status line | `queued N`; prompts flush on `result` |
-| Sticky prompt | `VirtualMessageList.tsx` | ⬜ | fullscreen-only chrome |
-| Global search | `GlobalSearchDialog.tsx` | ⬜ | needs transcript search model |
+| Sticky prompt | `VirtualMessageList.tsx` | ✅ fullscreen | `set_sticky_prompt` + `↓ N new` pill |
+| Global search | `GlobalSearchDialog.tsx` | 🟡 model ready (`crates/search`) | wiring in flight (Ctrl+F) |
 | @file completion | `fileSuggestions.ts` | ⬜ | engine-side index exists; TUI needs a picker |
-| Slash palette | slash command menu | ⬜ | needs command metadata from `init` |
+| Slash palette | slash command menu | 🟡 model ready (`crates/palette`) | wiring in flight |
 | Copy to clipboard | OSC52 / platform tools | 🟡 OSC52 only | Alt+C copies the last assistant message |
 | Image paste | `imagePaste.ts`, `useClipboardImageHint` | ⛔ | no terminal image protocol; needs a clipboard image path |
 | Diff dialog | `diff/DiffDialog.tsx` | ⬜ | after Edit-tool diff wiring |
