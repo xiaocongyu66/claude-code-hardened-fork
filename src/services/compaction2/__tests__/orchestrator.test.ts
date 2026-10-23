@@ -269,4 +269,56 @@ describe('runCompactionV2 method chain', () => {
     expect(seen[0]?.method).toBe('soft')
     expect(seen[0]?.trigger).toBe('manual')
   })
+
+  test('circuit-open skips API methods but keeps local reducers', async () => {
+    const calls: string[] = []
+    const methods: CompactionMethod[] = [
+      method(
+        'soft',
+        true,
+        {
+          kind: 'compacted',
+          method: 'soft',
+          cutPoint: {
+            firstKeptEntryId: 'u1',
+            tokensBefore: OVER_THRESHOLD,
+            boundaryMessage: {} as never,
+          },
+          tokensSaved: 100_000,
+          headroomTokens: 0,
+        },
+        calls,
+      ),
+      method(
+        'shake',
+        true,
+        {
+          kind: 'reduced',
+          method: 'shake',
+          messages: [message],
+          tokensSaved: 50_000,
+          headroomTokens: 0,
+        },
+        calls,
+      ),
+    ]
+
+    const result = await runCompactionV2(
+      {
+        model: 'test-model',
+        trigger: 'threshold',
+        messages: [message],
+        windowTokens: WINDOW,
+        tokenCount: OVER_THRESHOLD,
+        settings: { methodOrder: ['soft', 'shake'] },
+      },
+      { methods, canRunMethod: name => name === 'shake' },
+    )
+
+    expect(calls).toEqual(['shake'])
+    expect(result.outcome?.kind).toBe('reduced')
+    expect(result.trace.some(entry => entry.reason === 'circuit-open')).toBe(
+      true,
+    )
+  })
 })

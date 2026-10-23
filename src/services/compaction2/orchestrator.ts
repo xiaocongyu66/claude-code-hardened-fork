@@ -98,6 +98,8 @@ export interface CompactionV2Options {
   onTrace?: (entry: DecisionTraceEntry) => void
   /** Reject a compacted outcome the caller cannot render (e.g. no legacy result). */
   canAcceptOutcome?: (outcome: CompactionOutcome) => boolean
+  /** Gate a method before it runs (e.g. circuit-breaker skips API methods). */
+  canRunMethod?: (name: CompactionMethodName) => boolean
 }
 
 export interface CompactionV2Result {
@@ -299,6 +301,14 @@ export async function runCompactionV2(
       })
       continue
     }
+    if (options.canRunMethod && !options.canRunMethod(name)) {
+      record({
+        method: name,
+        outcome: 'skipped',
+        reason: 'circuit-open',
+      })
+      continue
+    }
     if (
       triggerDecision.payload?.excludeMediaMethods &&
       name === 'snapcompact'
@@ -461,17 +471,12 @@ export async function runCompactionV2ForQuery(
   // querySource='compact' and would otherwise re-enter this branch forever),
   // and honor DISABLE_COMPACT / DISABLE_AUTO_COMPACT / autoCompactEnabled.
   if (!isAutoCompactEnabled()) return { wasCompacted: false }
-  // Circuit breaker: stop retrying a compaction that has failed this many
-  // turns in a row, matching autoCompactIfNeeded.
-  if (
+  // Circuit breaker: once the API-backed methods have failed this many turns
+  // in a row, skip them. Local reducers (shake/snapcompact) stay available —
+  // they need no model call and are the only recovery left.
+  const circuitOpen =
     (request.tracking?.consecutiveFailures ?? 0) >=
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
-  ) {
-    return {
-      wasCompacted: false,
-      consecutiveFailures: request.tracking?.consecutiveFailures,
-    }
-  }
   if (
     request.querySource === 'compact' ||
     request.querySource === 'session_memory'
@@ -533,6 +538,8 @@ export async function runCompactionV2ForQuery(
       canAcceptOutcome: outcome =>
         outcome.kind !== 'compacted' ||
         getLegacyCompactionResult(outcome) !== undefined,
+      canRunMethod: name =>
+        !circuitOpen || name === 'snapcompact' || name === 'shake',
       resolveWindowTokens: getEffectiveContextWindowSize,
     },
   )
@@ -542,6 +549,8 @@ export async function runCompactionV2ForQuery(
       wasCompacted: false,
       reducedMessages: result.outcome.messages,
       tokensSaved: result.outcome.tokensSaved,
+      // A successful local reduction resets the failure streak.
+      consecutiveFailures: 0,
     }
   }
   const legacyResult = getLegacyCompactionResult(result.outcome)
