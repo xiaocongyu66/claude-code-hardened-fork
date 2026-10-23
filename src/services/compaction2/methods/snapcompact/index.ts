@@ -4,6 +4,13 @@
  * PNG frames that a vision model reads back. The pass is local and
  * deterministic — no LLM call, no API key, no network.
  *
+ * When the archive is mostly non-ASCII (>5% of serialized characters), the
+ * bundled ASCII-only bitmap font would corrupt it to `?` noise. Instead of
+ * skipping, the method falls back to a text archive: the same cut point and
+ * serializer budgets, but only the head/tail text is kept (no PNG frames).
+ * Consumers branch on the persisted `mode` and use `text` alone when there
+ * are no frames.
+ *
  * Gating (CCH has no reliable modality metadata):
  * - `CCH_SNAPCOMPACT_ENABLE=1` must be set, AND
  * - the caller must explicitly declare image input support
@@ -27,6 +34,7 @@ import { FIVE_BY_EIGHT_FONT, type FontProvider } from './font.js'
 import {
   DEFAULT_FRAME_DATA_BYTES_BUDGET,
   frameDataBytes,
+  geometry,
   planArchive,
   resolveMaxFrames,
   resolveProfile,
@@ -76,12 +84,8 @@ export interface SnapcompactMethodDeps {
 /** Persisted archive key under `CompactionOutcome.preserveData`. */
 export const SNAPCOMPACT_PRESERVE_KEY = 'snapcompact'
 
-export interface SnapcompactArchive {
+interface SnapcompactArchiveBase {
   version: 1
-  family: ProviderFamily
-  shape: string
-  frameSize: number
-  frames: RenderedFrame[]
   totalChars: number
   truncatedChars: number
   /** Bounded source text re-rendered on later compactions. */
@@ -90,6 +94,23 @@ export interface SnapcompactArchive {
   textTail: string
   summary: string
 }
+
+export interface SnapcompactImageArchive extends SnapcompactArchiveBase {
+  mode: 'image'
+  family: ProviderFamily
+  shape: string
+  frameSize: number
+  frames: RenderedFrame[]
+}
+
+/** Text-only fallback for archives the bitmap font cannot render. */
+export interface SnapcompactTextArchive extends SnapcompactArchiveBase {
+  mode: 'text'
+}
+
+export type SnapcompactArchive =
+  | SnapcompactImageArchive
+  | SnapcompactTextArchive
 
 function resolveEnv(
   deps: SnapcompactMethodDeps,
@@ -180,7 +201,10 @@ function alignCutForToolPairs(
   return aligned
 }
 
-/** ASCII-only font: refuse to archive text it would corrupt to '?'. */
+/** Serialized non-ASCII share above which frames become '?' noise. */
+const NON_ASCII_RATIO_LIMIT = 0.05
+
+/** Share of serialized characters above U+007F. */
 function nonAsciiRatio(text: string): number {
   if (text.length === 0) return 0
   let nonAscii = 0
@@ -276,9 +300,10 @@ function buildArchive(
   profile: FamilyProfile,
   frames: RenderedFrame[],
   summary: string,
-): SnapcompactArchive {
+): SnapcompactImageArchive {
   return {
     version: 1,
+    mode: 'image',
     family: profile.family,
     shape: profile.high.name,
     frameSize: profile.frameSize,
@@ -289,6 +314,102 @@ function buildArchive(
     textHead: plan.textHead,
     textTail: plan.textTail,
     summary,
+  }
+}
+
+interface TextEdges {
+  textHead: string
+  textTail: string
+  keptText: string
+  truncatedChars: number
+}
+
+/**
+ * Text-mode char budget: the caller's token budget (4 chars/token) when
+ * given, otherwise the two verbatim edge regions an image archive keeps.
+ */
+function textArchiveCharBudget(
+  deps: SnapcompactMethodDeps,
+  ctx: CompactionContext,
+  profile: FamilyProfile,
+): number {
+  const tokenBudget = resolveTokenBudget(deps, ctx)
+  if (tokenBudget !== undefined && tokenBudget > 0) {
+    return Math.max(2, Math.floor(tokenBudget * 4))
+  }
+  return Math.max(2, 2 * geometry(profile.high).capacity)
+}
+
+/** Keep the oldest and newest slices within `budgetChars`, eliding the middle. */
+function splitTextEdges(text: string, budgetChars: number): TextEdges {
+  if (text.length <= budgetChars) {
+    return { textHead: text, textTail: '', keptText: text, truncatedChars: 0 }
+  }
+  const headChars = Math.ceil(budgetChars / 2)
+  const tailChars = budgetChars - headChars
+  const textHead = text.slice(0, headChars)
+  const textTail = tailChars > 0 ? text.slice(text.length - tailChars) : ''
+  return {
+    textHead,
+    textTail,
+    keptText: textHead + textTail,
+    truncatedChars: text.length - textHead.length - textTail.length,
+  }
+}
+
+/** Text-only archive: bounded source text, no fabricated frames. */
+function buildTextArchive(
+  edges: TextEdges,
+  summary: string,
+): SnapcompactTextArchive {
+  return {
+    version: 1,
+    mode: 'text',
+    text: edges.keptText,
+    textHead: edges.textHead,
+    textTail: edges.textTail,
+    summary,
+    totalChars: edges.keptText.length,
+    truncatedChars: edges.truncatedChars,
+  }
+}
+
+function buildCutPoint(
+  ctx: CompactionContext,
+  kept: readonly Message[],
+  archived: readonly Message[],
+  tokensBefore: number,
+): CutPoint {
+  const firstKeptEntryId =
+    (kept[0] as { uuid?: string } | undefined)?.uuid ??
+    (archived[archived.length - 1] as { uuid?: string } | undefined)?.uuid ??
+    ''
+  return {
+    firstKeptEntryId,
+    tokensBefore,
+    boundaryMessage: createBoundaryMessage(ctx.trigger, tokensBefore),
+  }
+}
+
+function compactedOutcome(
+  ctx: CompactionContext,
+  cutPoint: CutPoint,
+  tokensSaved: number,
+  summary: string,
+  archive: SnapcompactArchive,
+): CompactionOutcome {
+  const afterTokens = Math.max(0, cutPoint.tokensBefore - tokensSaved)
+  const threshold = ctx.settings.thresholdTokens
+  return {
+    kind: 'compacted',
+    method: 'snapcompact',
+    cutPoint,
+    tokensSaved,
+    headroomTokens: threshold === undefined ? 0 : threshold - afterTokens,
+    summary,
+    preserveData: {
+      [SNAPCOMPACT_PRESERVE_KEY]: archive,
+    },
   }
 }
 
@@ -350,15 +471,53 @@ export function createSnapcompactMethod(
           archived,
           deps.serializeOptions,
         )
+        const tokensBefore = ctx.tokenCount(ctx.messages)
+        const archivedTokens = ctx.tokenCount(archived)
+        const cutPoint = buildCutPoint(ctx, kept, archived, tokensBefore)
+
         // The bundled 5x8 bitmap font is ASCII-only; rendering CJK/emoji
-        // would silently turn the archive into '?' noise. Skip instead.
-        if (nonAsciiRatio(serialized) > 0.05) {
-          return {
-            kind: 'skipped',
-            method: 'snapcompact',
-            reason: 'snapcompact-non-ascii-unsupported',
+        // would silently turn the archive into '?' noise. Fall back to a
+        // text-only archive instead of dropping the session.
+        if (nonAsciiRatio(serialized) > NON_ASCII_RATIO_LIMIT) {
+          if (ctx.abortSignal?.aborted) {
+            throw new Error('snapcompact-aborted')
           }
+          if (serialized.trim().length === 0) {
+            return {
+              kind: 'skipped',
+              method: 'snapcompact',
+              reason: 'snapcompact-empty-archive',
+            }
+          }
+          const edges = splitTextEdges(
+            serialized,
+            textArchiveCharBudget(deps, ctx, profile),
+          )
+          const summary =
+            deps.summary !== undefined
+              ? `${deps.summary} [snapcompact text mode]`
+              : `[snapcompact text archive] ${edges.keptText.length} chars kept, ` +
+                `${edges.truncatedChars} chars elided.`
+          const textTokens = Math.ceil(
+            (edges.keptText.length + summary.length) / 4,
+          )
+          const tokensSaved = Math.max(0, archivedTokens - textTokens)
+          if (tokensSaved <= 0) {
+            return {
+              kind: 'skipped',
+              method: 'snapcompact',
+              reason: 'snapcompact-no-savings',
+            }
+          }
+          return compactedOutcome(
+            ctx,
+            cutPoint,
+            tokensSaved,
+            summary,
+            buildTextArchive(edges, summary),
+          )
         }
+
         const normalized = normalizeForFrame(serialized)
         if (normalized.length === 0) {
           return {
@@ -388,8 +547,6 @@ export function createSnapcompactMethod(
           }
         }
 
-        const tokensBefore = ctx.tokenCount(ctx.messages)
-        const archivedTokens = ctx.tokenCount(archived)
         const summary =
           deps.summary ??
           `[snapcompact archive] ${frames.length} frame(s) (${profile.family}), ` +
@@ -410,31 +567,13 @@ export function createSnapcompactMethod(
           }
         }
 
-        const firstKeptEntryId =
-          (kept[0] as { uuid?: string } | undefined)?.uuid ??
-          (archived[archived.length - 1] as { uuid?: string } | undefined)
-            ?.uuid ??
-          ''
-        const cutPoint: CutPoint = {
-          firstKeptEntryId,
-          tokensBefore,
-          boundaryMessage: createBoundaryMessage(ctx.trigger, tokensBefore),
-        }
-        const afterTokens = Math.max(0, tokensBefore - tokensSaved)
-        const threshold = ctx.settings.thresholdTokens
-        const archive = buildArchive(plan, profile, frames, summary)
-
-        return {
-          kind: 'compacted',
-          method: 'snapcompact',
+        return compactedOutcome(
+          ctx,
           cutPoint,
           tokensSaved,
-          headroomTokens: threshold === undefined ? 0 : threshold - afterTokens,
           summary,
-          preserveData: {
-            [SNAPCOMPACT_PRESERVE_KEY]: archive,
-          },
-        }
+          buildArchive(plan, profile, frames, summary),
+        )
       } catch (error) {
         return {
           kind: 'failed',
