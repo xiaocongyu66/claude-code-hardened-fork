@@ -223,6 +223,7 @@ version = "0.1.0"
 dependencies = [
  "cch-tui-ui",
  "pulldown-cmark",
+ "unicode-width",
 ]
 
 [[package]]

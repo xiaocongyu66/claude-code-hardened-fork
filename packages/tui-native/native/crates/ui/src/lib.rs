@@ -27,6 +27,10 @@ pub enum RowStyle {
     Blockquote,
     /// A horizontal rule.
     Rule,
+    /// Header row of a Markdown table.
+    TableHeader,
+    /// Body row or header separator of a Markdown table.
+    TableRow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
