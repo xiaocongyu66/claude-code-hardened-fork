@@ -549,6 +549,11 @@ export interface CompactionV2QueryRequest {
   tracking?: CompactionV2Tracking
   /** Trigger tuning (e.g. midTurnEnabled). Defaults match DEFAULT_COMPACTION_SETTINGS. */
   settings?: Partial<CompactionSettings>
+  /**
+   * Set false to suppress context promotion (e.g. after the one-shot
+   * promotion retry already ran) so an overflow compacts instead.
+   */
+  allowPromotion?: boolean
 }
 
 export interface CompactionV2QueryResult {
@@ -557,6 +562,8 @@ export interface CompactionV2QueryResult {
   consecutiveFailures?: number
   /** Mechanical reduction (shake) to use for this request only. */
   reducedMessages?: Message[]
+  /** Context-promotion decision from the overflow trigger, when applicable. */
+  promotion?: PromotionResult
 }
 
 /**
@@ -649,8 +656,9 @@ export async function runCompactionV2ForQuery(
       }),
       shake: createShakeReducer(),
       remote,
-      // Promotion is a decision only for now; W8 owns the model switch/retry.
-      promotion: createQueryPromotion(),
+      // Promotion is a decision only; the caller owns the model switch/retry.
+      promotion:
+        request.allowPromotion === false ? null : createQueryPromotion(),
       // The query loop only understands the legacy CompactionResult; let an
       // unrenderable remote/snapcompact outcome fall through to soft.
       canAcceptOutcome: outcome =>
@@ -668,11 +676,16 @@ export async function runCompactionV2ForQuery(
       reducedMessages: result.outcome.messages,
       // A successful local reduction resets the failure streak.
       consecutiveFailures: 0,
+      promotion: result.promotion,
     }
   }
   const legacyResult = getLegacyCompactionResult(result.outcome)
   if (legacyResult) {
-    return { wasCompacted: true, compactionResult: legacyResult }
+    return {
+      wasCompacted: true,
+      compactionResult: legacyResult,
+      promotion: result.promotion,
+    }
   }
   if (result.shouldCompact) {
     // A threshold pass was needed but no method produced a usable result.
@@ -681,9 +694,10 @@ export async function runCompactionV2ForQuery(
     return {
       wasCompacted: false,
       consecutiveFailures: (request.tracking?.consecutiveFailures ?? 0) + 1,
+      promotion: result.promotion,
     }
   }
-  return { wasCompacted: false }
+  return { wasCompacted: false, promotion: result.promotion }
 }
 
 export interface ManualCompactionV2Request {

@@ -462,6 +462,16 @@ async function* queryLoop(
   /* eslint-enable @typescript-eslint/no-require-imports */
   const compactionV2Loop = compactionV2LoopModule?.createLoopCompactionState()
 
+  // COMPACTION_V2 context promotion is single-shot per query: the overflow
+  // path may switch to a larger-window model once and retry the same turn.
+  // `promotionAttempt` survives the retry so a second overflow reverts to the
+  // original model; `promotionRetryInFlight` marks the one request that
+  // follows the switch (cleared as soon as that request settles).
+  let promotionAttempt:
+    | { originalModel: string; targetModel: string; originalError: Message }
+    | undefined
+  let promotionRetryInFlight = false
+
   // Snapshot immutable env/statsig/session state once at entry. See QueryConfig
   // for what's included and why feature() gates are intentionally excluded.
   const config = buildQueryConfig()
@@ -1564,6 +1574,17 @@ async function* queryLoop(
       }
     }
 
+    // The promotion retry applies to exactly the request that follows the
+    // model switch. Snapshot the marker before handling this request's
+    // outcome, then clear it: a success or tool follow-up means the retry
+    // itself succeeded, so later overflows must not be mistaken for its
+    // failure.
+    let promotionRetryThisIteration = false
+    if (feature('COMPACTION_V2')) {
+      promotionRetryThisIteration = promotionRetryInFlight
+      promotionRetryInFlight = false
+    }
+
     if (!needsFollowUp) {
       const lastMessage = assistantMessages.at(-1)
 
@@ -1588,6 +1609,39 @@ async function* queryLoop(
         mediaRecoveryEnabled &&
         reactiveCompact?.isWithheldMediaSizeError(lastMessage as Message)
       if (isWithheld413) {
+        // A context-promotion retry that overflowed again: promotion is
+        // single-shot, so revert to the original model and surface the
+        // original error instead of compacting or retrying a second time.
+        if (promotionRetryThisIteration && promotionAttempt) {
+          /* eslint-disable @typescript-eslint/no-require-imports */
+          const { decidePromotionRetry } =
+            require('./services/compaction2/triggers/promotion.js') as typeof import('./services/compaction2/triggers/promotion.js')
+          /* eslint-enable @typescript-eslint/no-require-imports */
+          const decision = decidePromotionRetry({
+            currentModel: toolUseContext.options.mainLoopModel,
+            attempt: promotionAttempt,
+            retryFailed: true,
+          })
+          if (decision.kind === 'revert') {
+            toolUseContext.options.mainLoopModel = decision.originalModel
+            logEvent('tengu_context_promotion_retry_failed', {
+              from_model:
+                decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              to_model:
+                decision.originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              querySource:
+                querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              queryChainId: queryChainIdForAnalytics,
+              queryDepth: queryTracking.depth,
+            })
+            yield promotionAttempt.originalError
+            void executeStopFailureHooks(
+              promotionAttempt.originalError,
+              toolUseContext,
+            )
+            return { reason: 'prompt_too_long' }
+          }
+        }
         // First: drain all staged context-collapses. Gated on the PREVIOUS
         // transition not being collapse_drain_retry — if we already drained
         // and the retry still 413'd, fall through to reactive compact.
@@ -1660,10 +1714,74 @@ async function* queryLoop(
                 },
                 querySource,
                 tracking,
+                // Promotion is single-shot: after an attempt (successful or
+                // not) the overflow path may only compact.
+                allowPromotion: !promotionAttempt,
               })
             } catch (error) {
               logError(error)
               overflowResult = { wasCompacted: false }
+            }
+            // Context promotion comes before compaction: the overflow trigger
+            // reports a larger-window model and withholds the compact result.
+            // Switch the request model in place and retry this same turn once.
+            const promotion = overflowResult.promotion
+            if (promotion) {
+              /* eslint-disable @typescript-eslint/no-require-imports */
+              const { decidePromotionRetry } =
+                require('./services/compaction2/triggers/promotion.js') as typeof import('./services/compaction2/triggers/promotion.js')
+              /* eslint-enable @typescript-eslint/no-require-imports */
+              const decision = decidePromotionRetry({
+                currentModel: toolUseContext.options.mainLoopModel,
+                promotion,
+                attempt: promotionAttempt,
+              })
+              if (decision.kind === 'retry') {
+                const originalModel = decision.originalModel
+                toolUseContext.options.mainLoopModel = decision.targetModel
+                // Rebuild the request scaffolding for the new model. Tools can
+                // depend on the active model/MCP state; the assembled system
+                // prompt and cache-safe params are rebuilt from this context at
+                // the top of the next iteration / next compaction call.
+                if (toolUseContext.options.refreshTools) {
+                  const refreshedTools =
+                    toolUseContext.options.refreshTools()
+                  if (refreshedTools !== toolUseContext.options.tools) {
+                    toolUseContext.options.tools = refreshedTools
+                  }
+                }
+                promotionAttempt = {
+                  originalModel,
+                  targetModel: decision.targetModel,
+                  originalError: lastMessage!,
+                }
+                promotionRetryInFlight = true
+                logEvent('tengu_context_promotion_retry', {
+                  from_model:
+                    originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  to_model:
+                    decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  reason: (promotion.reason ??
+                    'promoted') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  querySource:
+                    querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  queryChainId: queryChainIdForAnalytics,
+                  queryDepth: queryTracking.depth,
+                })
+                state = {
+                  messages: messagesForQuery,
+                  toolUseContext,
+                  autoCompactTracking: tracking,
+                  maxOutputTokensRecoveryCount,
+                  hasAttemptedReactiveCompact,
+                  maxOutputTokensOverride: undefined,
+                  pendingToolUseSummary: undefined,
+                  stopHookActive: undefined,
+                  turnCount,
+                  transition: undefined,
+                }
+                continue
+              }
             }
             if (overflowResult.compactionResult) {
               // task_budget: same carryover as the legacy recovery path.

@@ -79,6 +79,76 @@ export function selectPromotion(
   return best
 }
 
+export interface PromotionAttempt {
+  /** Model that overflowed and is restored when the retry fails. */
+  originalModel: string
+  /** Larger-window model used for the one-shot retry. */
+  targetModel: string
+}
+
+export type PromotionRetryDecision =
+  | { kind: 'retry'; originalModel: string; targetModel: string }
+  | {
+      kind: 'revert'
+      originalModel: string
+      targetModel: string
+      reason: string
+    }
+  | { kind: 'skip'; reason: string }
+
+export interface PromotionRetryInput {
+  /** Model that produced the overflow. */
+  currentModel: string
+  /** Decision returned by the overflow trigger. */
+  promotion?: PromotionResult | null
+  /** A one-shot promotion retry already started in this query. */
+  attempt?: PromotionAttempt | null
+  /** The in-flight retry hit the same overflow again. */
+  retryFailed?: boolean
+}
+
+/**
+ * Decide whether an overflow should switch to the promotion candidate.
+ *
+ * Promotion is single-shot: once an attempt exists it is never repeated. If
+ * that attempt overflowed again the caller must revert to the original model
+ * and surface the original error. A candidate that is missing, equal to the
+ * current model, or not strictly larger skips promotion so the overflow path
+ * falls through to compaction.
+ */
+export function decidePromotionRetry(
+  input: PromotionRetryInput,
+): PromotionRetryDecision {
+  const attempt = input.attempt
+  if (attempt) {
+    if (input.retryFailed) {
+      return {
+        kind: 'revert',
+        originalModel: attempt.originalModel,
+        targetModel: attempt.targetModel,
+        reason: 'promotion-retry-failed',
+      }
+    }
+    return { kind: 'skip', reason: 'promotion-already-attempted' }
+  }
+
+  const promotion = input.promotion
+  if (promotion?.kind !== 'promoted') {
+    return {
+      kind: 'skip',
+      reason: promotion?.reason ?? 'no-promotion-candidate',
+    }
+  }
+  if (promotion.model.length === 0 || promotion.model === input.currentModel) {
+    return { kind: 'skip', reason: 'promotion-target-is-current-model' }
+  }
+  return {
+    kind: 'retry',
+    originalModel: input.currentModel,
+    targetModel: promotion.model,
+  }
+}
+
 export interface CreateContextPromotionOptions
   extends PromotionCandidateSource {
   /** Resolve the current model's effective window. */
