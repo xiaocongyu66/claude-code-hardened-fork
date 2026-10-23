@@ -414,6 +414,9 @@ const tuiNonInteractive = lazyCommand(
 )
 const chrome = lazyCommand(() => require('./commands/chrome/index.js'))
 const advisor = lazyCommand(() => require('./commands/advisor.js'))
+const autocompact = lazyCommand(() =>
+  require('./commands/autocompact/index.js'),
+)
 const autonomy = lazyCommand(() => require('./commands/autonomy.js'))
 const provider = lazyCommand(() => require('./commands/provider.js'))
 import {
@@ -513,6 +516,7 @@ export const INTERNAL_ONLY_COMMANDS = [
 const COMMANDS = memoize((): Command[] => [
   addDir,
   advisor,
+  autocompact,
   agentsPlatform,
   scheduleCommand,
   memoryStoresCommand,
