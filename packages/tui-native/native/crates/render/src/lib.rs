@@ -158,7 +158,7 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView) {
     let area = frame.area();
     let chunks = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(input_height(&view.input)),
         Constraint::Length(1),
     ])
     .split(area);
@@ -166,18 +166,44 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView) {
     let live = Paragraph::new(view.live_text.as_str()).style(Style::default());
     frame.render_widget(live, chunks[0]);
 
-    let input_text = format!("> {}", view.input);
+    let raw_lines: Vec<&str> = view.input.split('\n').collect();
+    let input_text = raw_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("> {line}")
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let input = Paragraph::new(input_text).style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(input, chunks[1]);
 
     let status = Paragraph::new(view.status_line()).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, chunks[2]);
 
-    // Cursor at the end of the input line (clamped to the viewport).
-    let cursor_x = 2 + unicode_width::UnicodeWidthStr::width(view.input.as_str());
+    // Cursor at the end of the last input line, clamped to the viewport.
+    let last_visible = raw_lines
+        .len()
+        .min(MAX_INPUT_LINES as usize)
+        .saturating_sub(1);
+    let last_line = raw_lines.get(last_visible).copied().unwrap_or("");
+    let cursor_x = 2 + unicode_width::UnicodeWidthStr::width(last_line);
     let x = chunks[1].x as usize + cursor_x.min(chunks[1].width.saturating_sub(1) as usize);
-    let y = chunks[1].y;
-    frame.set_cursor_position((x as u16, y));
+    let y = chunks[1].y + last_visible as u16;
+    frame.set_cursor_position((x as u16, y.min(chunks[1].bottom().saturating_sub(1))));
+}
+
+/// Rows reserved for the prompt: one per input line, capped so the live area
+/// never collapses.
+const MAX_INPUT_LINES: u16 = 6;
+
+fn input_height(input: &str) -> u16 {
+    let lines = input.split('\n').count() as u16;
+    lines.clamp(1, MAX_INPUT_LINES)
 }
 
 #[cfg(test)]
@@ -239,6 +265,22 @@ mod tests {
             "{texts:?}"
         );
         assert!(texts.iter().any(|text| text.contains("item")), "{texts:?}");
+    }
+
+    #[test]
+    fn multi_line_input_grows_and_keeps_prompt_prefix() {
+        let mut view = ChatView::new();
+        view.input = "first\nsecond".into();
+        let screen = render(&view, 40, 8);
+        assert!(screen.contains("> first"), "screen: {screen}");
+        assert!(screen.contains("  second"), "screen: {screen}");
+    }
+
+    #[test]
+    fn input_height_is_capped() {
+        assert_eq!(input_height(""), 1);
+        assert_eq!(input_height("a\nb\nc"), 3);
+        assert_eq!(input_height(&"x\n".repeat(20)), MAX_INPUT_LINES);
     }
 
     #[test]

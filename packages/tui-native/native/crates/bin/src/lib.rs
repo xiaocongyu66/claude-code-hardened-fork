@@ -114,6 +114,7 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
     contexts.push(Context::PROMPT);
     let mut resolver = Resolver::new(keymap.bindings(), &contexts, 800);
     let mut buffer = TextBuffer::new();
+    let mut history = PromptHistory::default();
     let mut clock_ms = 0u64;
 
     let mut engine_closed = false;
@@ -219,7 +220,13 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
                 } else if action == Action::PROMPT_ESCAPE || action == Action::APP_ESCAPE {
                     buffer.set_text("");
                 } else if action == Action::PROMPT_SUBMIT {
-                    submit(&mut view, &mut buffer, &mut session, engine.as_mut())?;
+                    submit(
+                        &mut view,
+                        &mut buffer,
+                        &mut session,
+                        engine.as_mut(),
+                        &mut history,
+                    )?;
                 } else if action == Action::PROMPT_NEWLINE {
                     buffer.insert_str("\n");
                 } else if action == Action::EDIT_BACKSPACE {
@@ -245,9 +252,21 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
                 } else if action == Action::PROMPT_UNDO {
                     buffer.undo();
                 } else if action == Action::HISTORY_PREVIOUS {
-                    buffer.move_up();
+                    // Move inside a multi-line draft first, then walk history.
+                    if buffer.cursor_position().0 > 0 {
+                        buffer.move_up();
+                    } else if let Some(entry) = history.previous().map(ToOwned::to_owned) {
+                        buffer.set_text(entry);
+                    }
                 } else if action == Action::HISTORY_NEXT {
-                    buffer.move_down();
+                    if buffer.cursor_position().0 + 1 < buffer.line_count() {
+                        buffer.move_down();
+                    } else {
+                        match history.next().map(ToOwned::to_owned) {
+                            Some(entry) => buffer.set_text(entry),
+                            None => buffer.set_text(""),
+                        }
+                    }
                 } else if action == Action::HISTORY_SEARCH {
                     view.status = Some("history search: not wired yet".into());
                 }
@@ -259,6 +278,7 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
                     && !key.modifiers.contains(KeyModifiers::ALT)
                 {
                     buffer.insert_char(ch);
+                    history.reset();
                 }
             }
         }
@@ -273,17 +293,69 @@ fn submit(
     buffer: &mut TextBuffer,
     session: &mut TerminalSession,
     engine: Option<&mut EngineProcess>,
+    history: &mut PromptHistory,
 ) -> io::Result<()> {
-    view.input = buffer.text().to_string();
+    let draft = buffer.text().to_string();
+    view.input = draft.clone();
     if let Some(row) = view.submit_input() {
         session.insert_rows(std::slice::from_ref(&row))?;
+        history.push(draft.clone());
         if let Some(process) = engine {
-            process.send_prompt(row.text.trim_start_matches("> "))?;
+            process.send_prompt(draft.trim())?;
             view.status = Some("sent".into());
         }
     }
     buffer.set_text("");
     Ok(())
+}
+
+/// Prompt history with a cursor that survives repeated Up/Down presses.
+#[derive(Debug, Default)]
+struct PromptHistory {
+    entries: Vec<String>,
+    index: Option<usize>,
+}
+
+impl PromptHistory {
+    fn push(&mut self, entry: String) {
+        if !entry.trim().is_empty() {
+            self.entries.push(entry);
+        }
+        self.index = None;
+    }
+
+    /// Previous entry (older), clamped at the oldest.
+    fn previous(&mut self) -> Option<&str> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = match self.index {
+            None => self.entries.len() - 1,
+            Some(0) => 0,
+            Some(index) => index - 1,
+        };
+        self.index = Some(index);
+        self.entries.get(index).map(String::as_str)
+    }
+
+    /// Next entry (newer); past the newest returns `None` (empty prompt).
+    fn next(&mut self) -> Option<&str> {
+        match self.index {
+            Some(index) if index + 1 < self.entries.len() => {
+                self.index = Some(index + 1);
+                self.entries.get(index + 1).map(String::as_str)
+            }
+            Some(_) => {
+                self.index = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.index = None;
+    }
 }
 
 /// Translate a crossterm key event into the terminal-independent key model.
@@ -317,6 +389,26 @@ fn to_key(key: &ratatui::crossterm::event::KeyEvent) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_walks_older_then_newer_and_resets() {
+        let mut history = PromptHistory::default();
+        history.push("one".into());
+        history.push("two".into());
+        history.push("   ".into()); // blank drafts are not recorded
+
+        assert_eq!(history.previous(), Some("two"));
+        assert_eq!(history.previous(), Some("one"));
+        assert_eq!(history.previous(), Some("one"));
+        assert_eq!(history.next(), Some("two"));
+        assert_eq!(history.next(), None);
+        assert_eq!(history.next(), None);
+
+        // Typing after a recall restarts the walk.
+        let _ = history.previous();
+        history.reset();
+        assert_eq!(history.previous(), Some("two"));
+    }
 
     #[test]
     fn maps_special_keys_and_modifiers() {
