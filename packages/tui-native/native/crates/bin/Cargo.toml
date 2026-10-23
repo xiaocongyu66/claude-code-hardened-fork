@@ -17,3 +17,6 @@ cch-tui-core = { path = "../core" }
 cch-tui-keymap = { path = "../keymap" }
 ratatui = "0.30"
 serde_json.workspace = true
+
+[dev-dependencies]
+portable-pty = "0.9"

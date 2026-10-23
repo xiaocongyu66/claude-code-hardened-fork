@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cch_tui_core::TextBuffer;
 use cch_tui_keymap::{
@@ -91,6 +91,21 @@ pub enum Source {
 
 /// Run the interactive TUI until the user quits.
 pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
+    run_with_deadline(source, fullscreen, None)
+}
+
+/// Run the interactive TUI with an optional wall-clock budget.
+///
+/// `exit_after` is a test-only escape hatch (`--exit-after-ms`): once the
+/// duration has elapsed the key loop breaks and the terminal session is
+/// dropped, which runs the normal restore path. `None` keeps the interactive
+/// behaviour of [`run`].
+pub fn run_with_deadline(
+    source: Source,
+    fullscreen: bool,
+    exit_after: Option<Duration>,
+) -> io::Result<()> {
+    let started = Instant::now();
     let mut session = if fullscreen {
         TerminalSession::fullscreen()?
     } else {
@@ -120,6 +135,12 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
     let mut engine_closed = false;
     let mut pending_permission: Option<(String, String, serde_json::Value)> = None;
     loop {
+        // Test-only deterministic exit: the deadline is checked before any
+        // blocking work so the process always leaves through the same drop
+        // path as a user-initiated quit.
+        if exit_after.is_some_and(|limit| started.elapsed() >= limit) {
+            break;
+        }
         // Drain engine/replay frames.
         loop {
             match rx.try_recv() {
