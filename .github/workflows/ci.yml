@@ -173,8 +173,8 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }} -p cch-tui-napi
 
       # 统一整理产物到 vendor 布局：vendor/<name>/<triple>/<name>.node
-      # TUI bin 单独走 stage/tui/<triple>/cch-tui[.exe]（+ .sha256）；
-      # napi cdylib 走 stage/tui/<triple>/tui.node（与 vendor 布局一致）
+      # napi cdylib 走 stage/tui/<triple>/tui.node（与 vendor 布局一致）；
+      # 开发用 cch-tui 二进制不参与分发。
       - name: Stage artifacts (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -195,12 +195,6 @@ jobs:
             fi
             cp "$src" "stage/$name/${{ matrix.target }}/$name.node"
           done
-          tui_bin="packages/tui-native/native/target/${{ matrix.target }}/release/cch-tui"
-          if [ ! -f "$tui_bin" ]; then
-            echo "::error::tui artifact missing: $tui_bin — build failed or output renamed"
-            exit 1
-          fi
-          cp "$tui_bin" "stage/tui/${{ matrix.target }}/cch-tui"
           tui_node=""
           for ext in so dylib; do
             if [ -f "packages/tui-native/native/target/${{ matrix.target }}/release/libcch_tui.$ext" ]; then
@@ -213,12 +207,6 @@ jobs:
             exit 1
           fi
           cp "$tui_node" "stage/tui/${{ matrix.target }}/tui.node"
-          if command -v sha256sum >/dev/null 2>&1; then
-            hash=$(sha256sum "$tui_bin" | awk '{print $1}')
-          else
-            hash=$(shasum -a 256 "$tui_bin" | awk '{print $1}')
-          fi
-          printf '%s  cch-tui\n' "$hash" > "stage/tui/${{ matrix.target }}/cch-tui.sha256"
           find stage -type f
 
       - name: Stage artifacts (windows)
@@ -235,20 +223,12 @@ jobs:
             }
             Copy-Item $src "stage/$name/${{ matrix.target }}/$name.node"
           }
-          $tuiBin = "packages/tui-native/native/target/${{ matrix.target }}/release/cch-tui.exe"
-          if (-not (Test-Path $tuiBin)) {
-            Write-Output "::error::tui artifact missing: $tuiBin — build failed or output renamed"
-            exit 1
-          }
-          Copy-Item $tuiBin "stage/tui/${{ matrix.target }}/cch-tui.exe"
           $tuiNode = "packages/tui-native/native/target/${{ matrix.target }}/release/cch_tui.dll"
           if (-not (Test-Path $tuiNode)) {
             Write-Output "::error::tui napi artifact missing: $tuiNode — build failed or output renamed"
             exit 1
           }
           Copy-Item $tuiNode "stage/tui/${{ matrix.target }}/tui.node"
-          $hash = (Get-FileHash -Algorithm SHA256 $tuiBin).Hash.ToLower()
-          Set-Content -NoNewline -Path "stage/tui/${{ matrix.target }}/cch-tui.exe.sha256" -Value "$hash  cch-tui.exe`n"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -295,21 +275,13 @@ jobs:
           done
           find vendor/token-counter vendor/transcript-parser vendor/color-diff vendor/file-index vendor/search -name '*.node' 2>/dev/null | sort
           find vendor/tui -type f 2>/dev/null | sort
-          # 严格化断言：5 个 napi 模块 + tui bin × 6 triple，缺一即失败
+          # 严格化断言：6 个 napi 模块（含 tui）× 6 triple，缺一即失败
           TRIPLES="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
           MISSING=0
-          for name in token-counter transcript-parser color-diff file-index search; do
+          for name in token-counter transcript-parser color-diff file-index search tui; do
             for triple in $TRIPLES; do
               [ -f "vendor/$name/$triple/$name.node" ] || { echo "::error::vendor missing: $name/$triple"; MISSING=1; }
             done
-          done
-          for triple in $TRIPLES; do
-            case "$triple" in
-              *-windows-msvc) tui_bin="cch-tui.exe" ;;
-              *) tui_bin="cch-tui" ;;
-            esac
-            [ -f "vendor/tui/$triple/$tui_bin" ] || { echo "::error::vendor missing: tui/$triple/$tui_bin"; MISSING=1; }
-            [ -f "vendor/tui/$triple/$tui_bin.sha256" ] || { echo "::error::vendor missing: tui/$triple/$tui_bin.sha256"; MISSING=1; }
           done
           [ "$MISSING" = "0" ] || exit 1
 
