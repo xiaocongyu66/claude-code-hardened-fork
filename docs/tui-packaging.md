@@ -10,7 +10,12 @@
 
 ## 分发模型
 
-根包 **不内嵌** TUI 二进制，而是通过 6 个 `optionalDependencies` 按宿主安装：
+根包 **不内嵌** TUI 二进制，而是通过 6 个 `optionalDependencies` 按宿主安装。
+
+> **状态**：根 `package.json` 的 `optionalDependencies` 与 `workspaces` 目前**尚未**加入这些包。
+> CI 使用 `bun install --frozen-lockfile`，而本地禁止执行 `bun install` 更新 `bun.lock`；
+> 发布前需由一次受控的 lockfile 更新统一注入。在此之前运行时解析失败会走
+> `getTuiBinaryError()` 的降级路径。
 
 | npm 包 | Cargo target | `os` | `cpu` | 二进制 |
 |---|---|---|---|---|
@@ -99,7 +104,8 @@ getTuiBinaryPackageName(): string | null
    (cd /tmp/pkg-tui-linux-x64 && npm publish --access public)
    # 重复 6 次
    ```
-4. **解析根包 optionalDependencies**：当前为 `workspace:*` 占位。
+4. **解析根包 optionalDependencies**：发布前需注入 `workspace:*` 占位并更新
+   `bun.lock`（见上文状态说明）。
    - `bun publish` 会把 `workspace:*` 展开为 workspace 内平台包的版本。
    - 用 `npm publish` 时必须先把根 `package.json` 中 6 个 `@cch/tui-*` 替换为实际发布版本（例如 `2.8.4`），否则会发布字面量 `workspace:*`。
 5. **发布根包**：`npm publish --provenance --access public`（现有 `.github/workflows/publish-npm.yml` 流程）。
