@@ -15,6 +15,8 @@ cch-tui-ui = { path = "../ui" }
 cch-tui-render = { path = "../render" }
 cch-tui-core = { path = "../core" }
 cch-tui-keymap = { path = "../keymap" }
+cch-tui-dialog = { path = "../dialog" }
+cch-tui-fullscreen = { path = "../fullscreen" }
 ratatui = "0.30"
 serde_json.workspace = true
 

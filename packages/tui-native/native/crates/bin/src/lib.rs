@@ -9,13 +9,15 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use cch_tui_core::TextBuffer;
+use cch_tui_dialog::PermissionDialog;
+use cch_tui_fullscreen::TranscriptModel;
 use cch_tui_keymap::{
     Action, Context, ContextStack, Key, KeyCode as KmKeyCode, Keymap, Modifiers as KmModifiers,
     Resolution, Resolver,
 };
 use cch_tui_proto::{ControlRequest, EngineEvent, parse_line};
 use cch_tui_render::{DEFAULT_INLINE_HEIGHT, TerminalSession};
-use cch_tui_ui::{ChatView, SessionView};
+use cch_tui_ui::{ChatView, Row, RowStyle, SessionView};
 use engine::{EngineMessage, EngineProcess};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
@@ -97,9 +99,8 @@ pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
 /// Run the interactive TUI with an optional wall-clock budget.
 ///
 /// `exit_after` is a test-only escape hatch (`--exit-after-ms`): once the
-/// duration has elapsed the key loop breaks and the terminal session is
-/// dropped, which runs the normal restore path. `None` keeps the interactive
-/// behaviour of [`run`].
+/// duration has elapsed the loop breaks and the terminal session is dropped,
+/// which runs the normal restore path. `None` keeps the interactive behaviour.
 pub fn run_with_deadline(
     source: Source,
     fullscreen: bool,
@@ -130,17 +131,18 @@ pub fn run_with_deadline(
     let mut resolver = Resolver::new(keymap.bindings(), &contexts, 800);
     let mut buffer = TextBuffer::new();
     let mut history = PromptHistory::default();
+    let mut transcript = TranscriptModel::new();
+    let mut dialog: Option<PermissionDialog> = None;
     let mut clock_ms = 0u64;
-
     let mut engine_closed = false;
-    let mut pending_permission: Option<(String, String, serde_json::Value)> = None;
+
     loop {
-        // Test-only deterministic exit: the deadline is checked before any
-        // blocking work so the process always leaves through the same drop
-        // path as a user-initiated quit.
+        // Test-only deterministic exit: checked before any blocking work so the
+        // process always leaves through the same drop path as a user quit.
         if exit_after.is_some_and(|limit| started.elapsed() >= limit) {
             break;
         }
+
         // Drain engine/replay frames.
         loop {
             match rx.try_recv() {
@@ -150,23 +152,26 @@ pub fn run_with_deadline(
                             request_id,
                             request: ControlRequest::CanUseTool(permission),
                         } => {
-                            pending_permission = Some((
+                            dialog = Some(PermissionDialog::from_can_use_tool(
                                 request_id.clone(),
-                                permission.tool_name.clone(),
-                                serde_json::Value::Object(permission.input.clone()),
+                                permission,
                             ));
                         }
-                        EngineEvent::ControlResponse { .. } => pending_permission = None,
+                        EngineEvent::ControlResponse { .. } => dialog = None,
+                        EngineEvent::ControlCancelRequest { .. } => {
+                            if let Some(open) = dialog.as_mut() {
+                                open.cancel_from_engine();
+                            }
+                            dialog = None;
+                        }
                         _ => {}
                     }
                     let frozen = view.ingest(&event);
-                    session.insert_rows(&frozen)?;
+                    freeze(&mut session, &mut transcript, fullscreen, &frozen)?;
                 }
                 Ok(EngineMessage::Malformed(line)) => {
-                    view.completed.push(cch_tui_ui::Row::new(
-                        cch_tui_ui::RowStyle::Error,
-                        format!("[protocol] {line}"),
-                    ));
+                    view.completed
+                        .push(Row::new(RowStyle::Error, format!("[protocol] {line}")));
                 }
                 Ok(EngineMessage::Closed) => {
                     engine_closed = true;
@@ -184,142 +189,223 @@ pub fn run_with_deadline(
         }
         view.input = buffer.text().to_string();
 
-        session.draw(&view)?;
+        match (dialog.as_ref(), fullscreen) {
+            (Some(open), true) => {
+                session.draw_transcript_with_permission(&view, &mut transcript, open)?
+            }
+            (Some(open), false) => session.draw_with_permission(&view, open)?,
+            (None, true) => session.draw_transcript(&view, &mut transcript)?,
+            (None, false) => session.draw(&view)?,
+        }
 
         if !event::poll(Duration::from_millis(33))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        // Permission prompt: y allows, n (or Esc) denies. Takes precedence over
-        // text input while a request is pending.
-        if let Some((request_id, tool_name, input)) = pending_permission.clone() {
-            let decision = match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
-                _ => None,
-            };
-            if let Some(allow) = decision {
-                if let Some(process) = engine.as_mut() {
-                    let response = if allow {
-                        serde_json::json!({ "behavior": "allow", "updatedInput": input })
-                    } else {
-                        serde_json::json!({ "behavior": "deny", "message": "Denied by user" })
-                    };
-                    process.send_control_response(&request_id, response)?;
-                }
-                view.status = Some(format!(
-                    "{} {}",
-                    if allow { "allowed" } else { "denied" },
-                    tool_name
-                ));
-                pending_permission = None;
-                continue;
+        match event::read()? {
+            Event::Paste(text) => {
+                buffer.insert_paste(&text);
             }
-        }
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-        // Once the engine is gone, Esc quits instead of clearing the prompt.
-        if engine_closed && buffer.is_empty() && key.code == KeyCode::Esc {
-            break;
-        }
-
-        clock_ms = clock_ms.saturating_add(33);
-        let resolution = resolver.resolve(to_key(&key), clock_ms);
-        match resolution {
-            Resolution::Pending => {}
-            Resolution::Action(action) => {
-                if action == Action::APP_INTERRUPT {
-                    break;
-                } else if action == Action::APP_EXIT {
-                    if buffer.is_empty() {
-                        break;
-                    }
-                } else if action == Action::PROMPT_ESCAPE || action == Action::APP_ESCAPE {
-                    buffer.set_text("");
-                } else if action == Action::PROMPT_SUBMIT {
-                    submit(
-                        &mut view,
-                        &mut buffer,
-                        &mut session,
-                        engine.as_mut(),
-                        &mut history,
-                    )?;
-                } else if action == Action::PROMPT_NEWLINE {
-                    buffer.insert_str("\n");
-                } else if action == Action::EDIT_BACKSPACE {
-                    buffer.backspace();
-                } else if action == Action::EDIT_DELETE {
-                    buffer.delete_forward();
-                } else if action == Action::EDIT_LEFT {
-                    buffer.move_left();
-                } else if action == Action::EDIT_RIGHT {
-                    buffer.move_right();
-                } else if action == Action::EDIT_LINE_START {
-                    buffer.move_home();
-                } else if action == Action::EDIT_LINE_END {
-                    buffer.move_end();
-                } else if action == Action::EDIT_KILL_TO_END {
-                    buffer.kill_to_line_end();
-                } else if action == Action::EDIT_KILL_TO_START {
-                    buffer.kill_to_line_start();
-                } else if action == Action::EDIT_KILL_WORD_BEFORE {
-                    buffer.kill_word_before();
-                } else if action == Action::EDIT_YANK {
-                    buffer.yank();
-                } else if action == Action::PROMPT_UNDO {
-                    buffer.undo();
-                } else if action == Action::HISTORY_PREVIOUS {
-                    // Move inside a multi-line draft first, then walk history.
-                    if buffer.cursor_position().0 > 0 {
-                        buffer.move_up();
-                    } else if let Some(entry) = history.previous().map(ToOwned::to_owned) {
-                        buffer.set_text(entry);
-                    }
-                } else if action == Action::HISTORY_NEXT {
-                    if buffer.cursor_position().0 + 1 < buffer.line_count() {
-                        buffer.move_down();
-                    } else {
-                        match history.next().map(ToOwned::to_owned) {
-                            Some(entry) => buffer.set_text(entry),
-                            None => buffer.set_text(""),
+                // A permission dialog owns the keyboard while it is open.
+                if dialog.is_some() {
+                    let mut answer: Option<(String, String, serde_json::Value)> = None;
+                    if let Some(open) = dialog.as_mut() {
+                        let decision = match key.code {
+                            KeyCode::Up => {
+                                open.select_previous();
+                                None
+                            }
+                            KeyCode::Down => {
+                                open.select_next();
+                                None
+                            }
+                            KeyCode::Enter => open.resolve(),
+                            KeyCode::Esc => open.cancel(),
+                            _ => None,
+                        };
+                        if let Some(decision) = decision {
+                            answer = Some((
+                                open.request_id().to_owned(),
+                                open.tool_name().to_owned(),
+                                decision.to_response(),
+                            ));
                         }
                     }
-                } else if action == Action::HISTORY_SEARCH {
-                    view.status = Some("history search: not wired yet".into());
+                    if let Some((request_id, tool_name, response)) = answer {
+                        answer_permission(
+                            &mut view,
+                            &mut dialog,
+                            engine.as_mut(),
+                            &request_id,
+                            &tool_name,
+                            response,
+                        )?;
+                    }
+                    continue;
+                }
+
+                if engine_closed && buffer.is_empty() && key.code == KeyCode::Esc {
+                    break;
+                }
+
+                // Fullscreen scrolling owns the page keys.
+                if fullscreen {
+                    match key.code {
+                        KeyCode::PageUp => {
+                            transcript.page_up();
+                            continue;
+                        }
+                        KeyCode::PageDown => {
+                            transcript.page_down();
+                            continue;
+                        }
+                        KeyCode::End => {
+                            transcript.scroll_to_bottom();
+                            continue;
+                        }
+                        KeyCode::Home => {
+                            transcript.scroll_to_top();
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
+                clock_ms = clock_ms.saturating_add(33);
+                match resolver.resolve(to_key(&key), clock_ms) {
+                    Resolution::Pending => {}
+                    Resolution::Ignored => {
+                        if let KeyCode::Char(ch) = key.code
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT)
+                        {
+                            buffer.insert_char(ch);
+                            history.reset();
+                        }
+                    }
+                    Resolution::Action(action) => {
+                        if action == Action::APP_INTERRUPT {
+                            break;
+                        } else if action == Action::APP_EXIT {
+                            if buffer.is_empty() {
+                                break;
+                            }
+                        } else if action == Action::PROMPT_ESCAPE || action == Action::APP_ESCAPE {
+                            buffer.set_text("");
+                        } else if action == Action::PROMPT_SUBMIT {
+                            submit(
+                                &mut view,
+                                &mut buffer,
+                                &mut session,
+                                &mut transcript,
+                                fullscreen,
+                                engine.as_mut(),
+                                &mut history,
+                            )?;
+                        } else if action == Action::PROMPT_NEWLINE {
+                            buffer.insert_str("\n");
+                        } else if action == Action::EDIT_BACKSPACE {
+                            buffer.backspace();
+                        } else if action == Action::EDIT_DELETE {
+                            buffer.delete_forward();
+                        } else if action == Action::EDIT_LEFT {
+                            buffer.move_left();
+                        } else if action == Action::EDIT_RIGHT {
+                            buffer.move_right();
+                        } else if action == Action::EDIT_LINE_START {
+                            buffer.move_home();
+                        } else if action == Action::EDIT_LINE_END {
+                            buffer.move_end();
+                        } else if action == Action::EDIT_KILL_TO_END {
+                            buffer.kill_to_line_end();
+                        } else if action == Action::EDIT_KILL_TO_START {
+                            buffer.kill_to_line_start();
+                        } else if action == Action::EDIT_KILL_WORD_BEFORE {
+                            buffer.kill_word_before();
+                        } else if action == Action::EDIT_YANK {
+                            buffer.yank();
+                        } else if action == Action::PROMPT_UNDO {
+                            buffer.undo();
+                        } else if action == Action::HISTORY_PREVIOUS {
+                            if buffer.cursor_position().0 > 0 {
+                                buffer.move_up();
+                            } else if let Some(entry) = history.previous().map(ToOwned::to_owned) {
+                                buffer.set_text(entry);
+                            }
+                        } else if action == Action::HISTORY_NEXT {
+                            if buffer.cursor_position().0 + 1 < buffer.line_count() {
+                                buffer.move_down();
+                            } else {
+                                match history.next().map(ToOwned::to_owned) {
+                                    Some(entry) => buffer.set_text(entry),
+                                    None => buffer.set_text(""),
+                                }
+                            }
+                        } else if action == Action::HISTORY_SEARCH {
+                            view.status = Some("history search: not wired yet".into());
+                        }
+                    }
                 }
             }
-            Resolution::Ignored => {
-                // Unbound printable keys type into the prompt.
-                if let KeyCode::Char(ch) = key.code
-                    && !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
-                {
-                    buffer.insert_char(ch);
-                    history.reset();
-                }
-            }
+            _ => {}
         }
     }
 
     Ok(())
 }
 
+fn answer_permission(
+    view: &mut ChatView,
+    dialog: &mut Option<PermissionDialog>,
+    engine: Option<&mut EngineProcess>,
+    request_id: &str,
+    tool_name: &str,
+    response: serde_json::Value,
+) -> io::Result<()> {
+    if let Some(process) = engine {
+        process.send_control_response(request_id, response)?;
+    }
+    view.status = Some(format!("permission answered: {tool_name}"));
+    *dialog = None;
+    Ok(())
+}
+
+fn freeze(
+    session: &mut TerminalSession,
+    transcript: &mut TranscriptModel,
+    fullscreen: bool,
+    rows: &[Row],
+) -> io::Result<()> {
+    if fullscreen {
+        transcript.append(rows.iter().cloned());
+        Ok(())
+    } else {
+        session.insert_rows(rows)
+    }
+}
+
 /// Freeze the current buffer as a user row and forward it to the engine.
+///
+/// Folded pastes are expanded before sending: the transcript and the engine
+/// see the original text, while the input line only ever showed placeholders.
 fn submit(
     view: &mut ChatView,
     buffer: &mut TextBuffer,
     session: &mut TerminalSession,
+    transcript: &mut TranscriptModel,
+    fullscreen: bool,
     engine: Option<&mut EngineProcess>,
     history: &mut PromptHistory,
 ) -> io::Result<()> {
-    let draft = buffer.text().to_string();
-    view.input = draft.clone();
-    if let Some(row) = view.submit_input() {
-        session.insert_rows(std::slice::from_ref(&row))?;
+    let draft = buffer.expand_pastes();
+    if !draft.trim().is_empty() {
+        let row = Row::new(RowStyle::User, format!("> {draft}"));
+        freeze(session, transcript, fullscreen, std::slice::from_ref(&row))?;
+        view.completed.push(row);
         history.push(draft.clone());
         if let Some(process) = engine {
             process.send_prompt(draft.trim())?;
