@@ -452,6 +452,16 @@ async function* queryLoop(
   // sites.
   let taskBudgetRemaining: number | undefined
 
+  // COMPACTION_V2 loop-trigger bookkeeping. The module and its state are only
+  // created when the flag is on; every reader lives inside a feature-gated
+  // block, so flag-off builds eliminate both.
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const compactionV2LoopModule = feature('COMPACTION_V2')
+    ? (require('./services/compaction2/triggers/loop.js') as typeof import('./services/compaction2/triggers/loop.js'))
+    : null
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  const compactionV2Loop = compactionV2LoopModule?.createLoopCompactionState()
+
   // Snapshot immutable env/statsig/session state once at entry. See QueryConfig
   // for what's included and why feature() gates are intentionally excluded.
   const config = buildQueryConfig()
@@ -706,31 +716,38 @@ async function* queryLoop(
       const { runCompactionV2ForQuery } =
         require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
       /* eslint-enable @typescript-eslint/no-require-imports */
-      let v2Result: Awaited<ReturnType<typeof runCompactionV2ForQuery>>
-      try {
-        v2Result = await runCompactionV2ForQuery({
-          messages: messagesForQuery,
-          model: toolUseContext.options.mainLoopModel,
-          trigger: 'threshold',
-          tokenCount:
-            tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
-          toolUseContext,
-          cacheSafeParams: autoCompactCacheSafeParams,
-          querySource,
-          tracking,
-        })
-      } catch (error) {
-        // The v2 chain must never take down the query loop; legacy
-        // autoCompactIfNeeded swallows its own failures.
-        logError(error)
-        v2Result = {
-          wasCompacted: false,
-          // Aborts are user intent, not a failed compaction attempt.
-          ...(isAbortError(error)
-            ? {}
-            : {
-                consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
-              }),
+      let v2Result: Awaited<ReturnType<typeof runCompactionV2ForQuery>> = {
+        wasCompacted: false,
+      }
+      // A mid-turn pass at the end of the previous tool iteration already
+      // handled this provider request; consume the one-shot skip instead of
+      // running the threshold pass again.
+      if (!compactionV2LoopModule!.consumeMidTurnSkip(compactionV2Loop!)) {
+        try {
+          v2Result = await runCompactionV2ForQuery({
+            messages: messagesForQuery,
+            model: toolUseContext.options.mainLoopModel,
+            trigger: 'threshold',
+            tokenCount:
+              tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+            toolUseContext,
+            cacheSafeParams: autoCompactCacheSafeParams,
+            querySource,
+            tracking,
+          })
+        } catch (error) {
+          // The v2 chain must never take down the query loop; legacy
+          // autoCompactIfNeeded swallows its own failures.
+          logError(error)
+          v2Result = {
+            wasCompacted: false,
+            // Aborts are user intent, not a failed compaction attempt.
+            ...(isAbortError(error)
+              ? {}
+              : {
+                  consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
+                }),
+          }
         }
       }
       autoCompactOutcome = v2Result
@@ -1604,6 +1621,105 @@ async function* queryLoop(
           }
         }
       }
+      // COMPACTION_V2 owns prompt-too-long recovery when the flag is on. The
+      // legacy reactive path below is mutually exclusive: a V2 pass that
+      // fails (or already ran) surfaces the error instead of double-running.
+      if (feature('COMPACTION_V2')) {
+        if (isWithheld413) {
+          /* eslint-disable @typescript-eslint/no-require-imports */
+          const { runCompactionV2ForQuery } =
+            require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+          /* eslint-enable @typescript-eslint/no-require-imports */
+          const overflowDecision =
+            compactionV2LoopModule!.selectOverflowRecovery({
+              v2Enabled: true,
+              promptTooLong: true,
+              reactiveAvailable: reactiveCompact !== null,
+              alreadyAttempted: hasAttemptedReactiveCompact,
+            })
+          if (overflowDecision === 'v2') {
+            const overflowTokens =
+              tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
+            let overflowResult: Awaited<
+              ReturnType<typeof runCompactionV2ForQuery>
+            >
+            try {
+              overflowResult = await runCompactionV2ForQuery({
+                messages: messagesForQuery,
+                model: toolUseContext.options.mainLoopModel,
+                trigger: 'overflow',
+                tokenCount: overflowTokens,
+                overflowDetected: true,
+                toolUseContext,
+                cacheSafeParams: {
+                  systemPrompt,
+                  userContext,
+                  systemContext,
+                  toolUseContext,
+                  forkContextMessages: messagesForQuery,
+                },
+                querySource,
+                tracking,
+              })
+            } catch (error) {
+              logError(error)
+              overflowResult = { wasCompacted: false }
+            }
+            if (overflowResult.compactionResult) {
+              // task_budget: same carryover as the legacy recovery path.
+              if (params.taskBudget) {
+                const preCompactContext =
+                  finalContextTokensFromLastResponse(messagesForQuery)
+                taskBudgetRemaining = Math.max(
+                  0,
+                  (taskBudgetRemaining ?? params.taskBudget.total) -
+                    preCompactContext,
+                )
+              }
+              const postCompactMessages = buildPostCompactMessages(
+                overflowResult.compactionResult,
+              )
+              for (const msg of postCompactMessages) {
+                yield msg
+              }
+              state = {
+                messages: postCompactMessages,
+                toolUseContext,
+                autoCompactTracking: undefined,
+                maxOutputTokensRecoveryCount,
+                hasAttemptedReactiveCompact: true,
+                maxOutputTokensOverride: undefined,
+                pendingToolUseSummary: undefined,
+                stopHookActive: undefined,
+                turnCount,
+                transition: { reason: 'reactive_compact_retry' },
+              }
+              continue
+            }
+            if (overflowResult.reducedMessages) {
+              state = {
+                messages: overflowResult.reducedMessages,
+                toolUseContext,
+                autoCompactTracking: tracking,
+                maxOutputTokensRecoveryCount,
+                hasAttemptedReactiveCompact: true,
+                maxOutputTokensOverride: undefined,
+                pendingToolUseSummary: undefined,
+                stopHookActive: undefined,
+                turnCount,
+                transition: { reason: 'reactive_compact_retry' },
+              }
+              continue
+            }
+          }
+          // No V2 recovery (or already attempted): surface the withheld
+          // error and exit. Do not fall through to stop hooks or reactive
+          // compact — the model never produced a valid response.
+          yield lastMessage!
+          void executeStopFailureHooks(lastMessage!, toolUseContext)
+          return { reason: 'prompt_too_long' }
+        }
+      }
       if ((isWithheld413 || isWithheldMedia) && reactiveCompact) {
         const compacted = await reactiveCompact.tryReactiveCompact({
           hasAttempted: hasAttemptedReactiveCompact,
@@ -1740,6 +1856,112 @@ async function* queryLoop(
 
         // Recovery exhausted — surface the withheld error now.
         yield lastMessage
+      }
+
+      // COMPACTION_V2 incomplete-output recovery: a length/max-tokens stop
+      // with the context over the threshold compacts and retries once.
+      if (feature('COMPACTION_V2')) {
+        const lastDeliveredAssistant = [...assistantMessages]
+          .reverse()
+          .find(message => !message.isApiErrorMessage)
+        const stopReason = lastDeliveredAssistant?.message?.stop_reason
+        const incompleteStop =
+          compactionV2LoopModule!.isIncompleteStop(stopReason)
+        // A delivered non-incomplete turn clears the one-shot guard.
+        if (!incompleteStop) {
+          compactionV2Loop!.incompleteAttempted = false
+        }
+        const incompleteTokens =
+          tokenCountWithEstimation(messagesForQuery) - snipTokensFreed
+        if (
+          incompleteStop &&
+          compactionV2LoopModule!.shouldAttemptIncompleteRecovery({
+            v2Enabled: true,
+            stopReason,
+            tokenCount: incompleteTokens,
+            windowTokens: getEffectiveContextWindowSize(
+              toolUseContext.options.mainLoopModel,
+            ),
+            alreadyAttempted: compactionV2Loop!.incompleteAttempted,
+          })
+        ) {
+          compactionV2Loop!.incompleteAttempted = true
+          /* eslint-disable @typescript-eslint/no-require-imports */
+          const { runCompactionV2ForQuery } =
+            require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+          /* eslint-enable @typescript-eslint/no-require-imports */
+          let incompleteResult: Awaited<
+            ReturnType<typeof runCompactionV2ForQuery>
+          >
+          try {
+            incompleteResult = await runCompactionV2ForQuery({
+              messages: messagesForQuery,
+              model: toolUseContext.options.mainLoopModel,
+              trigger: 'incomplete',
+              tokenCount: incompleteTokens,
+              stopReason,
+              toolUseContext,
+              cacheSafeParams: {
+                systemPrompt,
+                userContext,
+                systemContext,
+                toolUseContext,
+                forkContextMessages: messagesForQuery,
+              },
+              querySource,
+              tracking,
+            })
+          } catch (error) {
+            logError(error)
+            incompleteResult = { wasCompacted: false }
+          }
+          if (incompleteResult.compactionResult) {
+            if (params.taskBudget) {
+              const preCompactContext =
+                finalContextTokensFromLastResponse(messagesForQuery)
+              taskBudgetRemaining = Math.max(
+                0,
+                (taskBudgetRemaining ?? params.taskBudget.total) -
+                  preCompactContext,
+              )
+            }
+            const postCompactMessages = buildPostCompactMessages(
+              incompleteResult.compactionResult,
+            )
+            for (const msg of postCompactMessages) {
+              yield msg
+            }
+            state = {
+              messages: postCompactMessages,
+              toolUseContext,
+              autoCompactTracking: undefined,
+              maxOutputTokensRecoveryCount: 0,
+              hasAttemptedReactiveCompact,
+              maxOutputTokensOverride: undefined,
+              pendingToolUseSummary: undefined,
+              stopHookActive: undefined,
+              turnCount,
+              transition: { reason: 'reactive_compact_retry' },
+            }
+            continue
+          }
+          if (incompleteResult.reducedMessages) {
+            state = {
+              messages: incompleteResult.reducedMessages,
+              toolUseContext,
+              autoCompactTracking: tracking,
+              maxOutputTokensRecoveryCount: 0,
+              hasAttemptedReactiveCompact,
+              maxOutputTokensOverride: undefined,
+              pendingToolUseSummary: undefined,
+              stopHookActive: undefined,
+              turnCount,
+              transition: { reason: 'reactive_compact_retry' },
+            }
+            continue
+          }
+          // No recovery: fall through to the existing error handling.
+        }
       }
 
       // Skip stop hooks when the last message is an API error (rate limit,
@@ -2237,9 +2459,98 @@ async function* queryLoop(
       return { reason: 'max_turns', turnCount: nextTurnCount }
     }
 
+    let nextMessages = messagesForQuery.concat(assistantMessages, toolResults)
+
+    // COMPACTION_V2 mid-turn maintenance: between the tool loop and the next
+    // provider request. Skipped when the threshold pass already handled this
+    // iteration. The one-shot flag makes the next iteration's threshold pass
+    // a no-op so the same request is never compacted twice.
+    if (feature('COMPACTION_V2')) {
+      const midTurnTokens =
+        tokenCountWithEstimation(nextMessages) - snipTokensFreed
+      const thresholdAttempted =
+        !!compactionResult || consecutiveFailures !== undefined
+      if (
+        !toolUseContext.abortController.signal.aborted &&
+        compactionV2LoopModule!.shouldAttemptMidTurn({
+          enabled: true,
+          thresholdAttemptedThisIteration: thresholdAttempted,
+          tokenCount: midTurnTokens,
+          windowTokens: getEffectiveContextWindowSize(
+            updatedToolUseContext.options.mainLoopModel,
+          ),
+        })
+      ) {
+        compactionV2LoopModule!.markMidTurnConsumed(compactionV2Loop!)
+        /* eslint-disable @typescript-eslint/no-require-imports */
+        const { runCompactionV2ForQuery } =
+          require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+        /* eslint-enable @typescript-eslint/no-require-imports */
+        let midTurnResult: Awaited<ReturnType<typeof runCompactionV2ForQuery>>
+        try {
+          midTurnResult = await runCompactionV2ForQuery({
+            messages: nextMessages,
+            model: updatedToolUseContext.options.mainLoopModel,
+            trigger: 'midTurn',
+            tokenCount: midTurnTokens,
+            toolUseContext: updatedToolUseContext,
+            cacheSafeParams: {
+              systemPrompt,
+              userContext,
+              systemContext,
+              toolUseContext: updatedToolUseContext,
+              forkContextMessages: nextMessages,
+            },
+            querySource,
+            tracking,
+            settings: { midTurnEnabled: true },
+          })
+        } catch (error) {
+          logError(error)
+          midTurnResult = {
+            wasCompacted: false,
+            ...(isAbortError(error)
+              ? {}
+              : {
+                  consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
+                }),
+          }
+        }
+        if (midTurnResult.reducedMessages) {
+          nextMessages = midTurnResult.reducedMessages
+        } else if (midTurnResult.compactionResult) {
+          const postCompactMessages = buildPostCompactMessages(
+            midTurnResult.compactionResult,
+          )
+          for (const message of postCompactMessages) {
+            yield message
+          }
+          nextMessages = postCompactMessages
+          tracking = {
+            compacted: true,
+            turnId: deps.uuid(),
+            turnCounter: 0,
+            consecutiveFailures: 0,
+          }
+        } else if (midTurnResult.consecutiveFailures !== undefined) {
+          tracking = {
+            ...(tracking ?? {
+              compacted: false,
+              turnId: '',
+              turnCounter: 0,
+            }),
+            consecutiveFailures: midTurnResult.consecutiveFailures,
+          }
+        }
+        if (toolUseContext.abortController.signal.aborted) {
+          return { reason: 'aborted_tools' }
+        }
+      }
+    }
+
     queryCheckpoint('query_recursive_call')
     const next: State = {
-      messages: messagesForQuery.concat(assistantMessages, toolResults),
+      messages: nextMessages,
       toolUseContext: toolUseContextWithQueryTracking,
       autoCompactTracking: tracking,
       turnCount: nextTurnCount,
