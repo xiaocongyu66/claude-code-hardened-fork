@@ -226,6 +226,7 @@ version = "0.1.0"
 dependencies = [
  "cch-tui-core",
  "cch-tui-diff",
+ "cch-tui-fullscreen",
  "cch-tui-highlight",
  "cch-tui-markdown",
  "cch-tui-proto",

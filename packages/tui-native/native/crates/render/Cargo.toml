@@ -12,5 +12,6 @@ cch-tui-proto = { path = "../proto" }
 cch-tui-markdown = { path = "../markdown" }
 cch-tui-highlight = { path = "../highlight" }
 cch-tui-diff = { path = "../diff" }
+cch-tui-fullscreen = { path = "../fullscreen" }
 ratatui = "0.30"
 unicode-width = "0.2"

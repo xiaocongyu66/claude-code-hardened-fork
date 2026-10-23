@@ -88,6 +88,36 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Fullscreen frame: the transcript window above the prompt and status.
+    pub fn draw_transcript(
+        &mut self,
+        view: &ChatView,
+        model: &mut cch_tui_fullscreen::TranscriptModel,
+    ) -> io::Result<()> {
+        let size = self.terminal.size()?;
+        let width = size.width.max(1) as usize;
+        let reserved = input_height(&view.input) as usize + 1;
+        let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
+        let lines = transcript_lines(model, transcript_height, width);
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(input_height(&view.input)),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            frame.render_widget(Paragraph::new(lines.clone()), chunks[0]);
+            draw_prompt(frame, view, chunks[1]);
+            draw_status(frame, view, chunks[2]);
+        })?;
+        Ok(())
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
     pub fn restore(&mut self) -> io::Result<()> {
         disable_raw_mode()?;
         execute!(
@@ -256,6 +286,11 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView) {
     let live = Paragraph::new(view.live_text.as_str()).style(Style::default());
     frame.render_widget(live, chunks[0]);
 
+    draw_prompt(frame, view, chunks[1]);
+    draw_status(frame, view, chunks[2]);
+}
+
+fn draw_prompt(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) {
     let raw_lines: Vec<&str> = view.input.split('\n').collect();
     let input_text = raw_lines
         .iter()
@@ -270,10 +305,7 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView) {
         .collect::<Vec<_>>()
         .join("\n");
     let input = Paragraph::new(input_text).style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(input, chunks[1]);
-
-    let status = Paragraph::new(view.status_line()).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(status, chunks[2]);
+    frame.render_widget(input, area);
 
     // Cursor at the end of the last input line, clamped to the viewport.
     let last_visible = raw_lines
@@ -282,9 +314,24 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView) {
         .saturating_sub(1);
     let last_line = raw_lines.get(last_visible).copied().unwrap_or("");
     let cursor_x = 2 + unicode_width::UnicodeWidthStr::width(last_line);
-    let x = chunks[1].x as usize + cursor_x.min(chunks[1].width.saturating_sub(1) as usize);
-    let y = chunks[1].y + last_visible as u16;
-    frame.set_cursor_position((x as u16, y.min(chunks[1].bottom().saturating_sub(1))));
+    let x = area.x as usize + cursor_x.min(area.width.saturating_sub(1) as usize);
+    let y = area.y + last_visible as u16;
+    frame.set_cursor_position((x as u16, y.min(area.bottom().saturating_sub(1))));
+}
+
+fn draw_status(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) {
+    let status = Paragraph::new(view.status_line()).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, area);
+}
+
+/// Convert the visible window of a transcript model into terminal lines.
+pub fn transcript_lines(
+    model: &mut cch_tui_fullscreen::TranscriptModel,
+    height: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let range = model.window(height, width);
+    rows_to_lines(&model.rows()[range], width)
 }
 
 /// Rows reserved for the prompt: one per input line, capped so the live area
@@ -407,6 +454,28 @@ mod tests {
             .find(|l| l.to_string().starts_with("- "))
             .expect("removed line");
         assert_eq!(removed.spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn transcript_window_follows_tail_and_scrolls() {
+        let mut model = cch_tui_fullscreen::TranscriptModel::new();
+        model.append((0..50).map(|i| Row::new(RowStyle::User, format!("line {i}"))));
+
+        let lines = transcript_lines(&mut model, 6, 40);
+        let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        assert!(
+            texts.iter().any(|text| text == "line 49"),
+            "tail not visible: {texts:?}"
+        );
+
+        model.scroll_to_top();
+        let lines = transcript_lines(&mut model, 6, 40);
+        let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        assert!(
+            texts.iter().any(|text| text == "line 0"),
+            "top not visible: {texts:?}"
+        );
+        assert!(!model.is_following());
     }
 
     #[test]
