@@ -15,6 +15,7 @@ import {
 } from './services/compact/autoCompact.js'
 import { buildPostCompactMessages } from './services/compact/compact.js'
 import type { CompactionMethodName } from './services/compaction2/contracts.js'
+import type { PromotionResult } from './services/compaction2/triggers/types.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const reactiveCompact = feature('REACTIVE_COMPACT')
   ? (require('./services/compact/reactiveCompact.js') as typeof import('./services/compact/reactiveCompact.js'))
@@ -620,6 +621,9 @@ async function* queryLoop(
   const compactionV2LoopModule = feature('COMPACTION_V2')
     ? (require('./services/compaction2/triggers/loop.js') as typeof import('./services/compaction2/triggers/loop.js'))
     : null
+  const compactionV2PromotionModule = feature('COMPACTION_V2')
+    ? (require('./services/compaction2/triggers/promotion.js') as typeof import('./services/compaction2/triggers/promotion.js'))
+    : null
   // Display-only state: at most one "context reduced" notice per turn, even
   // when threshold, mid-turn, and overflow passes all reduce in one loop.
   const compactionV2Display = feature('COMPACTION_V2')
@@ -652,16 +656,19 @@ async function* queryLoop(
     })
   }
 
-  // COMPACTION_V2 context promotion is single-shot per query: the overflow
-  // path may switch to a larger-window model once and retry the same turn.
-  // `promotionAttempt` survives the retry so a second overflow reverts to the
-  // original model; `promotionRetryInFlight` marks the one request that
-  // follows the switch (cleared as soon as that request settles).
+  // COMPACTION_V2 context promotion is single-shot per query: any trigger
+  // (threshold, incomplete, overflow) may switch to a larger-window model
+  // once and retry the same turn. `promotionAttempt` survives the retry so a
+  // second failure reverts to the original model; `promotionRetryInFlight`
+  // marks the one request that follows the switch (cleared as soon as that
+  // request settles).
   let promotionAttempt:
     | {
         originalModel: string
         targetModel: string
-        originalError: AssistantMessage
+        /** Error surfaced when the promotion retry overflows; absent when the
+         * promotion was requested by a non-error trigger (threshold). */
+        originalError?: AssistantMessage
       }
     | undefined
   let promotionRetryInFlight = false
@@ -744,6 +751,83 @@ async function* queryLoop(
     toolUseContext = {
       ...toolUseContext,
       queryTracking,
+    }
+
+    // COMPACTION_V2 context promotion, shared by the threshold, incomplete,
+    // and overflow paths. The triggers only decide; the loop owns the actual
+    // model switch, tool refresh, and one-shot retry.
+    const beginContextPromotion = (input: {
+      toolUseContext: ToolUseContext
+      promotion: PromotionResult | null | undefined
+      originalError?: AssistantMessage
+    }): boolean => {
+      if (!compactionV2PromotionModule) return false
+      const decision = compactionV2PromotionModule.decidePromotionRetry({
+        currentModel: input.toolUseContext.options.mainLoopModel,
+        promotion: input.promotion,
+        attempt: promotionAttempt,
+      })
+      if (decision.kind !== 'retry') return false
+      input.toolUseContext.options.mainLoopModel = decision.targetModel
+      // Tools can depend on the active model/MCP state. The assembled system
+      // prompt and cache-safe params are rebuilt from this context at the top
+      // of the next iteration / next compaction call, so the retry re-sends
+      // the turn with scaffolding for the new model.
+      if (input.toolUseContext.options.refreshTools) {
+        const refreshedTools = input.toolUseContext.options.refreshTools()
+        if (refreshedTools !== input.toolUseContext.options.tools) {
+          input.toolUseContext.options.tools = refreshedTools
+        }
+      }
+      promotionAttempt = {
+        originalModel: decision.originalModel,
+        targetModel: decision.targetModel,
+        originalError: input.originalError,
+      }
+      promotionRetryInFlight = true
+      logEvent('tengu_context_promotion_retry', {
+        from_model:
+          decision.originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        to_model:
+          decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        reason: (input.promotion?.reason ??
+          'promoted') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        querySource:
+          querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        queryChainId: queryChainIdForAnalytics,
+        queryDepth: queryTracking.depth,
+      })
+      return true
+    }
+
+    /**
+     * The promotion retry failed on the larger model: revert to the original
+     * model and report the error to surface (the original overflow error when
+     * the promotion came from one; callers fall back to the current error
+     * otherwise). `undefined` means no revert was applied.
+     */
+    const revertContextPromotion = (
+      targetContext: ToolUseContext,
+    ): { originalError?: AssistantMessage } | undefined => {
+      if (!compactionV2PromotionModule || !promotionAttempt) return undefined
+      const decision = compactionV2PromotionModule.decidePromotionRetry({
+        currentModel: targetContext.options.mainLoopModel,
+        attempt: promotionAttempt,
+        retryFailed: true,
+      })
+      if (decision.kind !== 'revert') return undefined
+      targetContext.options.mainLoopModel = decision.originalModel
+      logEvent('tengu_context_promotion_retry_failed', {
+        from_model:
+          decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        to_model:
+          decision.originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        querySource:
+          querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        queryChainId: queryChainIdForAnalytics,
+        queryDepth: queryTracking.depth,
+      })
+      return { originalError: promotionAttempt.originalError }
     }
 
     let messagesForQuery = getMessagesAfterCompactBoundary(messages)
@@ -1005,6 +1089,9 @@ async function* queryLoop(
             cacheSafeParams: autoCompactCacheSafeParams,
             querySource,
             tracking,
+            // Promotion is single-shot: once any trigger spent the retry,
+            // threshold maintenance may only compact.
+            allowPromotion: !promotionAttempt,
           })
         } catch (error) {
           // The v2 chain must never take down the query loop; legacy
@@ -1023,6 +1110,32 @@ async function* queryLoop(
       }
       autoCompactOutcome = v2Result
       compactionV2DeferredApply = v2Result.deferredApply
+      // Threshold promotion comes before compaction too: a larger-window
+      // model avoids summarizing the history. Switch models and re-send this
+      // same request once. `midTurnSkip` was already consumed above, so the
+      // retried iteration re-runs the threshold pass (now with promotion
+      // disabled) instead of being wrongly deduplicated.
+      if (
+        !v2Result.wasCompacted &&
+        beginContextPromotion({
+          toolUseContext,
+          promotion: v2Result.promotion,
+        })
+      ) {
+        state = {
+          messages: messagesForQuery,
+          toolUseContext,
+          autoCompactTracking: tracking,
+          maxOutputTokensRecoveryCount,
+          hasAttemptedReactiveCompact,
+          maxOutputTokensOverride: undefined,
+          pendingToolUseSummary,
+          stopHookActive: undefined,
+          turnCount,
+          transition: undefined,
+        }
+        continue
+      }
       if (v2Result.reducedMessages) {
         // A speculative reduction covers only the snapshot; re-attach the
         // messages appended after it (same rule as a committed compaction).
@@ -1912,32 +2025,13 @@ async function* queryLoop(
         // single-shot, so revert to the original model and surface the
         // original error instead of compacting or retrying a second time.
         if (promotionRetryThisIteration && promotionAttempt) {
-          /* eslint-disable @typescript-eslint/no-require-imports */
-          const { decidePromotionRetry } =
-            require('./services/compaction2/triggers/promotion.js') as typeof import('./services/compaction2/triggers/promotion.js')
-          /* eslint-enable @typescript-eslint/no-require-imports */
-          const decision = decidePromotionRetry({
-            currentModel: toolUseContext.options.mainLoopModel,
-            attempt: promotionAttempt,
-            retryFailed: true,
-          })
-          if (decision.kind === 'revert') {
-            toolUseContext.options.mainLoopModel = decision.originalModel
-            logEvent('tengu_context_promotion_retry_failed', {
-              from_model:
-                decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-              to_model:
-                decision.originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-              querySource:
-                querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-              queryChainId: queryChainIdForAnalytics,
-              queryDepth: queryTracking.depth,
-            })
-            yield promotionAttempt.originalError
-            void executeStopFailureHooks(
-              promotionAttempt.originalError,
-              toolUseContext,
-            )
+          const reverted = revertContextPromotion(toolUseContext)
+          if (reverted) {
+            // Threshold/incomplete promotions have no triggering error; in
+            // that case surface the overflow from the retried model.
+            const surfaced = reverted.originalError ?? lastMessage!
+            yield surfaced
+            void executeStopFailureHooks(surfaced, toolUseContext)
             return { reason: 'prompt_too_long' }
           }
         }
@@ -2027,62 +2121,26 @@ async function* queryLoop(
             // Context promotion comes before compaction: the overflow trigger
             // reports a larger-window model and withholds the compact result.
             // Switch the request model in place and retry this same turn once.
-            const promotion = overflowResult.promotion
-            if (promotion) {
-              /* eslint-disable @typescript-eslint/no-require-imports */
-              const { decidePromotionRetry } =
-                require('./services/compaction2/triggers/promotion.js') as typeof import('./services/compaction2/triggers/promotion.js')
-              /* eslint-enable @typescript-eslint/no-require-imports */
-              const decision = decidePromotionRetry({
-                currentModel: toolUseContext.options.mainLoopModel,
-                promotion,
-                attempt: promotionAttempt,
+            if (
+              beginContextPromotion({
+                toolUseContext,
+                promotion: overflowResult.promotion,
+                originalError: lastMessage!,
               })
-              if (decision.kind === 'retry') {
-                const originalModel = decision.originalModel
-                toolUseContext.options.mainLoopModel = decision.targetModel
-                // Rebuild the request scaffolding for the new model. Tools can
-                // depend on the active model/MCP state; the assembled system
-                // prompt and cache-safe params are rebuilt from this context at
-                // the top of the next iteration / next compaction call.
-                if (toolUseContext.options.refreshTools) {
-                  const refreshedTools = toolUseContext.options.refreshTools()
-                  if (refreshedTools !== toolUseContext.options.tools) {
-                    toolUseContext.options.tools = refreshedTools
-                  }
-                }
-                promotionAttempt = {
-                  originalModel,
-                  targetModel: decision.targetModel,
-                  originalError: lastMessage!,
-                }
-                promotionRetryInFlight = true
-                logEvent('tengu_context_promotion_retry', {
-                  from_model:
-                    originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                  to_model:
-                    decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                  reason: (promotion.reason ??
-                    'promoted') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                  querySource:
-                    querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                  queryChainId: queryChainIdForAnalytics,
-                  queryDepth: queryTracking.depth,
-                })
-                state = {
-                  messages: messagesForQuery,
-                  toolUseContext,
-                  autoCompactTracking: tracking,
-                  maxOutputTokensRecoveryCount,
-                  hasAttemptedReactiveCompact,
-                  maxOutputTokensOverride: undefined,
-                  pendingToolUseSummary: undefined,
-                  stopHookActive: undefined,
-                  turnCount,
-                  transition: undefined,
-                }
-                continue
+            ) {
+              state = {
+                messages: messagesForQuery,
+                toolUseContext,
+                autoCompactTracking: tracking,
+                maxOutputTokensRecoveryCount,
+                hasAttemptedReactiveCompact,
+                maxOutputTokensOverride: undefined,
+                pendingToolUseSummary: undefined,
+                stopHookActive: undefined,
+                turnCount,
+                transition: undefined,
               }
+              continue
             }
             if (overflowResult.compactionResult) {
               // task_budget: same carryover as the legacy recovery path.
@@ -2294,6 +2352,13 @@ async function* queryLoop(
         if (!incompleteStop) {
           compactionV2Loop!.incompleteAttempted = false
         }
+        // A promotion retry that still ends incomplete failed on the larger
+        // model: revert to the original model. Promotion remains single-shot,
+        // and the normal stop handling below keeps the truncated turn instead
+        // of compacting a second time.
+        if (incompleteStop && promotionRetryThisIteration && promotionAttempt) {
+          revertContextPromotion(toolUseContext)
+        }
         const incompleteTokens =
           countV2ContextTokens(
             messagesForQuery,
@@ -2336,10 +2401,37 @@ async function* queryLoop(
               },
               querySource,
               tracking,
+              // Promotion is single-shot: once any trigger spent the retry,
+              // incomplete recovery may only compact.
+              allowPromotion: !promotionAttempt,
             })
           } catch (error) {
             logError(error)
             incompleteResult = { wasCompacted: false }
+          }
+          // Incomplete promotion comes before compaction: retry the same
+          // request on the larger-window model, discarding the truncated
+          // output. The next iteration rebuilds the system prompt/cache
+          // params and re-sends it once.
+          if (
+            beginContextPromotion({
+              toolUseContext,
+              promotion: incompleteResult.promotion,
+            })
+          ) {
+            state = {
+              messages: messagesForQuery,
+              toolUseContext,
+              autoCompactTracking: tracking,
+              maxOutputTokensRecoveryCount,
+              hasAttemptedReactiveCompact,
+              maxOutputTokensOverride: undefined,
+              pendingToolUseSummary: undefined,
+              stopHookActive: undefined,
+              turnCount,
+              transition: undefined,
+            }
+            continue
           }
           if (incompleteResult.compactionResult) {
             if (params.taskBudget) {

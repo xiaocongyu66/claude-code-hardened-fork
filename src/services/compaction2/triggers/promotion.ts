@@ -3,7 +3,7 @@
 // model switch and retry.
 import type { CompactionContext } from '../contracts.js'
 import type { ContextPromotion } from './overflow.js'
-import type { PromotionResult } from './types.js'
+import type { PromotionResult, TriggerDecision } from './types.js'
 
 export interface PromotionCandidate {
   model: string
@@ -77,6 +77,30 @@ export function selectPromotion(
     }
   }
   return best
+}
+
+/**
+ * Merge a promotion decision into a trigger decision that would otherwise
+ * compact. A promoted candidate suppresses compaction (the caller switches
+ * models and retries once instead); every other decision is attached so the
+ * skip reason stays observable. Used by the threshold and incomplete triggers,
+ * which evaluate promotion after their own trigger decision — the overflow
+ * trigger folds it in itself. All three therefore order promotion before
+ * compaction.
+ */
+export function applyPromotionDecision(
+  decision: TriggerDecision,
+  promotion: PromotionResult,
+): TriggerDecision {
+  if (promotion.kind !== 'promoted') {
+    return { ...decision, promotion }
+  }
+  return {
+    ...decision,
+    shouldCompact: false,
+    reason: `context-promoted: ${promotion.model}`,
+    promotion,
+  }
 }
 
 export interface PromotionAttempt {
