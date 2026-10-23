@@ -136,7 +136,7 @@ describe('runNativeTui', () => {
     expect(controlRequest).toBeDefined()
     expect(controlRequest.request_id).toBeString()
 
-    const decision = (await pending) as Record<string, unknown>
+    const decision = (await pending) as unknown as Record<string, unknown>
     expect(decision.behavior).toBe('allow')
     expect(decision.updatedInput).toEqual({ command: 'ls' })
     expect(answers).toHaveLength(1)
