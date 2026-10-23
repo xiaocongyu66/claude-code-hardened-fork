@@ -167,6 +167,7 @@ dependencies = [
 name = "cch-tui-bin"
 version = "0.1.0"
 dependencies = [
+ "cch-tui-actions",
  "cch-tui-core",
  "cch-tui-dialog",
  "cch-tui-fullscreen",

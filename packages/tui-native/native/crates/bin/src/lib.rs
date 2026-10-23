@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use cch_tui_actions::{ExpandLimits, ExpandState, project};
 use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer};
 use cch_tui_dialog::PermissionDialog;
 use cch_tui_fullscreen::TranscriptModel;
@@ -139,6 +140,8 @@ pub fn run_with_deadline(
     let mut dialog: Option<PermissionDialog> = None;
     let mut search: Option<HistorySearch> = None;
     let mut panel = TaskPanel::new();
+    let mut expand = ExpandState::default();
+    let mut all_expanded = false;
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
     let mut next_context_poll = Instant::now() + Duration::from_secs(2);
@@ -192,7 +195,14 @@ pub fn run_with_deadline(
                     }
                     panel.apply_engine_event(&event);
                     let frozen = view.ingest(&event);
-                    freeze(&mut session, &mut transcript, fullscreen, &frozen)?;
+                    // Inline rows are frozen into scrollback and cannot be
+                    // re-projected, so collapse only applies to fullscreen.
+                    let projected = if fullscreen {
+                        project(&frozen, &expand, ExpandLimits::default())
+                    } else {
+                        frozen.clone()
+                    };
+                    freeze(&mut session, &mut transcript, fullscreen, &projected)?;
                 }
                 Ok(EngineMessage::Malformed(line)) => {
                     view.completed
@@ -440,6 +450,32 @@ pub fn run_with_deadline(
                                     Some(entry) => buffer.set_text(entry),
                                     None => buffer.set_text(""),
                                 }
+                            }
+                        } else if action == Action::APP_TOGGLE_TRANSCRIPT {
+                            if fullscreen {
+                                all_expanded = !all_expanded;
+                                if all_expanded {
+                                    expand.expand_all();
+                                } else {
+                                    expand.collapse_all();
+                                }
+                                let rows =
+                                    project(&view.completed, &expand, ExpandLimits::default());
+                                transcript.set_rows(rows);
+                                transcript.scroll_to_bottom();
+                                view.status = Some(
+                                    if all_expanded {
+                                        "tool output expanded"
+                                    } else {
+                                        "tool output collapsed"
+                                    }
+                                    .into(),
+                                );
+                            } else {
+                                view.completed.push(Row::new(
+                                    RowStyle::System,
+                                    "expand/collapse needs fullscreen mode".to_string(),
+                                ));
                             }
                         } else if action == Action::HISTORY_SEARCH {
                             let candidates: Vec<String> =
