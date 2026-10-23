@@ -46,3 +46,24 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 3. If Ink's behaviour depends on React/Yoga (measured heights, memoization),
    implement the intent, not the mechanism, and note the difference here.
 4. Update this table in the same commit that lands the feature.
+
+## Fidelity audit (visual constants)
+
+Verified against the Ink app; each row names the source of truth.
+
+| Element | Source | Rust | Status |
+|---|---|---|---|
+| Prompt glyph | `figures.pointer` (`PromptInputModeIndicator.tsx:57`) | `❯ ` in `draw_prompt` | ✅ |
+| Message bullet | `BLACK_CIRCLE` = `⏺` (darwin) / `●` (`figures.ts:12`) | `message_bullet()` | ✅ |
+| Assistant prefix | `AssistantTextMessage.tsx:190-196` (bullet column, width 2) | first line `⏺ `, rest 2 spaces | ✅ |
+| Tool call label | `AssistantToolUseMessage.tsx:137-160` (`⏺ ` + bold name + `(input)`) | `ToolCall` row + bullet; bold name | 🟡 args are a JSON summary, not `renderToolUseMessage()` |
+| Tool bullet colour | `ToolUseLoader.tsx:16` (success / error / dim while unresolved) | not yet tracked | ⬜ |
+| Tool result gutter | `MessageResponse.tsx:20-25` (`  ⎿  ` dim, 5-col) | `  ⎿  ` + 5-space continuation | ✅ |
+| User prompt block | `UserPromptMessage.tsx:72-84`, `userMessageBackground` | full-width bg, 1 col right padding | ✅ |
+| Streaming text | `Messages.tsx:921-933` (bullet + StreamingMarkdown, marginTop 1) | plain live text | ⬜ |
+| Spinner | `Spinner.tsx:42-44,537` (`·✢✱✶✻✽` + reverse, 120ms) | same frames, 120ms | ✅ |
+| Compact boundary | `CompactBoundaryMessage.tsx:11-13` | `✻ Conversation compacted (ctrl+o for history)` | ✅ |
+| Diff colours | `theme.ts` `diffAdded`/`diffRemoved` used as **background** | `bg(diff_added_bg/diff_removed_bg)` | ✅ |
+| Palette values | `theme.ts` dark/light tables | exact RGB, line references in `crates/theme` | ✅ |
+| Message spacing | `marginTop={addMargin ? 1 : 0}` (`AssistantTextMessage.tsx:186`) | blank line between blocks | 🟡 in flight |
+| Status line | `StatusLine.tsx` | model · session · ctx% · tasks | 🟡 layout differs |
