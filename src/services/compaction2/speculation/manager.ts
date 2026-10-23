@@ -6,7 +6,8 @@
 //   idle --maybeStart (in band)--> running --runner resolves--> armed
 //   running --runner rejects / timeout--> idle
 //   armed --consume (anchor still live)--> idle (result + appended messages)
-//   armed --consume (branch rewritten) / timeout / cancel--> idle (discarded)
+//   armed --consume (branch rewritten / stale TTL) / timeout / cancel
+//         --> idle (discarded)
 //
 // The manager never blocks the query loop: `maybeStart` only schedules the
 // injected runner, and `consume` never awaits an in-flight run. The transcript
@@ -71,6 +72,13 @@ export interface SpeculationManagerOptions<TResult, TContext = undefined> {
   /** Defaults to false: callers must opt in. */
   enabled?: boolean
   timeoutMs?: number
+  /**
+   * How long an armed result may wait for a consumer before it is discarded.
+   * Defaults to `timeoutMs`: a result that sits armed while the loop never
+   * reaches the threshold would otherwise pin the frozen transcript and
+   * runner context forever. Checked at consume time (`now - finishedAt`).
+   */
+  armedTtlMs?: number
 }
 
 /** Commit payload: the armed result plus the turn appended after the snapshot. */
@@ -114,8 +122,10 @@ interface SpeculationRun<TResult, TContext> {
  * rewritten, truncated from the front, or the anchor moved).
  *
  * The anchor is the snapshot's last message; it must still sit at the same
- * index. Earlier uuids are cross-checked when both sides carry one. With no
- * uuid on the last message we can only commit an unchanged transcript.
+ * index. Earlier uuids are cross-checked when both sides carry one. A
+ * snapshot without an anchor uuid is never committed: comparing lengths and
+ * surviving uuids cannot detect a same-length rewrite of the tail, which
+ * would commit a summary computed from a different branch.
  */
 function findAppendedMessages<TContext>(
   snapshot: SpeculationSnapshot<TContext>,
@@ -123,17 +133,8 @@ function findAppendedMessages<TContext>(
 ): Message[] | undefined {
   const snapshotMessages = snapshot.messages
   const anchor = snapshot.lastUuid
-  if (anchor === undefined) {
-    if (live.length !== snapshotMessages.length) return undefined
-    for (let i = 0; i < snapshotMessages.length; i++) {
-      const before = snapshotMessages[i]?.uuid
-      const now = live[i]?.uuid
-      if (before !== undefined && now !== undefined && before !== now) {
-        return undefined
-      }
-    }
-    return []
-  }
+  // No anchor uuid → no safe way to prove the snapshot is still a prefix.
+  if (anchor === undefined) return undefined
   const anchorIndex = live.findIndex(message => message.uuid === anchor)
   if (anchorIndex !== snapshotMessages.length - 1) return undefined
   for (let i = 0; i < snapshotMessages.length; i++) {
@@ -155,6 +156,7 @@ export function createSpeculationManager<
   const now = options.now ?? (() => Date.now())
   const enabled = options.enabled ?? false
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPECULATION_TIMEOUT_MS
+  const armedTtlMs = options.armedTtlMs ?? timeoutMs
 
   let run: SpeculationRun<TResult, TContext> | undefined
 
@@ -257,6 +259,17 @@ export function createSpeculationManager<
     if (
       current.finishedAt !== undefined &&
       current.finishedAt - current.snapshot.startedAt > timeoutMs
+    ) {
+      current.controller.abort()
+      return undefined
+    }
+    // The run finished within its budget, but the result may have been armed
+    // for a long time (the loop stayed below the threshold). Age is measured
+    // from `finishedAt` at consumption time, not only from the run duration:
+    // a stale preview describes a transcript that may no longer be relevant.
+    if (
+      current.finishedAt === undefined ||
+      now() - current.finishedAt > armedTtlMs
     ) {
       current.controller.abort()
       return undefined

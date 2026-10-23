@@ -53,6 +53,8 @@ interface Spies {
   cleanupCalls: number
   resetCalls: number
   sideEffectCalls: number
+  postCompactCalls: number
+  postCompactSummary: string | undefined
   seenOptions: { deferApply?: boolean } | undefined
 }
 
@@ -63,7 +65,30 @@ function makeSpies(): Spies {
     cleanupCalls: 0,
     resetCalls: 0,
     sideEffectCalls: 0,
+    postCompactCalls: 0,
+    postCompactSummary: undefined,
     seenOptions: undefined,
+  }
+}
+
+/** Commit-time dependency seams shared by the apply tests. */
+function applyDeps(spies: Spies) {
+  return {
+    persist: async () => {
+      spies.persistCalls++
+      return 'entry'
+    },
+    resetLastSummarizedMessageId: () => {
+      spies.resetCalls++
+    },
+    cleanup: () => {
+      spies.cleanupCalls++
+    },
+    executePostCompactHooks: async (data: { compactSummary: string }) => {
+      spies.postCompactCalls++
+      spies.postCompactSummary = data.compactSummary
+      return {}
+    },
   }
 }
 
@@ -141,6 +166,8 @@ describe('speculative preview (deferApply)', () => {
       messages: [message, ...tail],
     })
     expect(consumed?.appendedMessages).toEqual(tail)
+    // Preview must not fire commit-only hooks.
+    expect(spies.postCompactCalls).toBe(0)
 
     await applyCompactionOutcome(
       consumed?.result.deferredApply?.outcome,
@@ -151,24 +178,50 @@ describe('speculative preview (deferApply)', () => {
           spies.sideEffectCalls++
         },
       },
-      {
-        persist: async () => {
-          spies.persistCalls++
-          return null
-        },
-        resetLastSummarizedMessageId: () => {
-          spies.resetCalls++
-        },
-        cleanup: () => {
-          spies.cleanupCalls++
-        },
-      },
+      applyDeps(spies),
     )
 
     expect(spies.persistCalls).toBe(1)
     expect(spies.cleanupCalls).toBe(1)
     expect(spies.sideEffectCalls).toBe(1)
     expect(spies.resetCalls).toBe(1)
+    // The PostCompact hooks the preview skipped run exactly once at commit,
+    // with the committed summary.
+    expect(spies.postCompactCalls).toBe(1)
+    expect(spies.postCompactSummary).toBe('summary text')
+  })
+
+  test('commit clears the live file caches (the preview only cleared its clone)', async () => {
+    const spies = makeSpies()
+    const result = await runCompactionV2(RUN_REQUEST, {
+      soft: softDeps(spies, true),
+      deferApply: true,
+      env: {},
+    })
+    const outcome = result.outcome
+    expect(outcome?.kind).toBe('compacted')
+
+    const readFileState = new Map([['/a.ts', { content: 'x' }]])
+    const loadedNestedMemoryPaths = new Set(['/mem/a.md'])
+    const liveContext = {
+      readFileState,
+      loadedNestedMemoryPaths,
+      abortController: new AbortController(),
+    }
+
+    await applyCompactionOutcome(
+      outcome,
+      {
+        messages: [message],
+        querySource: 'repl_main_thread',
+        applySideEffects: () => {},
+        toolUseContext: liveContext as never,
+      },
+      applyDeps(spies),
+    )
+
+    expect(readFileState.size).toBe(0)
+    expect(loadedNestedMemoryPaths.size).toBe(0)
   })
 
   test('computes the summary without persisting, cleaning up, or applying writes', async () => {
@@ -254,18 +307,7 @@ describe('speculative preview (deferApply)', () => {
           spies.sideEffectCalls++
         },
       },
-      {
-        persist: async () => {
-          spies.persistCalls++
-          return 'entry' as never
-        },
-        resetLastSummarizedMessageId: () => {
-          spies.resetCalls++
-        },
-        cleanup: () => {
-          spies.cleanupCalls++
-        },
-      },
+      applyDeps(spies),
     )
 
     expect(entry).toBe('entry' as never)
@@ -273,6 +315,7 @@ describe('speculative preview (deferApply)', () => {
     expect(spies.cleanupCalls).toBe(1)
     expect(spies.resetCalls).toBe(1)
     expect(spies.sideEffectCalls).toBe(1)
+    expect(spies.postCompactCalls).toBe(1)
   })
 
   test('direct (non-deferred) runs keep writing immediately', async () => {
@@ -318,23 +361,27 @@ describe('speculative preview (deferApply)', () => {
           spies.sideEffectCalls++
         },
       },
-      {
-        persist: async () => {
-          spies.persistCalls++
-          return null
-        },
-        resetLastSummarizedMessageId: () => {
-          spies.resetCalls++
-        },
-        cleanup: () => {
-          spies.cleanupCalls++
-        },
-      },
+      applyDeps(spies),
     )
 
     expect(spies.persistCalls).toBe(1)
     expect(spies.cleanupCalls).toBe(0)
     expect(spies.resetCalls).toBe(0)
     expect(spies.sideEffectCalls).toBe(0)
+    // Remote/snapcompact never run PostCompact hooks on the direct path.
+    expect(spies.postCompactCalls).toBe(0)
   })
 })
+
+// Integration gap (recorded, not silently missing): the query.ts promotion
+// wiring — config validation before switching, the one-shot retry, and the
+// revert to the original model when the retried request ends with any
+// isApiErrorMessage — is exercised by the query() loop with injected deps
+// (`src/__tests__/queryAutonomyProviderBoundary.test.ts` is the harness
+// template). That harness needs `feature('COMPACTION_V2')` plus a settings
+// stub for `contextWindowOverrides`, which pulls the full query graph; this
+// workspace's dependency cache cannot resolve it (missing @opentelemetry /
+// ajv transitive packages), so the case is recorded here rather than faked
+// with an orchestrator-only unit test that never touches query.ts.
+// Tracked as a follow-up integration test; no skipped placeholder is kept here
+// so the suite stays free of silently-passing entries.

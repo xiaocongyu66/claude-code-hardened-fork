@@ -524,10 +524,19 @@ export async function compactConversation(
       hookType: 'pre_compact',
     })
 
-    // Execute PreCompact hooks. A deferred (speculative) run must not fire
-    // user hooks — the result can still be discarded, and hooks may run
-    // arbitrary commands. The committed pass runs them normally.
+    // Execute PreCompact hooks. A deferred (speculative) run skips them on
+    // purpose: these hooks produce custom instructions that must be folded
+    // into the summary request *before* it runs, so they cannot be replayed
+    // at commit time (the speculative summary has already been computed), and
+    // a discarded preview must not run arbitrary user commands. The commit
+    // path therefore never runs PreCompact hooks — only PostCompact (which
+    // receives the summary) is deferred.
     context.setSDKStatus?.('compacting')
+    if (deferApply) {
+      logForDebugging(
+        '[compact] deferApply: skipping PreCompact hooks (cannot run before the speculative summary)',
+      )
+    }
     const hookResult = deferApply
       ? { newCustomInstructions: undefined, userDisplayMessage: undefined }
       : await executePreCompactHooks(
@@ -708,14 +717,19 @@ export async function compactConversation(
       postCompactFileAttachments.push(createAttachmentMessage(att))
     }
 
-    context.onCompactProgress?.({
-      type: 'hooks_start',
-      hookType: 'session_start',
-    })
-    // Execute SessionStart hooks after successful compaction
-    const hookMessages = await processSessionStartHooks('compact', {
-      model: context.options.mainLoopModel,
-    })
+    // SessionStart hooks fire only on a committed compaction. A deferred
+    // (speculative) preview may still be discarded, and its hooks can run
+    // arbitrary user commands — never run them for a preview.
+    let hookMessages: HookResultMessage[] = []
+    if (!deferApply) {
+      context.onCompactProgress?.({
+        type: 'hooks_start',
+        hookType: 'session_start',
+      })
+      hookMessages = await processSessionStartHooks('compact', {
+        model: context.options.mainLoopModel,
+      })
+    }
 
     // Create the compact boundary marker and summary messages before the
     // event so we can compute the true resulting-context size.
@@ -820,8 +834,11 @@ export async function compactConversation(
       })(),
     })
 
-    // Reset cache read baseline so the post-compact drop isn't flagged as a break
-    if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
+    // Reset cache read baseline so the post-compact drop isn't flagged as a
+    // break. Preview runs must not touch the live baseline: the result can
+    // still be discarded, and the baseline must keep describing the live
+    // request chain until the commit path runs.
+    if (!deferApply && feature('PROMPT_CACHE_BREAK_DETECTION')) {
       notifyCompaction(
         context.options.querySource ?? 'compact',
         context.agentId,
@@ -842,10 +859,12 @@ export async function compactConversation(
       applyCompactConversationSideEffects(messages)
     }
 
-    context.onCompactProgress?.({
-      type: 'hooks_start',
-      hookType: 'post_compact',
-    })
+    if (!deferApply) {
+      context.onCompactProgress?.({
+        type: 'hooks_start',
+        hookType: 'post_compact',
+      })
+    }
     const postCompactHookResult = deferApply
       ? { userDisplayMessage: undefined }
       : await executePostCompactHooks(

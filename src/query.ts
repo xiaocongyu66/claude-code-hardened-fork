@@ -148,6 +148,7 @@ import {
   shouldShowCacheWarning,
 } from './utils/cacheWarning.js'
 import type {
+  CompactionV2QueryRequest,
   CompactionV2QueryResult,
   CompactionV2Tracking,
 } from './services/compaction2/orchestrator.js'
@@ -314,6 +315,41 @@ type CompactionSpeculationManager = SpeculationManager<
 >
 
 let compactionSpeculationManager: CompactionSpeculationManager | null = null
+
+/**
+ * Speculation is main-thread only: subagent/compact-fork queries share the
+ * process-level slot and must neither start, consume, nor cancel each other's
+ * snapshots.
+ */
+function speculationEligible(
+  toolUseContext: Pick<ToolUseContext, 'agentId'>,
+  querySource: QuerySource,
+): boolean {
+  return (
+    !toolUseContext.agentId &&
+    querySource !== 'compact' &&
+    querySource !== 'session_memory'
+  )
+}
+
+/**
+ * Config-only availability check for a promotion target: a model that is not
+ * allowed by `settings.availableModels` cannot serve the retry, so the caller
+ * must compact instead of switching and failing on the next request.
+ */
+function isPromotionTargetAvailable(model: string): boolean {
+  try {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const { isModelAllowed } =
+      require('./utils/model/modelAllowlist.js') as typeof import('./utils/model/modelAllowlist.js')
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    return isModelAllowed(model)
+  } catch {
+    // Unresolvable config: treat the target as unavailable (compaction is the
+    // safe fallback) rather than switching to a model we cannot validate.
+    return false
+  }
+}
 
 // Background runs are compute-only (`deferApply`): a preview that is armed and
 // later discarded leaves no journal/transcript/cleanup trace. Commit applies
@@ -498,6 +534,16 @@ export async function* query(
     thrownError = error
     throw error
   } finally {
+    // Release any in-flight/armed speculative run. Every query exit path
+    // (normal end, Esc abort, early return, /clear tearing the generator
+    // down) funnels through this block; without it the frozen snapshot +
+    // runnerContext would outlive the turn and keep the single-run slot
+    // occupied forever. Main-thread queries only — a subagent finishing must
+    // not cancel the parent's armed result.
+    if (speculationEligible(params.toolUseContext, params.querySource)) {
+      compactionSpeculationManager?.cancel()
+    }
+
     await finalizeAutonomyCommandsForTurn({
       commands: consumedAutonomyCommands,
       outcome: getAutonomyTurnOutcome({
@@ -768,6 +814,22 @@ async function* queryLoop(
         attempt: promotionAttempt,
       })
       if (decision.kind !== 'retry') return false
+      // Validate the target against resolvable config before switching. An
+      // unknown/disallowed model would fail the retried request itself; the
+      // caller then falls through to compaction instead of switching.
+      if (!isPromotionTargetAvailable(decision.targetModel)) {
+        logEvent('tengu_context_promotion_unavailable', {
+          from_model:
+            decision.originalModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          to_model:
+            decision.targetModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          querySource:
+            querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          queryChainId: queryChainIdForAnalytics,
+          queryDepth: queryTracking.depth,
+        })
+        return false
+      }
       input.toolUseContext.options.mainLoopModel = decision.targetModel
       // Tools can depend on the active model/MCP state. The assembled system
       // prompt and cache-safe params are rebuilt from this context at the top
@@ -816,6 +878,9 @@ async function* queryLoop(
         retryFailed: true,
       })
       if (decision.kind !== 'revert') return undefined
+      // Any promotion retry failure reverts the model — an overflow, a
+      // truncated turn, or a plain API error (unknown model, auth, 400…).
+      // Later turns must not keep sending requests to the failing target.
       targetContext.options.mainLoopModel = decision.originalModel
       logEvent('tengu_context_promotion_retry_failed', {
         from_model:
@@ -828,6 +893,28 @@ async function* queryLoop(
         queryDepth: queryTracking.depth,
       })
       return { originalError: promotionAttempt.originalError }
+    }
+
+    /**
+     * The pass withheld compaction because it selected a promotion candidate
+     * that cannot be used (not allowed by config / unresolvable). The retry
+     * was never started, so re-run the same pass with promotion disabled and
+     * compact directly instead of ending the turn without recovery.
+     */
+    const promotionTargetBlocked = (
+      promotion: PromotionResult | null | undefined,
+    ): boolean =>
+      promotion?.kind === 'promoted' &&
+      !isPromotionTargetAvailable(promotion.model)
+
+    const compactWithoutPromotion = async (
+      request: CompactionV2QueryRequest,
+    ): Promise<CompactionV2QueryResult> => {
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const { runCompactionV2ForQuery } =
+        require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      return runCompactionV2ForQuery({ ...request, allowPromotion: false })
     }
 
     let messagesForQuery = getMessagesAfterCompactBoundary(messages)
@@ -1028,12 +1115,8 @@ async function* queryLoop(
       )
       // Main-thread turns only: subagent/compact-fork loops share this
       // process-level slot and must never consume each other's snapshots.
-      const speculationAllowed =
-        !toolUseContext.agentId &&
-        querySource !== 'compact' &&
-        querySource !== 'session_memory'
       const speculation =
-        midTurnSkip || !speculationAllowed
+        midTurnSkip || !speculationEligible(toolUseContext, querySource)
           ? null
           : getCompactionSpeculationManager()
       if (speculation) {
@@ -1135,6 +1218,39 @@ async function* queryLoop(
           transition: undefined,
         }
         continue
+      }
+      if (
+        !v2Result.wasCompacted &&
+        !promotionAttempt &&
+        promotionTargetBlocked(v2Result.promotion)
+      ) {
+        // The promotion target cannot be used and the pass withheld
+        // compaction for it: compact now instead of leaving the context over
+        // the threshold.
+        try {
+          v2Result = await compactWithoutPromotion({
+            messages: messagesForQuery,
+            model: toolUseContext.options.mainLoopModel,
+            trigger: 'threshold',
+            tokenCount: v2TokenCount,
+            toolUseContext,
+            cacheSafeParams: autoCompactCacheSafeParams,
+            querySource,
+            tracking,
+          })
+        } catch (error) {
+          logError(error)
+          v2Result = {
+            wasCompacted: false,
+            ...(isAbortError(error)
+              ? {}
+              : {
+                  consecutiveFailures: (tracking?.consecutiveFailures ?? 0) + 1,
+                }),
+          }
+        }
+        autoCompactOutcome = v2Result
+        compactionV2DeferredApply = v2Result.deferredApply
       }
       if (v2Result.reducedMessages) {
         // A speculative reduction covers only the snapshot; re-attach the
@@ -1253,6 +1369,10 @@ async function* queryLoop(
           await applyCompactionOutcome(compactionV2DeferredApply.outcome, {
             messages: compactionV2DeferredApply.messages,
             querySource,
+            // Commit on the live context: the preview only touched a clone.
+            toolUseContext,
+            // The only deferred commit site is the threshold pass.
+            trigger: 'auto',
           })
         } catch (error) {
           // Applying must never take down the loop; the summary is already
@@ -2142,6 +2262,34 @@ async function* queryLoop(
               }
               continue
             }
+            if (
+              !promotionAttempt &&
+              promotionTargetBlocked(overflowResult.promotion)
+            ) {
+              // Promotion target unusable: recover by compacting instead.
+              try {
+                overflowResult = await compactWithoutPromotion({
+                  messages: messagesForQuery,
+                  model: toolUseContext.options.mainLoopModel,
+                  trigger: 'overflow',
+                  tokenCount: overflowTokens,
+                  overflowDetected: true,
+                  toolUseContext,
+                  cacheSafeParams: {
+                    systemPrompt,
+                    userContext,
+                    systemContext,
+                    toolUseContext,
+                    forkContextMessages: messagesForQuery,
+                  },
+                  querySource,
+                  tracking,
+                })
+              } catch (error) {
+                logError(error)
+                overflowResult = { wasCompacted: false }
+              }
+            }
             if (overflowResult.compactionResult) {
               // task_budget: same carryover as the legacy recovery path.
               if (params.taskBudget) {
@@ -2433,6 +2581,34 @@ async function* queryLoop(
             }
             continue
           }
+          if (
+            !promotionAttempt &&
+            promotionTargetBlocked(incompleteResult.promotion)
+          ) {
+            // Promotion target unusable: compact the truncated turn now.
+            try {
+              incompleteResult = await compactWithoutPromotion({
+                messages: messagesForQuery,
+                model: toolUseContext.options.mainLoopModel,
+                trigger: 'incomplete',
+                tokenCount: incompleteTokens,
+                stopReason,
+                toolUseContext,
+                cacheSafeParams: {
+                  systemPrompt,
+                  userContext,
+                  systemContext,
+                  toolUseContext,
+                  forkContextMessages: messagesForQuery,
+                },
+                querySource,
+                tracking,
+              })
+            } catch (error) {
+              logError(error)
+              incompleteResult = { wasCompacted: false }
+            }
+          }
           if (incompleteResult.compactionResult) {
             if (params.taskBudget) {
               const preCompactContext =
@@ -2489,6 +2665,13 @@ async function* queryLoop(
       // real response — hooks evaluating it create a death spiral:
       // error → hook blocking → retry → error → …
       if (lastMessage?.isApiErrorMessage) {
+        // The promotion retry itself failed with a plain API error (unknown
+        // model, missing credentials, 400, …) — not only overflow/incomplete.
+        // Revert to the original model so the rest of the session keeps
+        // working; the turn still ends with this error.
+        if (promotionRetryThisIteration && promotionAttempt) {
+          revertContextPromotion(toolUseContext)
+        }
         void executeStopFailureHooks(lastMessage, toolUseContext)
         return {
           reason: 'model_error',

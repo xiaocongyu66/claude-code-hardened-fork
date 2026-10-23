@@ -514,7 +514,7 @@ export async function runCompactionV2(
         // Handoff always summarizes with `deferApply: true` (its internal
         // runner must not write while the outcome can still be guard-blocked).
         // The outcome was accepted here, so commit those writes now.
-        applyLegacyOutcomeSideEffects(
+        await commitLegacyOutcomeSideEffects(
           outcome,
           request.messages,
           options.querySource,
@@ -524,6 +524,10 @@ export async function runCompactionV2(
               : {}),
             ...(options.applyDeps ?? {}),
           },
+          // No live tool context here: the direct handoff path clears caches
+          // through compactConversation's own clone handling.
+          undefined,
+          request.trigger === 'manual' ? 'manual' : 'auto',
         )
         if (options.persist) {
           await options.persist(outcome, request.messages)
@@ -614,6 +618,14 @@ export interface ApplyCompactionOutcomeContext {
    * marker used by the direct path). Kept injectable for the commit tests.
    */
   applySideEffects?: (messages: readonly Message[]) => void
+  /**
+   * Live tool context. The preview ran against a clone (its caches were
+   * cleared on the copy); committing clears the live caches exactly like the
+   * direct `compactConversation` path does.
+   */
+  toolUseContext?: ToolUseContext
+  /** Trigger passed to deferred PostCompact hooks. Defaults to 'auto'. */
+  trigger?: 'manual' | 'auto'
 }
 
 /** Injectable commit-time dependencies (tests). */
@@ -625,6 +637,11 @@ export interface ApplyCompactionOutcomeDeps {
   resetLastSummarizedMessageId?: (id: undefined) => void
   cleanup?: (querySource?: QuerySource) => void
   applySideEffects?: (messages: readonly Message[]) => void
+  /** Runs the PostCompact hooks a preview skipped. */
+  executePostCompactHooks?: (
+    data: { trigger: 'manual' | 'auto'; compactSummary: string },
+    signal?: AbortSignal,
+  ) => Promise<{ userDisplayMessage?: string }>
 }
 
 /**
@@ -644,16 +661,66 @@ export async function applyCompactionOutcome(
 ): Promise<CompactionSessionEntry | null> {
   if (outcome?.kind !== 'compacted') return null
   const messages = ctx.messages ?? []
-  if (isLegacyBackedOutcome(outcome)) {
-    applyLegacyOutcomeSideEffects(outcome, messages, ctx.querySource, {
+  await commitLegacyOutcomeSideEffects(
+    outcome,
+    messages,
+    ctx.querySource,
+    {
       ...(ctx.applySideEffects
         ? { applySideEffects: ctx.applySideEffects }
         : {}),
       ...deps,
-    })
-  }
+    },
+    ctx.toolUseContext,
+    ctx.trigger,
+  )
   const persist = deps.persist ?? persistCompactionEntry
   return (await persist(outcome, messages)) as CompactionSessionEntry | null
+}
+
+/**
+ * Commit-time writes owned by methods that summarized through
+ * `compactConversation` (soft) or its soft runner adapter (handoff).
+ *
+ * Preview runs skipped the transcript write, the summarized-id reset, the
+ * cleanup, the live cache clears, and the PostCompact hooks. Call exactly once
+ * per accepted outcome; discarded previews never reach this function.
+ * Remote/snapcompact never run these on the direct path, so they return early.
+ */
+async function commitLegacyOutcomeSideEffects(
+  outcome: Extract<CompactionOutcome, { kind: 'compacted' }>,
+  messages: readonly Message[],
+  querySource: QuerySource | undefined,
+  deps: ApplyCompactionOutcomeDeps,
+  toolUseContext?: ToolUseContext,
+  trigger?: 'manual' | 'auto',
+): Promise<void> {
+  if (!isLegacyBackedOutcome(outcome)) return
+  const applySideEffects =
+    deps.applySideEffects ?? loadCompact().applyCompactConversationSideEffects
+  applySideEffects(messages)
+  const reset =
+    deps.resetLastSummarizedMessageId ??
+    loadSessionMemory().setLastSummarizedMessageId
+  reset(undefined)
+  const cleanup = deps.cleanup ?? loadPostCompactCleanup().runPostCompactCleanup
+  cleanup(querySource)
+  // The preview ran against clones; clear the live caches here just like the
+  // direct `compactConversation` path does.
+  toolUseContext?.readFileState.clear()
+  toolUseContext?.loadedNestedMemoryPaths?.clear()
+  // PreCompact hooks are NOT replayed: they shape the summary request that
+  // already ran (see compact.ts). PostCompact receives the summary, so it can
+  // run now, exactly once.
+  const summary = resolveCompactionSummary(outcome)
+  if (summary) {
+    const executePostCompactHooks =
+      deps.executePostCompactHooks ?? loadHooks().executePostCompactHooks
+    await executePostCompactHooks(
+      { trigger: trigger ?? 'auto', compactSummary: summary },
+      toolUseContext?.abortController?.signal,
+    )
+  }
 }
 
 /**
@@ -675,24 +742,6 @@ function isLegacyBackedOutcome(
     'boundaryMarker' in candidate &&
     'summaryMessages' in candidate
   )
-}
-
-function applyLegacyOutcomeSideEffects(
-  outcome: Extract<CompactionOutcome, { kind: 'compacted' }>,
-  messages: readonly Message[],
-  querySource: QuerySource | undefined,
-  deps: ApplyCompactionOutcomeDeps,
-): void {
-  if (!isLegacyBackedOutcome(outcome)) return
-  const applySideEffects =
-    deps.applySideEffects ?? loadCompact().applyCompactConversationSideEffects
-  applySideEffects(messages)
-  const reset =
-    deps.resetLastSummarizedMessageId ??
-    loadSessionMemory().setLastSummarizedMessageId
-  reset(undefined)
-  const cleanup = deps.cleanup ?? loadPostCompactCleanup().runPostCompactCleanup
-  cleanup(querySource)
 }
 
 function resolveCompactionSummary(
@@ -1691,5 +1740,9 @@ function loadSessionMemory(): typeof import('../SessionMemory/sessionMemoryUtils
 
 function loadTokens(): typeof import('../../utils/tokens.js') {
   return require('../../utils/tokens.js') as typeof import('../../utils/tokens.js')
+}
+
+function loadHooks(): typeof import('../../utils/hooks.js') {
+  return require('../../utils/hooks.js') as typeof import('../../utils/hooks.js')
 }
 /* eslint-enable @typescript-eslint/no-require-imports */
