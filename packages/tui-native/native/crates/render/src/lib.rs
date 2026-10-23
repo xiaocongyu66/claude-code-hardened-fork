@@ -124,6 +124,14 @@ fn row_style(style: RowStyle) -> Style {
         RowStyle::System => Style::default().fg(Color::DarkGray),
         RowStyle::Error => Style::default().fg(Color::Red),
         RowStyle::Tool => Style::default().fg(Color::Yellow),
+        // Markdown row roles. The markdown crate emits the text (markers,
+        // prefixes and indentation included); these only pick a palette token.
+        RowStyle::Heading(_) => Style::default().add_modifier(Modifier::BOLD),
+        RowStyle::InlineCode => Style::default().fg(Color::Magenta),
+        RowStyle::CodeBlock => Style::default().fg(Color::Green),
+        RowStyle::ListItem => Style::default(),
+        RowStyle::Blockquote => Style::default().fg(Color::DarkGray),
+        RowStyle::Rule => Style::default().fg(Color::DarkGray),
     }
 }
 
