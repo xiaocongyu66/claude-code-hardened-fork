@@ -759,11 +759,12 @@ function createQueryRemoteDeps(model: string): RemoteMethodDeps {
  */
 function createQueryPromotion(): ContextPromotion | null {
   try {
-    const { getInitialSettings } = require('../../utils/settings/settings.js') as {
-      getInitialSettings(): {
-        contextWindowOverrides?: Record<string, number>
+    const { getInitialSettings } =
+      require('../../utils/settings/settings.js') as {
+        getInitialSettings(): {
+          contextWindowOverrides?: Record<string, number>
+        }
       }
-    }
     const overrides = getInitialSettings().contextWindowOverrides
     if (!overrides) return null
     const candidates = collectPromotionCandidates({

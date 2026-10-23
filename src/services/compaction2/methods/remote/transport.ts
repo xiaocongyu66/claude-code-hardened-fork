@@ -203,9 +203,7 @@ export function buildRemoteTransport(
     return {
       fetch: createAuthorizedFetch(baseFetch, async () => headers),
       apiKey: apiKey ?? undefined,
-      baseUrl: normalizeRemoteBaseUrl(
-        input.baseUrl ?? env.ANTHROPIC_BASE_URL,
-      ),
+      baseUrl: normalizeRemoteBaseUrl(input.baseUrl ?? env.ANTHROPIC_BASE_URL),
     }
   }
 

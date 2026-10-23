@@ -40,9 +40,7 @@ describe('selectPromotion', () => {
   })
 
   test('ignores candidates with the same or a smaller window', () => {
-    const narrow = candidates.filter(c =>
-      ['same', 'smaller'].includes(c.model),
-    )
+    const narrow = candidates.filter(c => ['same', 'smaller'].includes(c.model))
     expect(selectPromotion('current', 200_000, narrow)).toBeUndefined()
   })
 

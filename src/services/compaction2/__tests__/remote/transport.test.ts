@@ -227,12 +227,7 @@ describe('buildRemoteTransport provider branches', () => {
   })
 
   test('bedrock and unknown providers return undefined', () => {
-    for (const provider of [
-      'bedrock',
-      'foundry',
-      'gemini',
-      'grok',
-    ] as const) {
+    for (const provider of ['bedrock', 'foundry', 'gemini', 'grok'] as const) {
       expect(
         buildRemoteTransport({
           provider,
