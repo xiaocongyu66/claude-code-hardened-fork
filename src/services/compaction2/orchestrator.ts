@@ -34,6 +34,10 @@ import {
 import { createSnapcompactMethod } from './methods/snapcompact.js'
 import { createShakeReducer } from './reducers/shakeReducer.js'
 import {
+  annotateCompactionResult,
+  type CompactionMethodMetadata,
+} from './session/display.js'
+import {
   appendCompactionEntry,
   createCompactionSessionEntry,
   type CompactionSessionEntry,
@@ -553,6 +557,9 @@ export interface CompactionV2QueryResult {
   consecutiveFailures?: number
   /** Mechanical reduction (shake) to use for this request only. */
   reducedMessages?: Message[]
+  /** Tokens removed by the reduction (drives the one-shot UI notice). */
+  reducedTokensSaved?: number
+  reducedMethod?: CompactionMethodName
 }
 
 /**
@@ -662,13 +669,24 @@ export async function runCompactionV2ForQuery(
     return {
       wasCompacted: false,
       reducedMessages: result.outcome.messages,
+      reducedTokensSaved: result.outcome.tokensSaved,
+      reducedMethod: result.outcome.method,
       // A successful local reduction resets the failure streak.
       consecutiveFailures: 0,
     }
   }
-  const legacyResult = getLegacyCompactionResult(result.outcome)
-  if (legacyResult) {
-    return { wasCompacted: true, compactionResult: legacyResult }
+  if (result.outcome?.kind === 'compacted') {
+    const legacyResult = getLegacyCompactionResult(result.outcome)
+    if (legacyResult) {
+      return {
+        wasCompacted: true,
+        compactionResult: annotateCompactionResult(
+          legacyResult,
+          result.outcome.method,
+          methodMetadata(result.outcome),
+        ),
+      }
+    }
   }
   if (result.shouldCompact) {
     // A threshold pass was needed but no method produced a usable result.
@@ -739,7 +757,14 @@ export async function runManualCompactionV2(
       resolveWindowTokens: getEffectiveContextWindowSize,
     },
   )
-  return getLegacyCompactionResult(result.outcome)
+  if (result.outcome?.kind !== 'compacted') return undefined
+  const legacyResult = getLegacyCompactionResult(result.outcome)
+  if (!legacyResult) return undefined
+  return annotateCompactionResult(
+    legacyResult,
+    result.outcome.method,
+    methodMetadata(result.outcome),
+  )
 }
 
 export interface IdleCompactionV2Request {
@@ -799,13 +824,21 @@ export async function runIdleCompactionV2(
     },
   )
 
-  const legacyResult = getLegacyCompactionResult(result.outcome)
-  if (legacyResult) {
-    const { buildPostCompactMessages } = loadCompact()
-    return {
-      compacted: true,
-      messages: buildPostCompactMessages(legacyResult),
-      trace: result.trace,
+  if (result.outcome?.kind === 'compacted') {
+    const legacyResult = getLegacyCompactionResult(result.outcome)
+    if (legacyResult) {
+      const { buildPostCompactMessages } = loadCompact()
+      return {
+        compacted: true,
+        messages: buildPostCompactMessages(
+          annotateCompactionResult(
+            legacyResult,
+            result.outcome.method,
+            methodMetadata(result.outcome),
+          ),
+        ),
+        trace: result.trace,
+      }
     }
   }
   return { compacted: false, trace: result.trace }
@@ -908,6 +941,15 @@ function createLegacySoftDeps(input: {
           result.truePostCompactTokenCount ?? result.postCompactTokenCount ?? 0,
       } satisfies SoftCompactRun
     },
+  }
+}
+
+function methodMetadata(
+  outcome: Extract<CompactionOutcome, { kind: 'compacted' }>,
+): CompactionMethodMetadata {
+  return {
+    tokensSaved: outcome.tokensSaved,
+    ...(outcome.warning !== undefined && { warning: outcome.warning }),
   }
 }
 
