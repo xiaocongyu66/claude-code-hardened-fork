@@ -57,7 +57,7 @@ pub struct SessionView {
 }
 
 /// Everything the renderer needs for one frame.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChatView {
     pub session: SessionView,
     /// Text accumulated from `stream_event` deltas, not yet committed.
@@ -71,6 +71,8 @@ pub struct ChatView {
     pub status: Option<String>,
     /// One-line task/agent summary appended to the status line.
     pub panel_summary: Option<String>,
+    /// Context-window usage in percent, when the engine reported it.
+    pub context_percent: Option<f64>,
 }
 
 impl ChatView {
@@ -159,12 +161,17 @@ impl ChatView {
         }
         let model = self.session.model.as_deref().unwrap_or("unknown model");
         let session = self.session.session_id.as_deref().unwrap_or("-");
-        match &self.panel_summary {
-            Some(summary) if !summary.is_empty() => {
-                format!("{model} · session {session} · {summary}")
-            }
-            _ => format!("{model} · session {session}"),
+        let mut line = format!("{model} · session {session}");
+        if let Some(percent) = self.context_percent {
+            line.push_str(&format!(" · {percent:.0}% ctx"));
         }
+        if let Some(summary) = &self.panel_summary
+            && !summary.is_empty()
+        {
+            line.push_str(" · ");
+            line.push_str(summary);
+        }
+        line
     }
 }
 
@@ -366,6 +373,17 @@ mod tests {
         // The result frame flushed the streamed text into a frozen row.
         assert!(view.completed.iter().any(|row| row.text == "more"));
         assert!(view.live_text.is_empty());
+    }
+
+    #[test]
+    fn status_line_shows_context_percent() {
+        let mut view = ChatView::new();
+        view.context_percent = Some(42.4);
+        assert!(
+            view.status_line().contains("42% ctx"),
+            "{}",
+            view.status_line()
+        );
     }
 
     #[test]

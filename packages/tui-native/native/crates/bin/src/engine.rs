@@ -104,6 +104,16 @@ impl EngineProcess {
         self.send_frame(&frame.to_string())
     }
 
+    /// Send a control request (e.g. `get_context_usage`) to the engine.
+    pub fn send_control_request(&mut self, request_id: &str, subtype: &str) -> std::io::Result<()> {
+        let frame = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": subtype },
+        });
+        self.send_frame(&frame.to_string())
+    }
+
     fn send_frame(&mut self, line: &str) -> std::io::Result<()> {
         let stdin = self
             .stdin

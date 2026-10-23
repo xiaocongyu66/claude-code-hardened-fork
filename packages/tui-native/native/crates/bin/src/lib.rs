@@ -141,6 +141,9 @@ pub fn run_with_deadline(
     let mut panel = TaskPanel::new();
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
+    let mut next_context_poll = Instant::now() + Duration::from_secs(2);
+    let mut pending_context_request: Option<String> = None;
+    let mut request_seq = 0u64;
 
     loop {
         // Test-only deterministic exit: checked before any blocking work so the
@@ -163,7 +166,22 @@ pub fn run_with_deadline(
                                 permission,
                             ));
                         }
-                        EngineEvent::ControlResponse { .. } => dialog = None,
+                        EngineEvent::ControlResponse { response } => {
+                            if let cch_tui_proto::ControlResponse::Success {
+                                request_id,
+                                response: Some(payload),
+                            } = response
+                                && pending_context_request.as_deref() == Some(request_id.as_str())
+                            {
+                                if let Some(percent) =
+                                    payload.get("percent").and_then(serde_json::Value::as_f64)
+                                {
+                                    view.context_percent = Some(percent);
+                                }
+                                pending_context_request = None;
+                            }
+                            dialog = None;
+                        }
                         EngineEvent::ControlCancelRequest { .. } => {
                             if let Some(open) = dialog.as_mut() {
                                 open.cancel_from_engine();
@@ -195,6 +213,20 @@ pub fn run_with_deadline(
             view.status = Some("engine exited — press q".into());
         }
         view.panel_summary = Some(panel.summary_line()).filter(|line| !line.is_empty());
+        if let Some(process) = engine.as_mut()
+            && pending_context_request.is_none()
+            && Instant::now() >= next_context_poll
+        {
+            request_seq = request_seq.wrapping_add(1);
+            let request_id = format!("ctx-{request_seq}");
+            if process
+                .send_control_request(&request_id, "get_context_usage")
+                .is_ok()
+            {
+                pending_context_request = Some(request_id);
+            }
+            next_context_poll = Instant::now() + Duration::from_secs(5);
+        }
         view.input = buffer.text().to_string();
 
         match (dialog.as_ref(), fullscreen) {
