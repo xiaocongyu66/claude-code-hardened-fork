@@ -145,4 +145,19 @@ describe('snapcompact run', () => {
     if (outcome.kind !== 'skipped') return
     expect(outcome.reason).toBe('snapcompact-nothing-to-archive')
   })
+
+  test('skips CJK archives the ASCII font cannot render', async () => {
+    const method = createSnapcompactMethod({
+      env: enabledEnv,
+      declaresImageInput: true,
+      providerFamily: 'anthropic',
+    })
+    const cjk = Array.from({ length: 4 }, (_, index) =>
+      userMessage(index, `${index}: ${'汉'.repeat(600)}`),
+    )
+    const outcome = await method.run(ctx({ messages: cjk }))
+    expect(outcome.kind).toBe('skipped')
+    if (outcome.kind !== 'skipped') return
+    expect(outcome.reason).toBe('snapcompact-non-ascii-unsupported')
+  })
 })

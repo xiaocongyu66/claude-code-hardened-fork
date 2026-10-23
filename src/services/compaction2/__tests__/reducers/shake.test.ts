@@ -307,4 +307,31 @@ describe('presets', () => {
       DEFAULT_SHAKE_CONFIG.protectedTools[2],
     )
   })
+
+  test('does not re-shake an already shaken result', async () => {
+    const messages = [
+      assistantToolUse('t1'),
+      userToolResult('t1', 'x'.repeat(4_000)),
+    ]
+    const first = await shakeMessages(
+      messages,
+      countTokens,
+      config(),
+      async () => 'artifact://a',
+    )
+    expect(first.regions).toHaveLength(1)
+
+    let offloads = 0
+    const second = await shakeMessages(
+      first.messages,
+      countTokens,
+      config(),
+      async () => {
+        offloads++
+        return 'artifact://b'
+      },
+    )
+    expect(offloads).toBe(0)
+    expect(second.regions).toHaveLength(0)
+  })
 })
