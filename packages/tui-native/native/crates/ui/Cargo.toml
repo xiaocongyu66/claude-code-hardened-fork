@@ -9,3 +9,4 @@ publish.workspace = true
 cch-tui-core = { path = "../core" }
 cch-tui-proto = { path = "../proto" }
 serde_json.workspace = true
+unicode-width = "0.2"

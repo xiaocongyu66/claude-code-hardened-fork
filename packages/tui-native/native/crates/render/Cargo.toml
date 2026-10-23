@@ -7,3 +7,7 @@ publish.workspace = true
 
 [dependencies]
 cch-tui-core = { path = "../core" }
+cch-tui-ui = { path = "../ui" }
+cch-tui-proto = { path = "../proto" }
+ratatui = "0.30"
+unicode-width = "0.2"

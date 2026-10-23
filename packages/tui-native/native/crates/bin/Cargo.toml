@@ -12,3 +12,6 @@ path = "src/main.rs"
 [dependencies]
 cch-tui-proto = { path = "../proto" }
 cch-tui-ui = { path = "../ui" }
+cch-tui-render = { path = "../render" }
+ratatui = "0.30"
+serde_json.workspace = true

@@ -1,10 +1,38 @@
-//! Domain components (transcript, message blocks, permission dialog, prompt
-//! input, status line, task panels). M0 only defines the event-to-view-model
-//! seam so the binary can be exercised headlessly.
+//! Domain view model: turns engine events into logical rows.
+//!
+//! No terminal or ratatui types here. The renderer wraps and paints these
+//! rows; the binary decides which rows are frozen into scrollback.
 
 use cch_tui_proto::EngineEvent;
+use serde_json::Value;
+use unicode_width::UnicodeWidthChar;
 
-/// Minimal view model the transcript consumes in M0.
+/// Visual role of a logical row; the renderer maps it to a palette token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowStyle {
+    User,
+    Assistant,
+    System,
+    Error,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub style: RowStyle,
+    pub text: String,
+}
+
+impl Row {
+    pub fn new(style: RowStyle, text: impl Into<String>) -> Self {
+        Self {
+            style,
+            text: text.into(),
+        }
+    }
+}
+
+/// Minimal view model the transcript consumes in M0/M1.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionView {
     pub session_id: Option<String>,
@@ -16,8 +44,129 @@ pub struct SessionView {
     pub last_error: Option<String>,
 }
 
+/// Everything the renderer needs for one frame.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChatView {
+    pub session: SessionView,
+    /// Text accumulated from `stream_event` deltas, not yet committed.
+    pub live_text: String,
+    /// Current input buffer.
+    pub input: String,
+    /// Rows already frozen into scrollback (kept for the headless renderer and
+    /// tests; the interactive binary performs the `insert_before` itself).
+    pub completed: Vec<Row>,
+    /// Transient status, e.g. "waiting for permission".
+    pub status: Option<String>,
+}
+
+impl ChatView {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold an event into the view. Returns rows that became complete and can
+    /// be frozen into scrollback by the caller.
+    pub fn ingest(&mut self, event: &EngineEvent) -> Vec<Row> {
+        self.session.apply(event);
+        match event {
+            EngineEvent::System { subtype, extra } => {
+                if subtype == "compact_boundary" {
+                    let before = number_field(extra, "pre_compact_token_count");
+                    return vec![Row::new(
+                        RowStyle::System,
+                        format!(
+                            "[context compacted{}]",
+                            before
+                                .map(|n| format!(" — {n} tokens before"))
+                                .unwrap_or_default()
+                        ),
+                    )];
+                }
+                Vec::new()
+            }
+            EngineEvent::User { extra } => {
+                let text = message_text(extra.get("message"));
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                self.user_messages_pushed(text)
+            }
+            EngineEvent::Assistant { extra } => {
+                let text = message_text(extra.get("message"));
+                self.live_text.clear();
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                let rows = vec![Row::new(RowStyle::Assistant, text)];
+                self.completed.extend(rows.clone());
+                rows
+            }
+            EngineEvent::StreamEvent { extra } => {
+                if let Some(text) = delta_text(extra.get("event")) {
+                    self.live_text.push_str(&text);
+                }
+                Vec::new()
+            }
+            EngineEvent::Result { extra } => {
+                let mut rows = Vec::new();
+                if !self.live_text.is_empty() {
+                    rows.push(Row::new(RowStyle::Assistant, self.live_text.clone()));
+                    self.live_text.clear();
+                }
+                if let Some(err) = string_field(extra, "error") {
+                    rows.push(Row::new(RowStyle::Error, err));
+                }
+                self.completed.extend(rows.clone());
+                rows
+            }
+            EngineEvent::ControlRequest { request, .. } => {
+                self.status = Some(format!("permission: {} — y/n", request.subtype()));
+                Vec::new()
+            }
+            EngineEvent::ControlResponse { .. } => {
+                self.status = None;
+                Vec::new()
+            }
+            EngineEvent::ControlCancelRequest { .. }
+            | EngineEvent::KeepAlive
+            | EngineEvent::Unknown => Vec::new(),
+        }
+    }
+
+    fn user_messages_pushed(&mut self, text: String) -> Vec<Row> {
+        let rows = text
+            .lines()
+            .map(|line| Row::new(RowStyle::User, format!("> {line}")))
+            .collect::<Vec<_>>();
+        self.completed.extend(rows.clone());
+        rows
+    }
+
+    /// Submit the current input buffer as a frozen user row.
+    pub fn submit_input(&mut self) -> Option<Row> {
+        let text = std::mem::take(&mut self.input);
+        if text.trim().is_empty() {
+            return None;
+        }
+        let row = Row::new(RowStyle::User, format!("> {text}"));
+        self.completed.push(row.clone());
+        Some(row)
+    }
+
+    /// Status line content.
+    pub fn status_line(&self) -> String {
+        if let Some(status) = &self.status {
+            return status.clone();
+        }
+        let model = self.session.model.as_deref().unwrap_or("unknown model");
+        let session = self.session.session_id.as_deref().unwrap_or("-");
+        format!("{model} · session {session}")
+    }
+}
+
 impl SessionView {
-    /// Fold one engine event into the view. Unknown frames are ignored.
+    /// Fold one engine event into the session counters. Unknown frames are
+    /// ignored.
     pub fn apply(&mut self, event: &EngineEvent) {
         match event {
             EngineEvent::System { subtype, extra } => {
@@ -45,11 +194,75 @@ impl SessionView {
     }
 }
 
-fn string_field(extra: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+fn string_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     extra
         .get(key)
-        .and_then(serde_json::Value::as_str)
+        .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn number_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+    extra.get(key).and_then(Value::as_u64)
+}
+
+/// Concatenate the text blocks of an SDK message payload.
+fn message_text(message: Option<&Value>) -> String {
+    let Some(message) = message else {
+        return String::new();
+    };
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| {
+                (block.get("type")?.as_str()? == "text")
+                    .then(|| block.get("text")?.as_str().map(ToOwned::to_owned))
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Extract a text delta from a raw stream event.
+fn delta_text(event: Option<&Value>) -> Option<String> {
+    let event = event?;
+    match event.get("type")?.as_str()? {
+        "content_block_delta" => {
+            let delta = event.get("delta")?;
+            match delta.get("type")?.as_str()? {
+                "text_delta" => delta.get("text")?.as_str().map(ToOwned::to_owned),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Wrap `text` to `width` display columns. Newlines force a break, tabs expand
+/// to four spaces, and wide characters never overflow a line.
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for logical_line in text.split('\n') {
+        let expanded = logical_line.replace('\t', "    ");
+        let mut current = String::new();
+        let mut used = 0usize;
+        for ch in expanded.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if used + ch_width > width && used > 0 {
+                rows.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            current.push(ch);
+            used += ch_width;
+        }
+        rows.push(current);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -59,25 +272,86 @@ mod tests {
 
     #[test]
     fn folds_engine_events_into_the_session_view() {
-        let mut view = SessionView::default();
+        let mut view = ChatView::new();
         for line in [
             r#"{"type":"system","subtype":"init","session_id":"s1","model":"m1"}"#,
-            r#"{"type":"user","uuid":"u1"}"#,
-            r#"{"type":"assistant","uuid":"a1"}"#,
-            r#"{"type":"stream_event","uuid":"a1"}"#,
+            r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"more"}}}"#,
             r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"t1"}}"#,
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"r1"}}"#,
             r#"{"type":"result","subtype":"error","error":"boom"}"#,
         ] {
-            view.apply(&parse_line(line).expect("valid frame"));
+            view.ingest(&parse_line(line).expect("valid frame"));
         }
 
-        assert_eq!(view.session_id.as_deref(), Some("s1"));
-        assert_eq!(view.model.as_deref(), Some("m1"));
-        assert_eq!(view.user_messages, 1);
-        assert_eq!(view.assistant_messages, 1);
-        assert_eq!(view.stream_deltas, 1);
-        assert_eq!(view.pending_permissions, 0);
-        assert_eq!(view.last_error.as_deref(), Some("boom"));
+        assert_eq!(view.session.session_id.as_deref(), Some("s1"));
+        assert_eq!(view.session.assistant_messages, 1);
+        assert_eq!(view.session.pending_permissions, 0);
+        assert_eq!(view.session.last_error.as_deref(), Some("boom"));
+        assert!(view.completed.iter().any(|row| row.text == "hi"));
+        assert!(view.completed.iter().any(|row| row.text == "> hello"));
+        // The result frame flushed the streamed text into a frozen row.
+        assert!(view.completed.iter().any(|row| row.text == "more"));
+        assert!(view.live_text.is_empty());
+    }
+
+    #[test]
+    fn streamed_deltas_stay_live_until_the_message_or_result() {
+        let mut view = ChatView::new();
+        view.ingest(
+            &parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"par"}}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(view.live_text, "par");
+        assert!(view.completed.is_empty());
+
+        view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"partial done"}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(view.live_text.is_empty());
+        assert_eq!(view.completed.len(), 1);
+    }
+
+    #[test]
+    fn submit_input_ignores_blank_and_freezes_text() {
+        let mut view = ChatView::new();
+        view.input = "   ".into();
+        assert!(view.submit_input().is_none());
+        view.input = "run tests".into();
+        let row = view.submit_input().expect("row");
+        assert_eq!(row.text, "> run tests");
+        assert!(view.input.is_empty());
+    }
+
+    #[test]
+    fn wrap_respects_display_width_and_cjk() {
+        let rows = wrap_text("abcdef", 4);
+        assert_eq!(rows, ["abcd", "ef"]);
+
+        let rows = wrap_text("汉字汉字", 4);
+        assert_eq!(rows, ["汉字", "汉字"]);
+
+        let rows = wrap_text("a\tb\nc", 8);
+        assert_eq!(rows, ["a    b", "c"]);
+    }
+
+    #[test]
+    fn compact_boundary_becomes_a_system_row() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"compact_boundary","pre_compact_token_count":12345}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].style, RowStyle::System);
+        assert!(rows[0].text.contains("12345"));
     }
 }

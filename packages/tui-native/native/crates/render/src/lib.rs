@@ -1,8 +1,217 @@
-//! Rendering backend (ratatui + crossterm).
+//! Rendering backend: inline viewport, scrollback insertion, and the live
+//! status/input region.
 //!
-//! M0 keeps this crate as a placeholder so the workspace builds without
-//! pulling the terminal stack; the backend lands in M1 together with the
-//! inline viewport and `insert_before` scrollback handling.
+//! Design: completed transcript rows are pushed into the terminal's own
+//! scrollback with `insert_before` and then forgotten. Only the live region
+//! (streaming text, input line, status) is redrawn, which keeps memory flat in
+//! long sessions.
+
+use std::io::{self, Stdout};
+
+use cch_tui_ui::{ChatView, Row, RowStyle, wrap_text};
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::cursor::{MoveToColumn, SetCursorStyle, Show};
+use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget};
+use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 /// Cells the inline viewport reserves below frozen scrollback.
-pub const DEFAULT_INLINE_HEIGHT: u16 = 24;
+pub const DEFAULT_INLINE_HEIGHT: u16 = 12;
+
+/// Live terminal bound to an inline viewport.
+pub struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    fullscreen: bool,
+}
+
+impl TerminalSession {
+    /// Enter raw mode and reserve an inline viewport at the cursor position.
+    pub fn inline(height: u16) -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnableBracketedPaste, Show)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(height.max(4)),
+            },
+        )?;
+        Ok(Self {
+            terminal,
+            fullscreen: false,
+        })
+    }
+
+    /// Enter the alternate screen (fullscreen mode).
+    pub fn fullscreen() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+        Ok(Self {
+            terminal,
+            fullscreen: true,
+        })
+    }
+
+    /// Freeze `rows` into the terminal scrollback.
+    ///
+    /// Rows are wrapped to the current width first, so the inserted block has
+    /// an exact height (the inline viewport would otherwise scroll).
+    pub fn insert_rows(&mut self, rows: &[Row]) -> io::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let width = self.terminal.size()?.width.max(1) as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for row in rows {
+            let style = row_style(row.style);
+            for wrapped in wrap_text(&row.text, width) {
+                lines.push(Line::from(Span::styled(wrapped, style)));
+            }
+        }
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let height = lines.len() as u16;
+        self.terminal.insert_before(height, |buf| {
+            Paragraph::new(lines).render(buf.area, buf);
+        })?;
+        Ok(())
+    }
+
+    pub fn draw(&mut self, view: &ChatView) -> io::Result<()> {
+        self.terminal.draw(|frame| draw_view(frame, view))?;
+        Ok(())
+    }
+
+    pub fn restore(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            Show,
+            MoveToColumn(0),
+            SetCursorStyle::DefaultUserShape
+        )?;
+        if self.fullscreen {
+            execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        }
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn row_style(style: RowStyle) -> Style {
+    match style {
+        RowStyle::User => Style::default().fg(Color::Cyan),
+        RowStyle::Assistant => Style::default(),
+        RowStyle::System => Style::default().fg(Color::DarkGray),
+        RowStyle::Error => Style::default().fg(Color::Red),
+        RowStyle::Tool => Style::default().fg(Color::Yellow),
+    }
+}
+
+/// Paint the live region: streaming text, input line, status line.
+pub fn draw_view(frame: &mut Frame, view: &ChatView) {
+    let area = frame.area();
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let live = Paragraph::new(view.live_text.as_str()).style(Style::default());
+    frame.render_widget(live, chunks[0]);
+
+    let input_text = format!("> {}", view.input);
+    let input = Paragraph::new(input_text).style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_widget(input, chunks[1]);
+
+    let status = Paragraph::new(view.status_line()).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, chunks[2]);
+
+    // Cursor at the end of the input line (clamped to the viewport).
+    let cursor_x = 2 + unicode_width::UnicodeWidthStr::width(view.input.as_str());
+    let x = chunks[1].x as usize + cursor_x.min(chunks[1].width.saturating_sub(1) as usize);
+    let y = chunks[1].y;
+    frame.set_cursor_position((x as u16, y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cch_tui_proto::parse_line;
+    use ratatui::Terminal;
+
+    fn render(view: &ChatView, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw_view(frame, view)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn paints_live_text_input_and_status() {
+        let mut view = ChatView::new();
+        view.ingest(
+            &parse_line(r#"{"type":"system","subtype":"init","session_id":"s1","model":"m1"}"#)
+                .unwrap(),
+        );
+        view.live_text = "streaming".into();
+        view.input = "hi".into();
+
+        let screen = render(&view, 40, 6);
+        assert!(screen.contains("streaming"), "screen: {screen}");
+        assert!(screen.contains("> hi"), "screen: {screen}");
+        assert!(screen.contains("m1 · session s1"), "screen: {screen}");
+    }
+
+    #[test]
+    fn wraps_long_live_text_within_the_viewport() {
+        let mut view = ChatView::new();
+        view.live_text = "x".repeat(100);
+        let screen = render(&view, 20, 8);
+        // Every displayed line must respect the 20-column viewport.
+        for line in screen.lines() {
+            assert!(line.chars().count() <= 20, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn status_line_shows_pending_permission() {
+        let mut view = ChatView::new();
+        view.ingest(
+            &parse_line(
+                r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"t1"}}"#,
+            )
+            .unwrap(),
+        );
+        let screen = render(&view, 60, 6);
+        assert!(screen.contains("permission"), "screen: {screen}");
+    }
+}

@@ -1,14 +1,18 @@
-//! Headless entry points used by CI smoke tests.
-//!
-//! `--check-tui` reads NDJSON frames from stdin and reports what it parsed.
-//! It exercises the same parser the interactive TUI will use, without needing
-//! a terminal, an engine process, or the ratatui stack.
+//! Headless entry points used by CI smoke tests and the interactive runner.
+
+pub mod engine;
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
 
 use cch_tui_proto::{EngineEvent, parse_line};
-use cch_tui_ui::SessionView;
+use cch_tui_render::{DEFAULT_INLINE_HEIGHT, TerminalSession};
+use cch_tui_ui::{ChatView, SessionView};
+use engine::{EngineMessage, EngineProcess};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CheckReport {
@@ -67,6 +71,101 @@ pub fn check_stream(reader: impl Read) -> CheckReport {
         }
     }
     report
+}
+
+/// Where the interactive runner gets events from.
+pub enum Source {
+    /// Replay an NDJSON fixture with the given pacing.
+    Replay {
+        path: PathBuf,
+        frame_delay: Duration,
+    },
+    /// Spawn a real engine process.
+    Engine { program: String, args: Vec<String> },
+}
+
+/// Run the interactive TUI until the user quits.
+pub fn run(source: Source, fullscreen: bool) -> io::Result<()> {
+    let mut session = if fullscreen {
+        TerminalSession::fullscreen()?
+    } else {
+        TerminalSession::inline(DEFAULT_INLINE_HEIGHT)?
+    };
+    let mut view = ChatView::new();
+    let mut engine: Option<EngineProcess> = None;
+
+    let rx: Receiver<EngineMessage> = match source {
+        Source::Replay { path, frame_delay } => engine::replay(path, frame_delay)?,
+        Source::Engine { program, args } => {
+            let (process, rx) = EngineProcess::spawn(&program, &args)?;
+            engine = Some(process);
+            rx
+        }
+    };
+
+    let mut engine_closed = false;
+    loop {
+        // Drain engine/replay frames.
+        loop {
+            match rx.try_recv() {
+                Ok(EngineMessage::Event(event)) => {
+                    let frozen = view.ingest(&event);
+                    session.insert_rows(&frozen)?;
+                }
+                Ok(EngineMessage::Malformed(line)) => {
+                    view.completed.push(cch_tui_ui::Row::new(
+                        cch_tui_ui::RowStyle::Error,
+                        format!("[protocol] {line}"),
+                    ));
+                }
+                Ok(EngineMessage::Closed) => {
+                    engine_closed = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    engine_closed = true;
+                    break;
+                }
+            }
+        }
+        if engine_closed {
+            view.status = Some("engine exited — press q".into());
+        }
+
+        session.draw(&view)?;
+
+        if !event::poll(Duration::from_millis(33))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+            KeyCode::Esc | KeyCode::Char('q') if view.input.is_empty() && engine_closed => break,
+            KeyCode::Esc => view.input.clear(),
+            KeyCode::Backspace => {
+                view.input.pop();
+            }
+            KeyCode::Enter => {
+                if let Some(row) = view.submit_input() {
+                    session.insert_rows(std::slice::from_ref(&row))?;
+                    if let Some(process) = engine.as_mut() {
+                        process.send_prompt(&row.text.trim_start_matches("> "))?;
+                        view.status = Some("sent".into());
+                    }
+                }
+            }
+            KeyCode::Char(ch) => view.input.push(ch),
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
