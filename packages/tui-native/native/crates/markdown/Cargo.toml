@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 cch-tui-ui = { path = "../ui" }
 pulldown-cmark = { version = "0.13", default-features = false }
+unicode-width = "0.2"

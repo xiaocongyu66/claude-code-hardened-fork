@@ -386,6 +386,12 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::ListItem => Style::default().fg(palette.foreground),
         RowStyle::Blockquote => Style::default().fg(palette.dim),
         RowStyle::Rule => Style::default().fg(palette.dim),
+        // Tables have no palette token yet; keep them legible with terminal
+        // defaults until the theme grows table colors.
+        RowStyle::TableHeader => Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+        RowStyle::TableRow => Style::default(),
     }
 }
 
