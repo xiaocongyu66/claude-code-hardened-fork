@@ -38,6 +38,7 @@ import {
 } from 'transcript-parser-napi'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import * as sessionIngress from '../services/api/sessionIngress.js'
+import type { CompactionSessionEntry } from '../services/compaction2/session/entries.js'
 import { REPL_TOOL_NAME } from '@claude-code-hardened/builtin-tools/tools/REPLTool/constants.js'
 import {
   type AgentId,
@@ -180,6 +181,31 @@ function isLegacyProgressEntry(entry: unknown): entry is LegacyProgressEntry {
     entry.type === 'progress' &&
     'uuid' in entry &&
     typeof entry.uuid === 'string'
+  )
+}
+
+/**
+ * Structural guard for COMPACTION_V2 journal rows. Duplicated from
+ * `services/compaction2/session/entries.ts` to keep this core transcript
+ * module free of a runtime import cycle (entries.ts imports the append hook
+ * below). Readers that predate V2 never call this — unknown types fall through
+ * the else-if chain in loadTranscriptFile and are ignored.
+ */
+function isCompactionSessionEntryRecord(
+  entry: unknown,
+): entry is CompactionSessionEntry {
+  if (typeof entry !== 'object' || entry === null) return false
+  const e = entry as Record<string, unknown>
+  return (
+    e.type === 'compaction' &&
+    typeof e.uuid === 'string' &&
+    typeof e.summary === 'string' &&
+    typeof e.firstKeptEntryId === 'string' &&
+    typeof e.tokensBefore === 'number' &&
+    Number.isFinite(e.tokensBefore) &&
+    typeof e.method === 'string' &&
+    typeof e.timestamp === 'string' &&
+    Number.isFinite(Date.parse(e.timestamp))
   )
 }
 
@@ -1300,7 +1326,12 @@ class Project {
     }
 
     // Only load current session messages if needed
-    if (entry.type === 'summary') {
+    if ((entry as { type?: unknown }).type === 'compaction') {
+      // COMPACTION_V2 journal row. Not a chain participant and never
+      // deduped against message UUIDs — it is a standalone append-only
+      // record consumed by session/rebuild.ts on resume.
+      void this.enqueueWrite(sessionFile, entry)
+    } else if (entry.type === 'summary') {
       // Summaries can always be appended
       void this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'custom-title') {
@@ -1737,6 +1768,17 @@ export async function recordContextCollapseSnapshot(snapshot: {
     sessionId,
     ...snapshot,
   })
+}
+
+/**
+ * Generic append hook for entry types owned outside this module (currently
+ * COMPACTION_V2 `compaction` rows). Reuses the same Project write queue,
+ * persistence guards, and shutdown seal as every other transcript append.
+ */
+export async function appendSessionEntry(
+  entry: Entry | CompactionSessionEntry,
+): Promise<void> {
+  await getProject().appendEntry(entry as Entry)
 }
 
 export async function flushSessionStorage(): Promise<void> {
@@ -2465,6 +2507,7 @@ export async function loadTranscriptFromFile(
       attributionSnapshots,
       contextCollapseCommits,
       contextCollapseSnapshot,
+      compactionEntries,
       leafUuids,
       contentReplacements,
       worktreeStates,
@@ -2510,6 +2553,7 @@ export async function loadTranscriptFromFile(
         contextCollapseSnapshot?.sessionId === sessionId
           ? contextCollapseSnapshot
           : undefined,
+      compactionEntries,
       worktreeSession: worktreeStates.has(sessionId)
         ? worktreeStates.get(sessionId)
         : undefined,
@@ -3183,6 +3227,7 @@ function buildFullLogResult(args: {
     commits: ContextCollapseCommitEntry[]
     snapshot: ContextCollapseSnapshotEntry | undefined
   }
+  compactionEntries?: CompactionSessionEntry[]
   windowedBeyond: number
 }): LogOption {
   const {
@@ -3192,6 +3237,7 @@ function buildFullLogResult(args: {
     mostRecentLeaf,
     maps,
     contextCollapse,
+    compactionEntries,
     windowedBeyond,
   } = args
   return {
@@ -3243,6 +3289,7 @@ function buildFullLogResult(args: {
       sessionId && contextCollapse.snapshot?.sessionId === sessionId
         ? contextCollapse.snapshot
         : undefined,
+    compactionEntries,
   }
 }
 
@@ -3307,6 +3354,7 @@ export async function loadFullLog(
           contentReplacements,
           contextCollapseCommits,
           contextCollapseSnapshot,
+          compactionEntries,
           leafUuids,
         } = await loadTranscriptFile(sessionFile, {
           nativeWindow: {
@@ -3378,6 +3426,7 @@ export async function loadFullLog(
                 sessionId && contextCollapseSnapshot?.sessionId === sessionId
                   ? contextCollapseSnapshot
                   : undefined,
+              compactionEntries,
             }
           }
         }
@@ -3407,6 +3456,7 @@ export async function loadFullLog(
       contentReplacements,
       contextCollapseCommits,
       contextCollapseSnapshot,
+      compactionEntries,
       leafUuids,
     } = await loadTranscriptFile(sessionFile)
 
@@ -3470,6 +3520,7 @@ export async function loadFullLog(
         commits: contextCollapseCommits,
         snapshot: contextCollapseSnapshot,
       },
+      compactionEntries,
       windowedBeyond,
     })
   } catch {
@@ -3964,6 +4015,7 @@ export async function loadTranscriptFile(
   agentContentReplacements: Map<AgentId, ContentReplacementRecord[]>
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
+  compactionEntries: CompactionSessionEntry[]
   leafUuids: Set<UUID>
 }> {
   const messages = new Map<UUID, TranscriptMessage>()
@@ -3990,6 +4042,8 @@ export async function loadTranscriptFile(
   const contextCollapseCommits: ContextCollapseCommitEntry[] = []
   // Last-wins — later entries supersede.
   let contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
+  // COMPACTION_V2 journal rows, in file order. rebuild.ts takes the latest.
+  const compactionEntries: CompactionSessionEntry[] = []
 
   try {
     // Native window fast path: the Rust pipeline already did read → classify
@@ -4068,6 +4122,8 @@ export async function loadTranscriptFile(
           contextCollapseCommits.push(entry)
         } else if (entry.type === 'marble-origami-snapshot') {
           contextCollapseSnapshot = entry
+        } else if (isCompactionSessionEntryRecord(entry)) {
+          compactionEntries.push(entry)
         }
       }
       applyPreservedSegmentRelinks(messages)
@@ -4107,6 +4163,7 @@ export async function loadTranscriptFile(
         agentContentReplacements,
         contextCollapseCommits,
         contextCollapseSnapshot: undefined,
+        compactionEntries,
         leafUuids,
       }
     }
@@ -4320,6 +4377,8 @@ export async function loadTranscriptFile(
         contextCollapseCommits.push(entry)
       } else if (entry.type === 'marble-origami-snapshot') {
         contextCollapseSnapshot = entry
+      } else if (isCompactionSessionEntryRecord(entry)) {
+        compactionEntries.push(entry)
       }
     }
   } catch {
@@ -4434,6 +4493,7 @@ export async function loadTranscriptFile(
     agentContentReplacements,
     contextCollapseCommits,
     contextCollapseSnapshot,
+    compactionEntries,
     leafUuids,
   }
 }
@@ -4454,6 +4514,7 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contentReplacements: Map<UUID, ContentReplacementRecord[]>
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
+  compactionEntries: CompactionSessionEntry[]
 }> {
   const sessionFile = join(
     getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
@@ -4541,6 +4602,7 @@ export async function getLastSessionLog(
     goals,
     contextCollapseCommits,
     contextCollapseSnapshot,
+    compactionEntries,
   } = await loadSessionFile(sessionId)
   if (messages.size === 0) return null
   // Prime getSessionMessages cache so recordTranscript (called after REPL
@@ -4586,6 +4648,7 @@ export async function getLastSessionLog(
       contextCollapseSnapshot?.sessionId === sessionId
         ? contextCollapseSnapshot
         : undefined,
+    compactionEntries,
   }
 }
 

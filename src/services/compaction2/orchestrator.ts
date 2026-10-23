@@ -27,6 +27,11 @@ import {
 } from './methods/soft.js'
 import { createSnapcompactMethod } from './methods/snapcompact.js'
 import { createShakeReducer } from './reducers/shakeReducer.js'
+import {
+  appendCompactionEntry,
+  createCompactionSessionEntry,
+  type CompactionSessionEntry,
+} from './session/entries.js'
 import { estimateTokens } from './tokens/index.js'
 import { evaluateIdleTrigger } from './triggers/idle.js'
 import { evaluateIncompleteTrigger } from './triggers/incomplete.js'
@@ -408,6 +413,11 @@ export async function runCompactionV2(
       warning: outcome.warning,
     })
     result.outcome = outcome
+    if (outcome.kind === 'compacted') {
+      if (feature('COMPACTION_V2')) {
+        await persistCompactionEntry(outcome, request.messages)
+      }
+    }
     return result
   }
 
@@ -418,6 +428,86 @@ export async function runCompactionV2(
     headroomTokens: triggerDecision.threshold.headroomTokens,
   })
   return result
+}
+
+// ---------------------------------------------------------------------------
+// Session journaling (COMPACTION_V2). A compacted outcome is persisted as a
+// standalone `compaction` JSONL row so resume can rebuild from it. Legacy
+// transcript writes are untouched; with the flag off nothing is written.
+// ---------------------------------------------------------------------------
+
+export interface PersistCompactionEntryOptions {
+  /** `false` simulates the feature flag being off (tests / direct calls). */
+  enabled?: boolean
+  append?: (entry: CompactionSessionEntry) => Promise<void>
+  uuid?: () => CompactionSessionEntry['uuid']
+  now?: () => number
+}
+
+/**
+ * Persist a successful compaction outcome. Soft always has a summary (the
+ * legacy summary message); remote/snapcompact only journal when the provider
+ * returned one. Failures are swallowed — journaling must never fail the
+ * compaction itself.
+ */
+export async function persistCompactionEntry(
+  outcome: CompactionOutcome | undefined,
+  messages: readonly Message[],
+  options: PersistCompactionEntryOptions = {},
+): Promise<CompactionSessionEntry | null> {
+  if (options.enabled === false) return null
+  if (outcome?.kind !== 'compacted') return null
+  const summary = resolveCompactionSummary(outcome)
+  if (!summary) return null
+
+  const entry = createCompactionSessionEntry({
+    summary,
+    firstKeptEntryId: outcome.cutPoint.firstKeptEntryId,
+    tokensBefore: outcome.cutPoint.tokensBefore,
+    method: outcome.method,
+    preserveData: withoutLegacyResult(outcome.preserveData),
+    parentUuid: messages.at(-1)?.uuid,
+    uuid: options.uuid?.(),
+    timestamp: options.now ? new Date(options.now()).toISOString() : undefined,
+  })
+
+  try {
+    await (options.append ?? appendCompactionEntry)(entry)
+  } catch {
+    return null
+  }
+  return entry
+}
+
+function resolveCompactionSummary(
+  outcome: CompactionOutcome,
+): string | undefined {
+  // Soft's `summary` is the display message; the actual summary text lives in
+  // the legacy summary message and is what resume should inject.
+  const legacy = getLegacyCompactionResult(outcome)
+  const legacySummary = legacy?.summaryMessages?.[0]?.message?.content
+  if (typeof legacySummary === 'string' && legacySummary.length > 0) {
+    return legacySummary
+  }
+  if (typeof outcome.summary === 'string' && outcome.summary.length > 0) {
+    return outcome.summary
+  }
+  return undefined
+}
+
+/**
+ * Drop the full legacy CompactionResult before journaling — its
+ * `messagesToKeep` duplicate transcript bytes already on disk.
+ */
+function withoutLegacyResult(
+  data: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!data) return undefined
+  const rest: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (key !== 'legacyCompactionResult') rest[key] = value
+  }
+  return Object.keys(rest).length > 0 ? rest : undefined
 }
 
 // ---------------------------------------------------------------------------
