@@ -885,13 +885,19 @@ export async function runHeadless(
     options,
     turnInterruptionState,
   )) {
-    if (transformToStreamlined) {
+    const tuiPassthrough = isTuiPassthroughSystemMessage(message)
+    if (transformToStreamlined && !tuiPassthrough) {
       // Streamlined mode: transform messages and stream immediately
       const transformed = transformToStreamlined(message)
       if (transformed) {
         await structuredIO.write(transformed)
       }
-    } else if (options.outputFormat === 'stream-json' && options.verbose) {
+    } else if (
+      options.outputFormat === 'stream-json' &&
+      (options.verbose || tuiPassthrough)
+    ) {
+      // TUI-critical system frames bypass the streamlined transformer so
+      // compaction boundaries and task lifecycle updates reach the client.
       await structuredIO.write(message)
     }
     // Should not be getting control messages or stream events in non-stream mode.
@@ -991,6 +997,22 @@ export async function runHeadless(
 
   gracefulShutdownSync(
     lastMessage?.type === 'result' && lastMessage?.is_error ? 1 : 0,
+  )
+}
+
+/**
+ * System frames the TUI renders directly (task panel, compaction boundary).
+ * They must survive streamlined-output mode, which otherwise drops every
+ * system message. Keeping this list explicit also documents the TUI contract:
+ * compact_boundary and task_* are never meant to be transformed or filtered.
+ */
+function isTuiPassthroughSystemMessage(message: StdoutMessage): boolean {
+  return (
+    message.type === 'system' &&
+    (message.subtype === 'compact_boundary' ||
+      message.subtype === 'task_started' ||
+      message.subtype === 'task_progress' ||
+      message.subtype === 'task_notification')
   )
 }
 
@@ -3197,7 +3219,15 @@ function runHeadlessStreaming(
                 appendSystemPrompt: options.appendSystemPrompt,
               },
             })
-            sendControlResponseSuccess(msg, { ...data })
+            // TUI summary fields: derived from the already-collected context
+            // stats (no additional scan). totalTokens comes from the last API
+            // usage via getCurrentUsage; rawMaxTokens is the model window.
+            sendControlResponseSuccess(msg, {
+              ...data,
+              context_tokens: data.totalTokens,
+              window_tokens: data.rawMaxTokens,
+              percent: data.percentage,
+            })
           } catch (error) {
             sendControlResponseError(msg, errorMessage(error))
           }
