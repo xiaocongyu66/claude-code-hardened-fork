@@ -9,6 +9,7 @@ coverage
 !.vscode/extensions.json
 *.suo
 *.lock
+!packages/tui-native/native/Cargo.lock
 src/utils/vendor/
 
 # AI tool runtime directories
