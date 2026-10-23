@@ -23,14 +23,14 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Message actions | `messageActions.tsx` | 🟡 model ready | focus/copy/rewind not wired to keys yet |
 | Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | collapse 3 lines; inline is frozen |
 | Task / agent panel | `TaskListV2.tsx`, `components/tasks/*` | ✅ `crates/panel` | status line + fullscreen sidebar |
-| Spinner / activity | `Spinner.tsx` | ⬜ | needs a tick source in the loop |
+| Spinner / activity | `Spinner.tsx` | ✅ status line | frame advances while a turn runs |
 | Plan mode | `ExitPlanModePermissionRequest/*` | ⬜ | renderer can reuse the dialog overlay |
-| Queued input display | `REPL.tsx` prompt queue | 🟡 `crates/dialog::Queue` | not rendered yet |
+| Queued input display | `REPL.tsx` prompt queue | ✅ status line | `queued N`; prompts flush on `result` |
 | Sticky prompt | `VirtualMessageList.tsx` | ⬜ | fullscreen-only chrome |
 | Global search | `GlobalSearchDialog.tsx` | ⬜ | needs transcript search model |
 | @file completion | `fileSuggestions.ts` | ⬜ | engine-side index exists; TUI needs a picker |
 | Slash palette | slash command menu | ⬜ | needs command metadata from `init` |
-| Copy to clipboard | OSC52 / platform tools | ⬜ | OSC52 first, then platform fallbacks |
+| Copy to clipboard | OSC52 / platform tools | 🟡 OSC52 only | Alt+C copies the last assistant message |
 | Image paste | `imagePaste.ts`, `useClipboardImageHint` | ⛔ | no terminal image protocol; needs a clipboard image path |
 | Diff dialog | `diff/DiffDialog.tsx` | ⬜ | after Edit-tool diff wiring |
 | Settings/theme command | `Config.tsx` | 🟡 env `CCH_TUI_THEME` | `/theme` command later |
