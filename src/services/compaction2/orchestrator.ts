@@ -1067,13 +1067,17 @@ function buildLegacyResultFromOutcome(
   const { createUserMessage } =
     require('../../utils/messages.js') as typeof import('../../utils/messages.js')
   /* eslint-enable @typescript-eslint/no-require-imports */
+  const summary = outcome.summary
+  if (!summary) {
+    throw new Error('compacted outcome has no summary')
+  }
   const tokensBefore = outcome.cutPoint.tokensBefore
   const tokensAfter = Math.max(0, tokensBefore - outcome.tokensSaved)
   return {
     boundaryMarker: outcome.cutPoint.boundaryMessage,
     summaryMessages: [
       createUserMessage({
-        content: outcome.summary,
+        content: summary,
         isCompactSummary: true,
         isVisibleInTranscriptOnly: true,
       }),
