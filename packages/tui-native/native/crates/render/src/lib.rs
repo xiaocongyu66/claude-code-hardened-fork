@@ -402,6 +402,12 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::ListItem => Style::default().fg(palette.foreground),
         RowStyle::Blockquote => Style::default().fg(palette.dim),
         RowStyle::Rule => Style::default().fg(palette.dim),
+        RowStyle::DiffHunk => Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+        RowStyle::DiffAdded => Style::default().fg(palette.string),
+        RowStyle::DiffRemoved => Style::default().fg(palette.error),
+        RowStyle::DiffContext => Style::default().fg(palette.dim),
         // Tables have no palette token yet; keep them legible with terminal
         // defaults until the theme grows table colors.
         RowStyle::TableHeader => Style::default()

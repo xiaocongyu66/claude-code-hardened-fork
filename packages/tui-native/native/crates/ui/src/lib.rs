@@ -31,6 +31,14 @@ pub enum RowStyle {
     TableHeader,
     /// Body row or header separator of a Markdown table.
     TableRow,
+    /// Diff hunk header (`@@ ... @@`).
+    DiffHunk,
+    /// Added line in a structured diff.
+    DiffAdded,
+    /// Removed line in a structured diff.
+    DiffRemoved,
+    /// Context line in a structured diff.
+    DiffContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +121,10 @@ impl ChatView {
                 Vec::new()
             }
             EngineEvent::User { extra } => {
-                let rows = message_rows(extra.get("message"), false);
+                let rows = match structured_diff_rows(extra.get("tool_use_result")) {
+                    Some(diff_rows) => diff_rows,
+                    None => message_rows(extra.get("message"), false),
+                };
                 self.completed.extend(rows.clone());
                 rows
             }
@@ -231,6 +242,38 @@ impl SessionView {
             | EngineEvent::Unknown => {}
         }
     }
+}
+
+/// Render `tool_use_result.structuredPatch` (Edit/Write results) as diff rows.
+///
+/// Returns `None` when the tool result has no structured patch, so callers
+/// fall back to the plain content rendering.
+fn structured_diff_rows(result: Option<&Value>) -> Option<Vec<Row>> {
+    let patch = result?.get("structuredPatch")?.as_array()?;
+    if patch.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for hunk in patch {
+        let old_start = hunk.get("oldStart").and_then(Value::as_u64).unwrap_or(0);
+        let old_lines = hunk.get("oldLines").and_then(Value::as_u64).unwrap_or(0);
+        let new_start = hunk.get("newStart").and_then(Value::as_u64).unwrap_or(0);
+        let new_lines = hunk.get("newLines").and_then(Value::as_u64).unwrap_or(0);
+        rows.push(Row::new(
+            RowStyle::DiffHunk,
+            format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@"),
+        ));
+        for line in hunk.get("lines")?.as_array()? {
+            let Some(text) = line.as_str() else { continue };
+            let style = match text.chars().next() {
+                Some('+') => RowStyle::DiffAdded,
+                Some('-') => RowStyle::DiffRemoved,
+                _ => RowStyle::DiffContext,
+            };
+            rows.push(Row::new(style, text));
+        }
+    }
+    Some(rows)
 }
 
 /// Turn an SDK message payload into transcript rows.
@@ -492,6 +535,28 @@ mod tests {
             "results are capped at three lines: {results:?}"
         );
         assert!(results[0].contains("a.txt"));
+    }
+
+    #[test]
+    fn structured_edit_results_render_as_diff_rows() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"user","uuid":"u1","tool_use_result":{"structuredPatch":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":2,"lines":[" context","-old","+new"]}]},"message":{"role":"user","content":[]}}"#,
+            )
+            .unwrap(),
+        );
+        let styles: Vec<RowStyle> = rows.iter().map(|row| row.style).collect();
+        assert_eq!(
+            styles,
+            vec![
+                RowStyle::DiffHunk,
+                RowStyle::DiffContext,
+                RowStyle::DiffRemoved,
+                RowStyle::DiffAdded,
+            ]
+        );
+        assert!(rows[0].text.contains("@@ -1,2 +1,2 @@"), "{}", rows[0].text);
     }
 
     #[test]
