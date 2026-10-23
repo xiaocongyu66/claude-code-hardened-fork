@@ -142,7 +142,7 @@ impl TerminalSession {
             return Ok(());
         }
         let width = self.terminal.size()?.width.max(1) as usize;
-        let lines = rows_to_lines(rows, width, &self.theme);
+        let lines = rows_to_lines(rows, width, &self.theme, true);
         if lines.is_empty() {
             return Ok(());
         }
@@ -409,7 +409,7 @@ pub fn osc52_sequence(text: &str) -> String {
 ///
 /// Assistant prose goes through the Markdown renderer at the target width;
 /// everything else (user input, tool output, errors) is wrapped verbatim.
-fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut previous: Option<RowStyle> = None;
     let mut index = 0;
@@ -456,7 +456,10 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
             RowStyle::User => previous != Some(RowStyle::User),
             _ => false,
         };
-        if starts_block && !lines.is_empty() && !lines.last().is_some_and(|line| line.width() == 0)
+        if spacing
+            && starts_block
+            && !lines.is_empty()
+            && !lines.last().is_some_and(|line| line.width() == 0)
         {
             lines.push(Line::from(""));
         }
@@ -635,7 +638,7 @@ pub fn panel_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let rows = panel.rows(width);
-    rows_to_lines(&rows, width, theme)
+    rows_to_lines(&rows, width, theme, false)
 }
 
 fn row_style(style: RowStyle, theme: &Theme) -> Style {
@@ -957,7 +960,9 @@ pub fn transcript_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let range = model.window(height, width);
-    rows_to_lines(&model.rows()[range], width, theme)
+    // The model already contains the blank separator rows, so no extra
+    // spacing is applied here (heights and offsets stay in sync).
+    rows_to_lines(&model.rows()[range], width, theme, false)
 }
 
 /// Paint the transcript and its scroll chrome inside `area`.
@@ -1132,7 +1137,7 @@ mod tests {
     #[test]
     fn assistant_rows_are_markdown_rendered() {
         let rows = vec![Row::new(RowStyle::Assistant, "# Title\n- item")];
-        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        let lines = rows_to_lines(&rows, 40, &Theme::dark(), true);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(texts.iter().any(|text| text.contains("Title")), "{texts:?}");
         assert!(
@@ -1146,7 +1151,7 @@ mod tests {
     fn tool_call_name_is_bold_and_args_are_plain() {
         let rows = vec![Row::new(RowStyle::ToolCall, "Bash(ls -la)")];
         let theme = Theme::dark();
-        let lines = rows_to_lines(&rows, 40, &theme);
+        let lines = rows_to_lines(&rows, 40, &theme, true);
 
         assert_eq!(lines.len(), 1, "{lines:?}");
         let spans = &lines[0].spans;
@@ -1175,7 +1180,7 @@ mod tests {
             Row::new(RowStyle::User, "hi"),
             Row::new(RowStyle::Assistant, "hello"),
         ];
-        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        let lines = rows_to_lines(&rows, 40, &Theme::dark(), true);
         assert!(lines.len() >= 3, "{lines:?}");
         assert_eq!(lines[1].width(), 0, "blank separator: {lines:?}");
         assert!(
@@ -1192,7 +1197,7 @@ mod tests {
             Row::new(RowStyle::User, "one"),
             Row::new(RowStyle::User, "two"),
         ];
-        let lines = rows_to_lines(&rows, 20, &Theme::dark());
+        let lines = rows_to_lines(&rows, 20, &Theme::dark(), true);
         assert_eq!(lines.len(), 2, "continuation rows stay compact: {lines:?}");
         assert!(lines.iter().all(|line| line.width() > 0), "{lines:?}");
     }
@@ -1203,7 +1208,7 @@ mod tests {
             Row::new(RowStyle::ToolCall, "Bash(ls)"),
             Row::new(RowStyle::ToolCall, "Read(a.rs)"),
         ];
-        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        let lines = rows_to_lines(&rows, 40, &Theme::dark(), true);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(lines[1].width(), 0, "blank separator: {lines:?}");
     }
@@ -1215,7 +1220,7 @@ mod tests {
             Row::new(RowStyle::ToolResult, "a.txt"),
             Row::new(RowStyle::ToolResult, "b.txt"),
         ];
-        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        let lines = rows_to_lines(&rows, 40, &Theme::dark(), true);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines.iter().all(|line| line.width() > 0), "{lines:?}");
     }
@@ -1224,7 +1229,7 @@ mod tests {
     fn user_block_keeps_one_column_of_right_padding() {
         let theme = Theme::dark();
         let rows = vec![Row::new(RowStyle::User, "hi")];
-        let lines = rows_to_lines(&rows, 10, &theme);
+        let lines = rows_to_lines(&rows, 10, &theme, true);
         assert_eq!(lines.len(), 1, "{lines:?}");
         // `paddingRight={1}` in Ink: the background stops before the last
         // column, so the painted line is one column narrower than the area.
@@ -1260,7 +1265,7 @@ mod tests {
             Row::new(RowStyle::CodeBlock, "```"),
         ];
         let theme = Theme::dark();
-        let lines = rows_to_lines(&rows, 40, &theme);
+        let lines = rows_to_lines(&rows, 40, &theme, true);
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "let x = 1;");
@@ -1496,7 +1501,7 @@ mod tests {
     #[test]
     fn user_rows_are_verbatim() {
         let rows = vec![Row::new(RowStyle::User, "# not a heading")];
-        let lines = rows_to_lines(&rows, 40, &Theme::dark());
+        let lines = rows_to_lines(&rows, 40, &Theme::dark(), true);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].to_string().trim_end(), "# not a heading");
     }
@@ -1510,7 +1515,7 @@ mod tests {
             Row::new(RowStyle::Tool, "tool"),
             Row::new(RowStyle::System, "sys"),
         ];
-        let lines = rows_to_lines(&rows, 40, &theme);
+        let lines = rows_to_lines(&rows, 40, &theme, true);
         // User prompts are painted as a background block (Ink
         // `userMessageBackground`); the rest keep their foreground token.
         assert_eq!(

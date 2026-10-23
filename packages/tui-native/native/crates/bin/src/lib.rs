@@ -977,6 +977,28 @@ fn answer_permission(
     Ok(())
 }
 
+/// Insert the blank separator rows the inline renderer would add, so the
+/// fullscreen model's heights match what is drawn. `previous` carries the last
+/// row already in the model (its style and whether it is a blank separator).
+fn with_spacing(rows: &[Row], mut previous: Option<(RowStyle, bool)>) -> Vec<Row> {
+    let mut out: Vec<Row> = Vec::with_capacity(rows.len() + 4);
+    for row in rows {
+        let starts_block = matches!(row.style, RowStyle::Assistant | RowStyle::ToolCall)
+            || (row.style == RowStyle::User
+                && previous.map(|(style, _)| style) != Some(RowStyle::User));
+        let last_blank = previous.is_some_and(|(_, blank)| blank);
+        if starts_block && previous.is_some() && !last_blank {
+            out.push(Row::new(RowStyle::System, String::new()));
+        }
+        out.push(row.clone());
+        previous = Some((
+            row.style,
+            row.text.is_empty() && row.style == RowStyle::System,
+        ));
+    }
+    out
+}
+
 fn freeze(
     session: &mut TerminalSession,
     transcript: &mut TranscriptModel,
@@ -984,7 +1006,13 @@ fn freeze(
     rows: &[Row],
 ) -> io::Result<()> {
     if fullscreen {
-        transcript.append(rows.iter().cloned());
+        let previous = transcript.rows().last().map(|last| {
+            (
+                last.style,
+                last.text.is_empty() && last.style == RowStyle::System,
+            )
+        });
+        transcript.append(with_spacing(rows, previous));
         Ok(())
     } else {
         session.insert_rows(rows)
