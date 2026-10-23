@@ -4,6 +4,7 @@ import {
   buildFixtureMessages,
   createFixtureCounter,
   createFixtureMethods,
+  createFixturePromotion,
   loadFixture,
   loadFixtures,
   type CompactionFixture,
@@ -31,6 +32,7 @@ function goldenTrace(trace: readonly DecisionTraceEntry[]): GoldenTraceEntry[] {
 async function replay(fixture: CompactionFixture) {
   const counter = createFixtureCounter(fixture)
   const { methods, canRunMethod } = createFixtureMethods(fixture)
+  const promotion = createFixturePromotion(fixture)
   return runCompactionV2(
     {
       model: fixture.model,
@@ -39,11 +41,24 @@ async function replay(fixture: CompactionFixture) {
       windowTokens: fixture.windowTokens,
       tokenCount: fixture.tokenCount,
       settings: fixture.settings,
+      ...(fixture.stopReason !== undefined
+        ? { stopReason: fixture.stopReason }
+        : {}),
+      ...(fixture.overflowDetected !== undefined
+        ? { overflowDetected: fixture.overflowDetected }
+        : {}),
+      ...(fixture.payloadRejection
+        ? { payloadRejection: fixture.payloadRejection }
+        : {}),
+      ...(fixture.lastActivityAt !== undefined
+        ? { lastActivityAt: fixture.lastActivityAt }
+        : {}),
     },
     {
       methods,
       countTokens: counter.countMessages,
       now: () => FIXED_NOW,
+      ...(promotion ? { promotion } : {}),
       ...(canRunMethod ? { canRunMethod } : {}),
     },
   )
@@ -53,8 +68,8 @@ describe('compaction replay fixtures', () => {
   const fixtures = loadFixtures()
 
   test('ships a stable, uniquely named fixture set', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(4)
-    expect(fixtures.length).toBeLessThanOrEqual(6)
+    // 6 method-chain fixtures + 10 trigger/guard fixtures.
+    expect(fixtures.length).toBe(16)
     expect(new Set(fixtures.map(fixture => fixture.name)).size).toBe(
       fixtures.length,
     )
@@ -71,6 +86,16 @@ describe('compaction replay fixtures', () => {
         )
       }
       expect(result.outcome?.kind ?? null).toBe(fixture.expected.outcomeKind)
+      if (fixture.expected.promotion !== undefined) {
+        if (fixture.expected.promotion === null) {
+          expect(result.promotion).toBeUndefined()
+        } else {
+          expect(result.promotion).toEqual(fixture.expected.promotion)
+        }
+      }
+      if (fixture.expected.payload !== undefined) {
+        expect(result.trigger.payload).toMatchObject(fixture.expected.payload)
+      }
       expect(goldenTrace(result.trace)).toEqual(fixture.expected.trace)
       // Every recorded decision belongs to this trigger and the injected clock.
       expect(
