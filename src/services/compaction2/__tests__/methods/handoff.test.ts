@@ -145,7 +145,7 @@ describe('handoff method run', () => {
       document: string
     }
     expect(preserved.version).toBe(HANDOFF_DOCUMENT_VERSION)
-    expect(preserved.document).toBe(outcome.summary)
+    expect(preserved.document).toBe(outcome.summary as string)
     expect(outcome.cutPoint.tokensBefore).toBe(300)
     expect(outcome.tokensSaved).toBe(300)
     expect(outcome.headroomTokens).toBe(1_000)
