@@ -15,6 +15,10 @@ pub enum RowStyle {
     System,
     Error,
     Tool,
+    /// A tool invocation line (`name(args)`), rendered with the message bullet.
+    ToolCall,
+    /// A tool result line, rendered with the `⎿` gutter.
+    ToolResult,
     /// Markdown heading, carrying its level (`1..=6`).
     Heading(u8),
     /// A logical row made up entirely of inline code.
@@ -105,17 +109,12 @@ impl ChatView {
     pub fn ingest(&mut self, event: &EngineEvent) -> Vec<Row> {
         self.session.apply(event);
         match event {
-            EngineEvent::System { subtype, extra } => {
+            EngineEvent::System { subtype, .. } => {
                 if subtype == "compact_boundary" {
-                    let before = number_field(extra, "pre_compact_token_count");
+                    // Matches CompactBoundaryMessage in the Ink app.
                     return vec![Row::new(
                         RowStyle::System,
-                        format!(
-                            "[context compacted{}]",
-                            before
-                                .map(|n| format!(" — {n} tokens before"))
-                                .unwrap_or_default()
-                        ),
+                        "✻ Conversation compacted (ctrl+o for history)".to_string(),
                     )];
                 }
                 Vec::new()
@@ -172,7 +171,7 @@ impl ChatView {
         if text.trim().is_empty() {
             return None;
         }
-        let row = Row::new(RowStyle::User, format!("> {text}"));
+        let row = Row::new(RowStyle::User, text);
         self.completed.push(row.clone());
         Some(row)
     }
@@ -207,7 +206,8 @@ impl ChatView {
             line.push_str(&format!(" · queued {}", self.queued));
         }
         if self.busy {
-            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            // Matches getDefaultCharacters() + reverse sweep in the Ink app.
+            const FRAMES: [&str; 12] = ["·", "✢", "✱", "✶", "✻", "✽", "✽", "✻", "✶", "✱", "✢", "·"];
             line = format!("{} {line}", FRAMES[self.spinner_frame % FRAMES.len()]);
         }
         line
@@ -300,11 +300,14 @@ fn text_rows(text: &str, assistant: bool) -> Vec<Row> {
         if text.trim().is_empty() {
             return Vec::new();
         }
+        // Kept as raw Markdown: the renderer adds the message bullet after
+        // parsing so headings/lists keep their structure.
         return vec![Row::new(RowStyle::Assistant, text)];
     }
+    // Ink renders a user prompt as a background block, not with a `>` prefix.
     text.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| Row::new(RowStyle::User, format!("> {line}")))
+        .map(|line| Row::new(RowStyle::User, line.to_string()))
         .collect()
 }
 
@@ -321,7 +324,7 @@ fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
                 .get("input")
                 .map(summarize_tool_input)
                 .unwrap_or_default();
-            vec![Row::new(RowStyle::Tool, format!("● {name} {summary}"))]
+            vec![Row::new(RowStyle::ToolCall, format!("{name}({summary})"))]
         }
         Some("tool_result") => {
             let text = block
@@ -329,11 +332,11 @@ fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
                 .map(tool_result_text)
                 .unwrap_or_default();
             if text.is_empty() {
-                vec![Row::new(RowStyle::Tool, "  ⎿ (no output)".to_string())]
+                vec![Row::new(RowStyle::ToolResult, "(no output)".to_string())]
             } else {
                 text.lines()
                     .take(3)
-                    .map(|line| Row::new(RowStyle::Tool, format!("  ⎿ {line}")))
+                    .map(|line| Row::new(RowStyle::ToolResult, line.to_string()))
                     .collect()
             }
         }
@@ -369,10 +372,6 @@ fn string_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<Str
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-}
-
-fn number_field(extra: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
-    extra.get(key).and_then(Value::as_u64)
 }
 
 /// Extract a text delta from a raw stream event.
@@ -440,7 +439,7 @@ mod tests {
         assert_eq!(view.session.pending_permissions, 0);
         assert_eq!(view.session.last_error.as_deref(), Some("boom"));
         assert!(view.completed.iter().any(|row| row.text == "hi"));
-        assert!(view.completed.iter().any(|row| row.text == "> hello"));
+        assert!(view.completed.iter().any(|row| row.text == "hello"));
         // The result frame flushed the streamed text into a frozen row.
         assert!(view.completed.iter().any(|row| row.text == "more"));
         assert!(view.live_text.is_empty());
@@ -453,7 +452,7 @@ mod tests {
         view.spinner_frame = 0;
         view.queued = 2;
         let line = view.status_line();
-        assert!(line.starts_with('⠋'), "{line}");
+        assert!(line.starts_with('·'), "{line}");
         assert!(line.contains("queued 2"), "{line}");
     }
 
@@ -513,7 +512,7 @@ mod tests {
         assert!(texts.contains(&"checking"), "{texts:?}");
         let call = texts
             .iter()
-            .find(|text| text.contains("Bash"))
+            .find(|text| text.starts_with("Bash("))
             .expect("tool row");
         assert!(call.contains("ls -la"), "{call}");
 
@@ -526,15 +525,15 @@ mod tests {
         let results: Vec<&str> = view
             .completed
             .iter()
+            .filter(|row| row.style == RowStyle::ToolResult)
             .map(|row| row.text.as_str())
-            .filter(|text| text.contains('⎿'))
             .collect();
         assert_eq!(
             results.len(),
             3,
             "results are capped at three lines: {results:?}"
         );
-        assert!(results[0].contains("a.txt"));
+        assert_eq!(results[0], "a.txt");
     }
 
     #[test]
@@ -588,7 +587,7 @@ mod tests {
         assert!(view.submit_input().is_none());
         view.input = "run tests".into();
         let row = view.submit_input().expect("row");
-        assert_eq!(row.text, "> run tests");
+        assert_eq!(row.text, "run tests");
         assert!(view.input.is_empty());
     }
 
@@ -623,6 +622,9 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].style, RowStyle::System);
-        assert!(rows[0].text.contains("12345"));
+        assert_eq!(
+            rows[0].text,
+            "✻ Conversation compacted (ctrl+o for history)"
+        );
     }
 }

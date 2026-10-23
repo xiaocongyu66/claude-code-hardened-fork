@@ -281,6 +281,15 @@ impl Drop for TerminalSession {
     }
 }
 
+/// Message bullet used by the Ink app (`figures.BLACK_CIRCLE`).
+pub fn message_bullet() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⏺"
+    } else {
+        "●"
+    }
+}
+
 /// OSC52 clipboard sequence: `ESC ] 52 ; c ; <base64> BEL`.
 pub fn osc52_sequence(text: &str) -> String {
     use base64::Engine as _;
@@ -308,18 +317,43 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>
             continue;
         }
         index += 1;
+        // Rows with a gutter (assistant prose, tool calls, tool results) are
+        // wrapped to the remaining width so the prefix never overflows.
+        let (prefix, cont, available) = match row.style {
+            RowStyle::Assistant => (message_bullet(), "  ", width.saturating_sub(2)),
+            RowStyle::ToolCall => (message_bullet(), "  ", width.saturating_sub(2)),
+            RowStyle::ToolResult => ("  ⎿  ", "     ", width.saturating_sub(5)),
+            _ => ("", "", width),
+        };
         let styled_rows = match row.style {
-            RowStyle::Assistant => cch_tui_markdown::render_markdown(&row.text, width),
-            _ => wrap_text(&row.text, width)
+            RowStyle::Assistant => cch_tui_markdown::render_markdown(&row.text, available),
+            _ => wrap_text(&row.text, available)
                 .into_iter()
                 .map(|line| Row::new(row.style, line))
                 .collect(),
         };
-        for styled in &styled_rows {
-            lines.push(Line::from(Span::styled(
-                styled.text.clone(),
-                row_style(styled.style, theme),
-            )));
+        for (line_index, styled) in styled_rows.iter().enumerate() {
+            let lead = if line_index == 0 { prefix } else { cont };
+            let mut text = if lead.is_empty() {
+                styled.text.clone()
+            } else {
+                format!("{lead}{}", styled.text)
+            };
+            let style = if row.style == RowStyle::ToolResult {
+                Style::default().fg(theme.palette.dim)
+            } else if row.style == RowStyle::User {
+                // Ink paints the prompt as a full-width background block.
+                let used = unicode_width::UnicodeWidthStr::width(text.as_str());
+                if used < width {
+                    text.push_str(&" ".repeat(width - used));
+                }
+                Style::default()
+                    .bg(theme.palette.user_message_bg)
+                    .fg(theme.palette.foreground)
+            } else {
+                row_style(styled.style, theme)
+            };
+            lines.push(Line::from(Span::styled(text, style)));
         }
     }
     lines
@@ -421,6 +455,8 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::System => Style::default().fg(palette.system),
         RowStyle::Error => Style::default().fg(palette.error),
         RowStyle::Tool => Style::default().fg(palette.tool),
+        RowStyle::ToolCall => Style::default().fg(palette.tool),
+        RowStyle::ToolResult => Style::default().fg(palette.dim),
         // Markdown row roles. The markdown crate emits the text (markers,
         // prefixes and indentation included); these only pick a palette token.
         RowStyle::Heading(_) => Style::default()
@@ -470,15 +506,22 @@ fn draw_prompt(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) 
         .iter()
         .enumerate()
         .map(|(index, line)| {
+            // Ink renders `figures.pointer` (❯) plus a non-breaking space and
+            // dims it while a turn is in flight.
             if index == 0 {
-                format!("> {line}")
+                format!("❯ {line}")
             } else {
                 format!("  {line}")
             }
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let input = Paragraph::new(input_text).style(Style::default().add_modifier(Modifier::BOLD));
+    let input_style = if view.busy {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+    };
+    let input = Paragraph::new(input_text).style(input_style);
     frame.render_widget(input, area);
 
     // Cursor at the end of the last input line, clamped to the viewport.
@@ -498,6 +541,18 @@ fn draw_status(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect, 
     frame.render_widget(status, area);
 }
 
+/// Plan-approval options, verbatim from the official Ink component
+/// (`ExitPlanModePermissionRequest.tsx` lines 852, 858 and 871 in the
+/// reference tree).
+const PLAN_APPROVAL_OPTIONS: [&str; 3] = [
+    "Yes, auto-accept edits",
+    "Yes, manually approve edits",
+    "No, keep planning",
+];
+
+/// Most plan body lines rendered before truncating with an ellipsis.
+const MAX_PLAN_LINES: usize = 20;
+
 /// Draw the permission dialog as a centered overlay.
 pub fn draw_permission(
     frame: &mut Frame,
@@ -510,42 +565,56 @@ pub fn draw_permission(
         .saturating_mul(7)
         .saturating_div(10)
         .clamp(24, 78);
+    let is_plan = dialog.kind() == cch_tui_dialog::PermissionKind::ExitPlanMode;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("Tool: {}", dialog.tool_name()),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    if let Some(description) = dialog.description() {
-        for line in wrap_text(description, width.saturating_sub(4) as usize) {
-            lines.push(Line::from(line));
+    if is_plan {
+        lines.push(Line::from(Span::styled(
+            "Here is Claude's plan:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if let Some(plan) = dialog.plan_text() {
+            let mut plan_lines = wrap_text(plan, width.saturating_sub(4) as usize);
+            if plan_lines.len() > MAX_PLAN_LINES {
+                plan_lines.truncate(MAX_PLAN_LINES);
+                plan_lines.push("…".into());
+            }
+            for line in plan_lines {
+                lines.push(Line::from(line));
+            }
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("Tool: {}", dialog.tool_name()),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if let Some(description) = dialog.description() {
+            for line in wrap_text(description, width.saturating_sub(4) as usize) {
+                lines.push(Line::from(line));
+            }
+        }
+        let input = serde_json::to_string_pretty(dialog.input()).unwrap_or_default();
+        let mut input_lines = wrap_text(&input, width.saturating_sub(4) as usize);
+        if input_lines.len() > 6 {
+            input_lines.truncate(6);
+            input_lines.push("…".into());
+        }
+        for line in input_lines {
+            lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(theme.palette.dim),
+            )));
         }
     }
-    let input = serde_json::to_string_pretty(dialog.input()).unwrap_or_default();
-    let mut input_lines = wrap_text(&input, width.saturating_sub(4) as usize);
-    if input_lines.len() > 6 {
-        input_lines.truncate(6);
-        input_lines.push("…".into());
-    }
-    for line in input_lines {
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(theme.palette.dim),
-        )));
-    }
     lines.push(Line::from(""));
-    for (index, option) in dialog.options().iter().enumerate() {
-        let marker = if index == dialog.selected() { ">" } else { " " };
-        let style = if index == dialog.selected() {
-            Style::default()
-                .fg(theme.palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{marker} {}", option.label()),
-            style,
-        )));
+    if is_plan {
+        push_option_lines(&mut lines, dialog, theme, PLAN_APPROVAL_OPTIONS);
+    } else {
+        push_option_lines(
+            &mut lines,
+            dialog,
+            theme,
+            dialog.options().iter().map(|option| option.label()),
+        );
     }
     lines.push(Line::from(Span::styled(
         "↑/↓ select · Enter confirm · Esc cancel",
@@ -557,13 +626,38 @@ pub fn draw_permission(
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = ratatui::layout::Rect::new(x, y, width, height);
     frame.render_widget(ratatui::widgets::Clear, rect);
+    let title = if is_plan {
+        " Ready to code? "
+    } else {
+        " Permission required "
+    };
     let block = ratatui::widgets::Block::bordered()
-        .title(" Permission required ")
+        .title(title)
         .border_style(Style::default().fg(theme.palette.border));
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(paragraph, rect);
+}
+
+/// Append one selectable row per label, highlighting the dialog selection.
+fn push_option_lines(
+    lines: &mut Vec<Line<'static>>,
+    dialog: &cch_tui_dialog::PermissionDialog,
+    theme: &Theme,
+    labels: impl IntoIterator<Item = &'static str>,
+) {
+    for (index, label) in labels.into_iter().enumerate() {
+        let marker = if index == dialog.selected() { ">" } else { " " };
+        let style = if index == dialog.selected() {
+            Style::default()
+                .fg(theme.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("{marker} {label}"), style)));
+    }
 }
 
 /// Convert the visible window of a transcript model into terminal lines.
@@ -731,7 +825,7 @@ mod tests {
 
         let screen = render(&view, 40, 6);
         assert!(screen.contains("streaming"), "screen: {screen}");
-        assert!(screen.contains("> hi"), "screen: {screen}");
+        assert!(screen.contains("❯ hi"), "screen: {screen}");
         assert!(screen.contains("m1 · session s1"), "screen: {screen}");
     }
 
@@ -764,7 +858,7 @@ mod tests {
         let mut view = ChatView::new();
         view.input = "first\nsecond".into();
         let screen = render(&view, 40, 8);
-        assert!(screen.contains("> first"), "screen: {screen}");
+        assert!(screen.contains("❯ first"), "screen: {screen}");
         assert!(screen.contains("  second"), "screen: {screen}");
     }
 
@@ -852,6 +946,105 @@ mod tests {
         assert!(screen.contains("Deny"), "{screen}");
     }
 
+    fn render_permission_screen(
+        dialog: &cch_tui_dialog::PermissionDialog,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_permission(frame, dialog, &Theme::dark()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(buffer[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        screen
+    }
+
+    fn plan_dialog(plan: &str) -> cch_tui_dialog::PermissionDialog {
+        let request = cch_tui_proto::CanUseToolRequest {
+            tool_name: "ExitPlanMode".into(),
+            input: serde_json::Map::from_iter([(
+                "plan".into(),
+                serde_json::Value::String(plan.into()),
+            )]),
+            tool_use_id: "t1".into(),
+            permission_suggestions: None,
+            blocked_path: None,
+            decision_reason: None,
+            title: None,
+            display_name: None,
+            agent_id: None,
+            description: None,
+        };
+        cch_tui_dialog::PermissionDialog::new("r1", request)
+    }
+
+    #[test]
+    fn exit_plan_mode_renders_plan_title_and_fixed_options() {
+        let dialog = plan_dialog("# Plan\n\n1. Add the widget\n2. Run the tests");
+        let screen = render_permission_screen(&dialog, 80, 24);
+
+        assert!(screen.contains("Ready to code?"), "{screen}");
+        assert!(screen.contains("Here is Claude's plan:"), "{screen}");
+        assert!(screen.contains("Add the widget"), "{screen}");
+        assert!(screen.contains("Run the tests"), "{screen}");
+        assert!(screen.contains("> Yes, auto-accept edits"), "{screen}");
+        assert!(screen.contains("Yes, manually approve edits"), "{screen}");
+        assert!(screen.contains("No, keep planning"), "{screen}");
+        assert!(
+            !screen.contains("Permission required"),
+            "plan dialogs use the plan title: {screen}"
+        );
+        assert!(!screen.contains("Allow once"), "{screen}");
+    }
+
+    #[test]
+    fn exit_plan_mode_truncates_long_plans_at_twenty_lines() {
+        let plan = (0..30)
+            .map(|i| format!("step {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let dialog = plan_dialog(&plan);
+        let screen = render_permission_screen(&dialog, 100, 40);
+
+        assert!(screen.contains("step 19"), "{screen}");
+        assert!(!screen.contains("step 20"), "{screen}");
+        assert!(screen.contains('…'), "{screen}");
+    }
+
+    #[test]
+    fn generic_permission_dialog_keeps_its_layout() {
+        let request = cch_tui_proto::CanUseToolRequest {
+            tool_name: "Bash".into(),
+            input: serde_json::Map::from_iter([(
+                "command".into(),
+                serde_json::Value::String("ls".into()),
+            )]),
+            tool_use_id: "t1".into(),
+            permission_suggestions: None,
+            blocked_path: None,
+            decision_reason: None,
+            title: None,
+            display_name: None,
+            agent_id: None,
+            description: None,
+        };
+        let dialog = cch_tui_dialog::PermissionDialog::new("r1", request);
+        let screen = render_permission_screen(&dialog, 70, 20);
+
+        assert!(screen.contains("Permission required"), "{screen}");
+        assert!(screen.contains("Tool: Bash"), "{screen}");
+        assert!(screen.contains("> Allow once"), "{screen}");
+        assert!(!screen.contains("Yes, auto-accept edits"), "{screen}");
+    }
+
     #[test]
     fn transcript_window_follows_tail_and_scrolls() {
         let mut model = cch_tui_fullscreen::TranscriptModel::new();
@@ -861,7 +1054,7 @@ mod tests {
         let lines = transcript_lines(&mut model, 6, 40, &theme);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(
-            texts.iter().any(|text| text == "line 49"),
+            texts.iter().any(|text| text.trim_end() == "line 49"),
             "tail not visible: {texts:?}"
         );
 
@@ -869,7 +1062,7 @@ mod tests {
         let lines = transcript_lines(&mut model, 6, 40, &theme);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(
-            texts.iter().any(|text| text == "line 0"),
+            texts.iter().any(|text| text.trim_end() == "line 0"),
             "top not visible: {texts:?}"
         );
         assert!(!model.is_following());
@@ -913,7 +1106,7 @@ mod tests {
         let rows = vec![Row::new(RowStyle::User, "# not a heading")];
         let lines = rows_to_lines(&rows, 40, &Theme::dark());
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "# not a heading");
+        assert_eq!(lines[0].to_string().trim_end(), "# not a heading");
     }
 
     #[test]
@@ -926,14 +1119,19 @@ mod tests {
             Row::new(RowStyle::System, "sys"),
         ];
         let lines = rows_to_lines(&rows, 40, &theme);
+        // User prompts are painted as a background block (Ink
+        // `userMessageBackground`); the rest keep their foreground token.
+        assert_eq!(
+            lines[0].spans[0].style.bg,
+            Some(theme.palette.user_message_bg)
+        );
         let expected = [
-            theme.palette.user,
             theme.palette.error,
             theme.palette.tool,
             theme.palette.system,
         ];
-        assert_eq!(lines.len(), expected.len());
-        for (line, color) in lines.iter().zip(expected) {
+        assert_eq!(lines.len(), expected.len() + 1);
+        for (line, color) in lines[1..].iter().zip(expected) {
             assert_eq!(line.spans[0].style.fg, Some(color), "line: {line:?}");
         }
     }

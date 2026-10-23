@@ -235,6 +235,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cch-tui-palette"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-core",
+ "cch-tui-ui",
+]
+
+[[package]]
 name = "cch-tui-panel"
 version = "0.1.0"
 dependencies = [
@@ -271,6 +279,13 @@ dependencies = [
  "ratatui",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "cch-tui-search"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-ui",
 ]
 
 [[package]]

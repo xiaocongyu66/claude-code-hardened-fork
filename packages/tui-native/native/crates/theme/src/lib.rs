@@ -54,6 +54,8 @@ pub struct Palette {
     pub dim: Color,
     /// Dialog and panel borders.
     pub border: Color,
+    /// Background of a user prompt block (Ink `userMessageBackground`).
+    pub user_message_bg: Color,
 }
 
 /// A named palette.
@@ -96,6 +98,7 @@ impl Theme {
                 foreground: Color::Reset,
                 dim: Color::DarkGray,
                 border: Color::Yellow,
+                user_message_bg: Color::Rgb(55, 55, 55),
             },
         }
     }
@@ -126,6 +129,7 @@ impl Theme {
                 foreground: Color::Black,
                 dim: Color::DarkGray,
                 border: Color::Blue,
+                user_message_bg: Color::Rgb(240, 240, 240),
             },
         }
     }

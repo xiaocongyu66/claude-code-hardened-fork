@@ -164,7 +164,7 @@ fn replay_renders_session_and_prompt_then_exits_cleanly() {
         let run = run_tui(&[]);
 
         assert!(
-            run.output.contains("> "),
+            run.output.contains('❯'),
             "missing input prompt in output:\n{}",
             run.output
         );
@@ -197,7 +197,7 @@ fn fullscreen_enters_and_leaves_the_alternate_screen() {
         run.output
     );
     assert!(
-        run.output.contains("> "),
+        run.output.contains('❯'),
         "missing input prompt in output:\n{}",
         run.output
     );
