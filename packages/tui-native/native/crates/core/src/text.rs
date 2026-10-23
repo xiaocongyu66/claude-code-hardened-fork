@@ -21,6 +21,63 @@ const TAB_WIDTH: usize = 4;
 const UNDO_LIMIT: usize = 1_000;
 /// Number of kill-ring entries retained.
 pub const KILL_RING_LIMIT: usize = 10;
+/// Paste fold threshold: a paste with more characters than this is folded.
+///
+/// Counted in `char`s, not bytes, so CJK text is measured the same way the
+/// official input measures `text.length`.
+pub const PASTE_FOLD_THRESHOLD: usize = 800;
+/// A paste with more line breaks than this is folded.
+pub const PASTE_FOLD_MAX_LINE_BREAKS: usize = 2;
+
+/// Original text kept behind a `[Pasted text #N ...]` placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastedContent {
+    pub id: usize,
+    pub text: String,
+    /// Number of line breaks (`\r\n`, `\r` or `\n`) in `text`.
+    pub lines: usize,
+}
+
+/// Whether a paste should be folded into a placeholder.
+///
+/// Mirrors the official rule: more than 800 characters **or** more than two
+/// line breaks.
+pub fn should_fold_paste(text: &str) -> bool {
+    text.chars().count() > PASTE_FOLD_THRESHOLD
+        || count_line_breaks(text) > PASTE_FOLD_MAX_LINE_BREAKS
+}
+
+/// The literal placeholder the official input stores for a folded paste.
+///
+/// Zero line breaks renders as `[Pasted text #N]`; otherwise the number of
+/// line breaks is appended as `[Pasted text #N +K lines]`.
+pub fn format_pasted_text_ref(id: usize, lines: usize) -> String {
+    if lines == 0 {
+        format!("[Pasted text #{id}]")
+    } else {
+        format!("[Pasted text #{id} +{lines} lines]")
+    }
+}
+
+fn count_line_breaks(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut count = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                count += 1;
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+            }
+            b'\n' => count += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    count
+}
 
 /// Which end of the most recent kill a new kill is appended to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +189,8 @@ pub struct TextBuffer {
     redo: Vec<Snapshot>,
     undo_limit: usize,
     last_yank: Option<Yank>,
+    pastes: Vec<PastedContent>,
+    next_paste_id: usize,
 }
 
 impl Default for TextBuffer {
@@ -151,6 +210,8 @@ impl TextBuffer {
             redo: Vec::new(),
             undo_limit: UNDO_LIMIT,
             last_yank: None,
+            pastes: Vec::new(),
+            next_paste_id: 1,
         }
     }
 
@@ -179,6 +240,21 @@ impl TextBuffer {
 
     pub fn kill_ring(&self) -> &KillRing {
         &self.kill_ring
+    }
+
+    /// Pasted texts folded behind a placeholder, oldest first.
+    pub fn pastes(&self) -> &[PastedContent] {
+        &self.pastes
+    }
+
+    /// Next id that [`TextBuffer::insert_paste`] will assign.
+    pub fn next_paste_id(&self) -> usize {
+        self.next_paste_id
+    }
+
+    /// Look up a folded paste by id.
+    pub fn paste(&self, id: usize) -> Option<&PastedContent> {
+        self.pastes.iter().find(|paste| paste.id == id)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -429,6 +505,55 @@ impl TextBuffer {
     pub fn insert_char(&mut self, ch: char) -> bool {
         let mut encoded = [0_u8; 4];
         self.insert_str(ch.encode_utf8(&mut encoded))
+    }
+
+    /// Insert pasted text at the cursor.
+    ///
+    /// Large pastes (more than [`PASTE_FOLD_THRESHOLD`] characters, counted in
+    /// `char`s, or more than [`PASTE_FOLD_MAX_LINE_BREAKS`] line breaks) are
+    /// folded into a `[Pasted text #N +K lines]` placeholder and kept in
+    /// [`TextBuffer::pastes`] so [`TextBuffer::expand_pastes`] can restore the
+    /// original before submission. Short pastes are inserted verbatim.
+    ///
+    /// Returns `true` when the paste was folded.
+    pub fn insert_paste(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        if !should_fold_paste(text) {
+            self.insert_str(text);
+            return false;
+        }
+        let id = self.next_paste_id;
+        let lines = count_line_breaks(text);
+        let placeholder = format_pasted_text_ref(id, lines);
+        self.checkpoint();
+        self.replace_selection_with(&placeholder);
+        self.after_non_kill_edit();
+        self.pastes.push(PastedContent {
+            id,
+            text: text.to_owned(),
+            lines,
+        });
+        self.next_paste_id += 1;
+        true
+    }
+
+    /// The buffer text with every `[Pasted text #N ...]` placeholder replaced
+    /// by its original paste. Call this right before submitting the prompt.
+    ///
+    /// Placeholders whose paste has been deleted (or whose id is unknown) are
+    /// left untouched, and placeholder-like strings inside pasted content are
+    /// never re-expanded.
+    pub fn expand_pastes(&self) -> String {
+        let refs = parse_paste_refs(&self.text);
+        let mut expanded = self.text.clone();
+        for (range, id) in refs.into_iter().rev() {
+            if let Some(paste) = self.paste(id) {
+                expanded.replace_range(range, &paste.text);
+            }
+        }
+        expanded
     }
 
     /// Delete the selection, or the character before the cursor.
@@ -758,6 +883,49 @@ impl TextBuffer {
     }
 }
 
+/// Byte ranges and ids of `[Pasted text #N]` / `[Pasted text #N +K lines]`
+/// placeholders in `text`, in source order.
+fn parse_paste_refs(text: &str) -> Vec<(Range<usize>, usize)> {
+    const PREFIX: &str = "[Pasted text #";
+    let bytes = text.as_bytes();
+    let mut refs = Vec::new();
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(PREFIX) {
+        let start = search_from + offset;
+        let mut cursor = start + PREFIX.len();
+        let id_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        let id = text[id_start..cursor].parse::<usize>().ok();
+        if let Some(id) = id
+            && text[cursor..].starts_with(']')
+        {
+            refs.push((start..cursor + 1, id));
+            search_from = cursor + 1;
+            continue;
+        }
+        if let Some(id) = id
+            && text[cursor..].starts_with(" +")
+        {
+            let mut lines_cursor = cursor + 2;
+            let digits_start = lines_cursor;
+            while bytes.get(lines_cursor).is_some_and(u8::is_ascii_digit) {
+                lines_cursor += 1;
+            }
+            if lines_cursor > digits_start && text[lines_cursor..].starts_with(" lines]") {
+                refs.push((start..lines_cursor + " lines]".len(), id));
+                search_from = lines_cursor + " lines]".len();
+                continue;
+            }
+        }
+        // Not a placeholder: resume one character later so overlapping
+        // prefixes cannot loop forever.
+        search_from = start + 1;
+    }
+    refs
+}
+
 fn char_width(ch: char) -> usize {
     if ch == '\t' {
         return TAB_WIDTH;
@@ -1028,6 +1196,125 @@ mod tests {
         assert!(buffer.move_up());
         assert_eq!((buffer.cursor_position()), (0, 3));
         assert!(!buffer.move_up());
+    }
+
+    #[test]
+    fn paste_fold_threshold_counts_chars_and_line_breaks() {
+        // Character boundary: 800 stays inline, 801 folds.
+        assert!(!should_fold_paste(&"a".repeat(800)));
+        assert!(should_fold_paste(&"a".repeat(801)));
+
+        // Line-break boundary: 2 breaks stay inline, 3 fold.
+        assert!(!should_fold_paste("a\nb\nc"));
+        assert!(should_fold_paste("a\nb\nc\nd"));
+        // CRLF is one break, not two.
+        assert!(!should_fold_paste("a\r\nb\r\nc"));
+        assert!(should_fold_paste("a\r\nb\r\nc\r\nd"));
+
+        // CJK is measured in characters, not UTF-8 bytes.
+        assert!(!should_fold_paste(&"汉".repeat(800)));
+        assert!(should_fold_paste(&"汉".repeat(801)));
+    }
+
+    #[test]
+    fn insert_paste_folds_at_the_boundary() {
+        let mut buffer = TextBuffer::new();
+        assert!(!buffer.insert_paste(&"a".repeat(800)));
+        assert_eq!(buffer.text(), "a".repeat(800));
+        assert!(buffer.pastes().is_empty());
+
+        let mut buffer = TextBuffer::new();
+        assert!(buffer.insert_paste(&"汉".repeat(801)));
+        assert_eq!(buffer.text(), "[Pasted text #1]");
+        assert_eq!(buffer.pastes()[0].text, "汉".repeat(801));
+        assert_eq!(buffer.pastes()[0].lines, 0);
+    }
+
+    #[test]
+    fn folded_paste_placeholder_reports_the_line_breaks() {
+        let mut buffer = TextBuffer::new();
+        assert!(buffer.insert_paste("one\ntwo\nthree\nfour"));
+        assert_eq!(buffer.text(), "[Pasted text #1 +3 lines]");
+        assert_eq!(buffer.pastes().len(), 1);
+        assert_eq!(
+            buffer.pastes()[0],
+            PastedContent {
+                id: 1,
+                text: "one\ntwo\nthree\nfour".to_owned(),
+                lines: 3,
+            }
+        );
+        assert_eq!(buffer.paste(1).map(|paste| paste.lines), Some(3));
+        assert_eq!(buffer.paste(2), None);
+    }
+
+    #[test]
+    fn multiple_pastes_get_incrementing_ids() {
+        let mut buffer = TextBuffer::new();
+        assert!(buffer.insert_paste("a\nb\nc\nd"));
+        assert!(buffer.insert_paste(&"x".repeat(801)));
+        assert!(buffer.insert_paste("e\nf\ng\nh"));
+        assert_eq!(
+            buffer.text(),
+            "[Pasted text #1 +3 lines][Pasted text #2][Pasted text #3 +3 lines]"
+        );
+        assert_eq!(
+            buffer
+                .pastes()
+                .iter()
+                .map(|paste| paste.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(buffer.next_paste_id(), 4);
+    }
+
+    #[test]
+    fn expand_pastes_restores_content_in_place() {
+        let mut buffer = TextBuffer::new();
+        buffer.insert_str("start ");
+        buffer.insert_paste("line1\nline2\nline3\nline4");
+        buffer.insert_str(" and ");
+        buffer.insert_paste(&"x".repeat(801));
+        buffer.insert_str(" end");
+
+        assert_eq!(
+            buffer.text(),
+            "start [Pasted text #1 +3 lines] and [Pasted text #2] end"
+        );
+        assert_eq!(
+            buffer.expand_pastes(),
+            format!(
+                "start line1\nline2\nline3\nline4 and {} end",
+                "x".repeat(801)
+            )
+        );
+    }
+
+    #[test]
+    fn deleted_placeholders_are_not_expanded_and_undo_restores_them() {
+        let mut buffer = TextBuffer::new();
+        assert!(buffer.insert_paste(&"q".repeat(801)));
+        assert_eq!(buffer.text(), "[Pasted text #1]");
+
+        buffer.select_all();
+        assert!(buffer.backspace());
+        assert_eq!(buffer.text(), "");
+        assert_eq!(buffer.expand_pastes(), "");
+
+        assert!(buffer.undo());
+        assert_eq!(buffer.text(), "[Pasted text #1]");
+        assert_eq!(buffer.expand_pastes(), "q".repeat(801));
+    }
+
+    #[test]
+    fn paste_content_is_not_reparsed_for_placeholders() {
+        let mut buffer = TextBuffer::new();
+        let content = "[Pasted text #9]\nsecond\nthird\nfourth";
+        assert!(buffer.insert_paste(content));
+        assert_eq!(buffer.text(), "[Pasted text #1 +3 lines]");
+        // The inner `#9` reference stays literal instead of being expanded.
+        assert_eq!(buffer.expand_pastes(), content);
     }
 
     #[test]

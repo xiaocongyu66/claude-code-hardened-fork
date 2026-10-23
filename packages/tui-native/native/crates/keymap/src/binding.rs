@@ -75,6 +75,24 @@ impl Action {
 
     // Modal actions.
     pub const MODAL_DISMISS: Self = Self::new("modal.dismiss");
+
+    // Vim normal/insert actions (see [`crate::VIM_SPECS`]).
+    pub const VIM_LEFT: Self = Self::new("vim.left");
+    pub const VIM_DOWN: Self = Self::new("vim.down");
+    pub const VIM_UP: Self = Self::new("vim.up");
+    pub const VIM_RIGHT: Self = Self::new("vim.right");
+    pub const VIM_INSERT: Self = Self::new("vim.insert");
+    pub const VIM_APPEND: Self = Self::new("vim.append");
+    pub const VIM_OPEN_LINE: Self = Self::new("vim.open_line");
+    pub const VIM_LINE_START: Self = Self::new("vim.line_start");
+    pub const VIM_LINE_END: Self = Self::new("vim.line_end");
+    pub const VIM_WORD_FORWARD: Self = Self::new("vim.word_forward");
+    pub const VIM_WORD_BACKWARD: Self = Self::new("vim.word_backward");
+    pub const VIM_DELETE_CHAR: Self = Self::new("vim.delete_char");
+    pub const VIM_DELETE_LINE: Self = Self::new("vim.delete_line");
+    pub const VIM_UNDO: Self = Self::new("vim.undo");
+    /// `Esc` in insert mode: leave insert, return to normal.
+    pub const VIM_NORMAL: Self = Self::new("vim.normal");
 }
 
 impl fmt::Display for Action {
