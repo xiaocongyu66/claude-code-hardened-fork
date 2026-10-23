@@ -7,6 +7,7 @@
 //! long sessions.
 
 use std::io::{self, Stdout};
+use std::time::Instant;
 
 use cch_tui_theme::Theme;
 use cch_tui_ui::{ChatView, Row, RowStyle, wrap_text};
@@ -23,6 +24,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod legacy;
+
+pub use legacy::{
+    LEGACY_BUILD_THRESHOLD, LEGACY_ENV, LEGACY_ENV_COMPAT, LEGACY_RESET_INTERVAL,
+    LegacyConsoleMode, LegacyRedraw, detect_build_number, legacy_width, parse_windows_build,
+    should_use_legacy,
+};
 
 /// Cells the inline viewport reserves below frozen scrollback.
 pub const DEFAULT_INLINE_HEIGHT: u16 = 12;
@@ -65,6 +74,32 @@ impl Overlay {
     }
 }
 
+/// Resolve legacy mode once at session start.
+///
+/// The first full repaint is deferred by one interval; there is nothing on
+/// screen to self-heal yet when the session is created.
+fn legacy_state(build_number: Option<u32>) -> (bool, LegacyRedraw) {
+    let legacy = should_use_legacy(build_number);
+    let mut redraw = LegacyRedraw::new();
+    if legacy {
+        redraw.mark(Instant::now());
+    }
+    (legacy, redraw)
+}
+
+/// Frame area to paint into, narrowed by one column on legacy consoles.
+fn target_area(frame: &Frame, legacy: bool) -> Rect {
+    let area = frame.area();
+    if legacy {
+        Rect {
+            width: legacy_width(area.width),
+            ..area
+        }
+    } else {
+        area
+    }
+}
+
 /// Live terminal bound to an inline viewport.
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -72,11 +107,24 @@ pub struct TerminalSession {
     theme: Theme,
     /// Prompt text pinned above the transcript while scrolled up.
     sticky_prompt: Option<String>,
+    /// Legacy pre-ConPTY conhost compatibility (Ink's `legacyConsole`).
+    legacy: bool,
+    /// Periodic full-repaint bookkeeping, used only when `legacy` is set.
+    legacy_redraw: LegacyRedraw,
 }
 
 impl TerminalSession {
     /// Enter raw mode and reserve an inline viewport at the cursor position.
     pub fn inline(height: u16) -> io::Result<Self> {
+        Self::inline_with_build(height, detect_build_number())
+    }
+
+    /// [`Self::inline`] with an explicit Windows build number.
+    ///
+    /// `None` means "unknown" and disables auto-detection; `Some(17_762)`
+    /// simulates a pre-ConPTY machine (useful for tests). Environment
+    /// overrides still take precedence.
+    pub fn inline_with_build(height: u16, build_number: Option<u32>) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnableBracketedPaste, Show)?;
@@ -87,27 +135,68 @@ impl TerminalSession {
                 viewport: Viewport::Inline(height.max(4)),
             },
         )?;
+        let (legacy, legacy_redraw) = legacy_state(build_number);
         Ok(Self {
             terminal,
             fullscreen: false,
             theme: Theme::dark(),
             sticky_prompt: None,
+            legacy,
+            legacy_redraw,
         })
     }
 
     /// Enter the alternate screen (fullscreen mode).
     pub fn fullscreen() -> io::Result<Self> {
+        Self::fullscreen_with_build(detect_build_number())
+    }
+
+    /// [`Self::fullscreen`] with an explicit Windows build number.
+    pub fn fullscreen_with_build(build_number: Option<u32>) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
+        let (legacy, legacy_redraw) = legacy_state(build_number);
         Ok(Self {
             terminal,
             fullscreen: true,
             theme: Theme::dark(),
             sticky_prompt: None,
+            legacy,
+            legacy_redraw,
         })
+    }
+
+    /// Whether the legacy conhost compatibility layer is active.
+    pub fn is_legacy_console(&self) -> bool {
+        self.legacy
+    }
+
+    /// Content width for a terminal of `terminal_width` columns.
+    fn content_width(&self, terminal_width: u16) -> usize {
+        let width = terminal_width.max(1);
+        if self.legacy {
+            legacy_width(width) as usize
+        } else {
+            width as usize
+        }
+    }
+
+    /// Full clear + repaint when the legacy interval has elapsed.
+    ///
+    /// No-op on modern terminals, so their incremental diffs are unchanged.
+    fn maybe_full_redraw(&mut self) -> io::Result<()> {
+        if !self.legacy {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self.legacy_redraw.due(now) {
+            self.terminal.clear()?;
+            self.legacy_redraw.mark(now);
+        }
+        Ok(())
     }
 
     /// Replace the palette used for subsequent draws. Defaults to
@@ -141,7 +230,7 @@ impl TerminalSession {
         if rows.is_empty() {
             return Ok(());
         }
-        let width = self.terminal.size()?.width.max(1) as usize;
+        let width = self.content_width(self.terminal.size()?.width);
         let lines = rows_to_lines(rows, width, &self.theme, true);
         if lines.is_empty() {
             return Ok(());
@@ -154,17 +243,23 @@ impl TerminalSession {
     }
 
     pub fn draw(&mut self, view: &ChatView) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
-        self.terminal.draw(|frame| draw_view(frame, view, &theme))?;
+        let legacy = self.legacy;
+        self.terminal.draw(|frame| {
+            draw_view_in(frame, target_area(frame, legacy), view, &theme);
+        })?;
         Ok(())
     }
 
     /// Inline frame with a list overlay (slash palette or transcript search).
     pub fn draw_with_overlay(&mut self, view: &ChatView, overlay: &Overlay) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
+        let legacy = self.legacy;
         self.terminal.draw(|frame| {
-            let area = frame.area();
-            draw_view(frame, view, &theme);
+            let area = target_area(frame, legacy);
+            draw_view_in(frame, area, view, &theme);
             draw_overlay(frame, area, &view.input, overlay, &theme);
         })?;
         Ok(())
@@ -176,10 +271,12 @@ impl TerminalSession {
         view: &ChatView,
         model: &mut cch_tui_fullscreen::TranscriptModel,
     ) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
         let sticky = self.sticky_prompt.clone();
+        let legacy = self.legacy;
         let size = self.terminal.size()?;
-        let width = size.width.max(1) as usize;
+        let width = self.content_width(size.width);
         let reserved = input_height(&view.input) as usize + 1;
         let sticky_height = usize::from(sticky.is_some());
         let transcript_height = (size.height as usize)
@@ -188,7 +285,7 @@ impl TerminalSession {
         let lines = transcript_lines(model, transcript_height, width, &theme);
         let unseen = model.unseen_count();
         self.terminal.draw(|frame| {
-            let area = frame.area();
+            let area = target_area(frame, legacy);
             let chunks = Layout::vertical([
                 Constraint::Min(1),
                 Constraint::Length(input_height(&view.input)),
@@ -209,10 +306,12 @@ impl TerminalSession {
         model: &mut cch_tui_fullscreen::TranscriptModel,
         panel: &cch_tui_panel::TaskPanel,
     ) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
         let sticky = self.sticky_prompt.clone();
+        let legacy = self.legacy;
         let size = self.terminal.size()?;
-        let width = size.width.max(1) as usize;
+        let width = self.content_width(size.width);
         let reserved = input_height(&view.input) as usize + 1;
         let sticky_height = usize::from(sticky.is_some());
         let transcript_height = (size.height as usize)
@@ -227,7 +326,7 @@ impl TerminalSession {
         let unseen = model.unseen_count();
         let panel_lines = panel_lines(panel, sidebar_width.saturating_sub(2), &theme);
         self.terminal.draw(|frame| {
-            let area = frame.area();
+            let area = target_area(frame, legacy);
             let chunks = Layout::vertical([
                 Constraint::Min(1),
                 Constraint::Length(input_height(&view.input)),
@@ -259,10 +358,12 @@ impl TerminalSession {
         panel: Option<&cch_tui_panel::TaskPanel>,
         overlay: &Overlay,
     ) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
         let sticky = self.sticky_prompt.clone();
+        let legacy = self.legacy;
         let size = self.terminal.size()?;
-        let width = size.width.max(1) as usize;
+        let width = self.content_width(size.width);
         let reserved = input_height(&view.input) as usize + 1;
         let sticky_height = usize::from(sticky.is_some());
         let transcript_height = (size.height as usize)
@@ -281,7 +382,7 @@ impl TerminalSession {
         let panel_lines =
             panel.map(|panel| panel_lines(panel, sidebar_width.saturating_sub(2), &theme));
         self.terminal.draw(|frame| {
-            let area = frame.area();
+            let area = target_area(frame, legacy);
             let chunks = Layout::vertical([
                 Constraint::Min(1),
                 Constraint::Length(input_height(&view.input)),
@@ -328,10 +429,13 @@ impl TerminalSession {
         view: &ChatView,
         dialog: &cch_tui_dialog::PermissionDialog,
     ) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
+        let legacy = self.legacy;
         self.terminal.draw(|frame| {
-            draw_view(frame, view, &theme);
-            draw_permission(frame, dialog, &theme);
+            let area = target_area(frame, legacy);
+            draw_view_in(frame, area, view, &theme);
+            draw_permission_in(frame, area, dialog, &theme);
         })?;
         Ok(())
     }
@@ -343,10 +447,12 @@ impl TerminalSession {
         model: &mut cch_tui_fullscreen::TranscriptModel,
         dialog: &cch_tui_dialog::PermissionDialog,
     ) -> io::Result<()> {
+        self.maybe_full_redraw()?;
         let theme = self.theme;
         let sticky = self.sticky_prompt.clone();
+        let legacy = self.legacy;
         let size = self.terminal.size()?;
-        let width = size.width.max(1) as usize;
+        let width = self.content_width(size.width);
         let reserved = input_height(&view.input) as usize + 1;
         let sticky_height = usize::from(sticky.is_some());
         let transcript_height = (size.height as usize)
@@ -355,7 +461,7 @@ impl TerminalSession {
         let lines = transcript_lines(model, transcript_height, width, &theme);
         let unseen = model.unseen_count();
         self.terminal.draw(|frame| {
-            let area = frame.area();
+            let area = target_area(frame, legacy);
             let chunks = Layout::vertical([
                 Constraint::Min(1),
                 Constraint::Length(input_height(&view.input)),
@@ -365,7 +471,7 @@ impl TerminalSession {
             draw_transcript_region(frame, chunks[0], lines, &theme, sticky.as_deref(), unseen);
             draw_prompt(frame, view, chunks[1]);
             draw_status(frame, view, chunks[2], &theme);
-            draw_permission(frame, dialog, &theme);
+            draw_permission_in(frame, area, dialog, &theme);
         })?;
         Ok(())
     }
@@ -732,7 +838,11 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
 
 /// Paint the live region: streaming text, input line, status line.
 pub fn draw_view(frame: &mut Frame, view: &ChatView, theme: &Theme) {
-    let area = frame.area();
+    draw_view_in(frame, frame.area(), view, theme);
+}
+
+/// [`draw_view`] constrained to `area` (legacy consoles drop the last column).
+fn draw_view_in(frame: &mut Frame, area: Rect, view: &ChatView, theme: &Theme) {
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(input_height(&view.input)),
@@ -907,7 +1017,16 @@ pub fn draw_permission(
     dialog: &cch_tui_dialog::PermissionDialog,
     theme: &Theme,
 ) {
-    let area = frame.area();
+    draw_permission_in(frame, frame.area(), dialog, theme);
+}
+
+/// [`draw_permission`] centered inside `area`.
+fn draw_permission_in(
+    frame: &mut Frame,
+    area: Rect,
+    dialog: &cch_tui_dialog::PermissionDialog,
+    theme: &Theme,
+) {
     let width = area
         .width
         .saturating_mul(7)
@@ -1125,6 +1244,23 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn legacy_target_area_drops_last_column() {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut areas = Vec::new();
+        terminal
+            .draw(|frame| {
+                areas.push(target_area(frame, false));
+                areas.push(target_area(frame, true));
+            })
+            .expect("draw");
+        assert_eq!(areas[0].width, 80);
+        assert_eq!(areas[1].width, 79);
+        assert_eq!(areas[0].x, areas[1].x);
+        assert_eq!(areas[0].height, areas[1].height);
     }
 
     fn render(view: &ChatView, width: u16, height: u16) -> String {
