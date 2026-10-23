@@ -39,6 +39,7 @@ import {
   type CompactionSessionEntry,
 } from './session/entries.js'
 import { estimateTokens } from './tokens/index.js'
+import { countMessagesForThreshold } from './tokens/messageCount.js'
 import { evaluateIdleTrigger } from './triggers/idle.js'
 import { evaluateIncompleteTrigger } from './triggers/incomplete.js'
 import { evaluateManualTrigger } from './triggers/manual.js'
@@ -610,6 +611,15 @@ export async function runCompactionV2ForQuery(
   }
   const windowTokens = getEffectiveContextWindowSize(request.model)
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
+  // Prefer the real tokenizer for the V2 threshold/blocking decision. The
+  // caller's count (usage anchor + cl100k tail estimate) stays the fallback
+  // when no tokenizer data resolves, so flag-off and data-less behavior is
+  // unchanged.
+  const tokenCount = countMessagesForThreshold(
+    request.messages,
+    request.model,
+    request.tokenCount,
+  )
 
   // Remote compaction is opt-in. Build the provider-bound transport lazily so
   // the flag-off path never touches auth, and a missing transport keeps the
@@ -624,7 +634,7 @@ export async function runCompactionV2ForQuery(
       trigger: request.trigger,
       messages: request.messages,
       windowTokens,
-      tokenCount: request.tokenCount,
+      tokenCount,
       stopReason: request.stopReason,
       overflowDetected: request.overflowDetected,
       payloadRejection: request.payloadRejection,
@@ -639,7 +649,7 @@ export async function runCompactionV2ForQuery(
         toolUseContext: request.toolUseContext,
         cacheSafeParams: request.cacheSafeParams,
         querySource: request.querySource,
-        tokenCount: request.tokenCount,
+        tokenCount,
         autoCompactThreshold,
         tracking: request.tracking,
       }),
