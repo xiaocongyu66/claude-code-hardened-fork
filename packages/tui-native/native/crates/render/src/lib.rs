@@ -17,11 +17,12 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Cells the inline viewport reserves below frozen scrollback.
 pub const DEFAULT_INLINE_HEIGHT: u16 = 12;
@@ -31,6 +32,8 @@ pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     fullscreen: bool,
     theme: Theme,
+    /// Prompt text pinned above the transcript while scrolled up.
+    sticky_prompt: Option<String>,
 }
 
 impl TerminalSession {
@@ -50,6 +53,7 @@ impl TerminalSession {
             terminal,
             fullscreen: false,
             theme: Theme::dark(),
+            sticky_prompt: None,
         })
     }
 
@@ -64,6 +68,7 @@ impl TerminalSession {
             terminal,
             fullscreen: true,
             theme: Theme::dark(),
+            sticky_prompt: None,
         })
     }
 
@@ -79,6 +84,15 @@ impl TerminalSession {
         if name.eq_ignore_ascii_case("dark") || name.eq_ignore_ascii_case("light") {
             self.theme = Theme::from_name(name);
         }
+    }
+
+    /// Pin `prompt` above the fullscreen transcript (sticky header).
+    ///
+    /// The header occupies one row at the top of the transcript region and is
+    /// truncated to the terminal width. `None` (the default) hides it and
+    /// gives the row back to the transcript.
+    pub fn set_sticky_prompt(&mut self, prompt: Option<String>) {
+        self.sticky_prompt = prompt;
     }
 
     /// Freeze `rows` into the terminal scrollback.
@@ -114,11 +128,16 @@ impl TerminalSession {
         model: &mut cch_tui_fullscreen::TranscriptModel,
     ) -> io::Result<()> {
         let theme = self.theme;
+        let sticky = self.sticky_prompt.clone();
         let size = self.terminal.size()?;
         let width = size.width.max(1) as usize;
         let reserved = input_height(&view.input) as usize + 1;
-        let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
+        let sticky_height = usize::from(sticky.is_some());
+        let transcript_height = (size.height as usize)
+            .saturating_sub(reserved + sticky_height)
+            .max(1);
         let lines = transcript_lines(model, transcript_height, width, &theme);
+        let unseen = model.unseen_count();
         self.terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([
@@ -127,7 +146,7 @@ impl TerminalSession {
                 Constraint::Length(1),
             ])
             .split(area);
-            frame.render_widget(Paragraph::new(lines.clone()), chunks[0]);
+            draw_transcript_region(frame, chunks[0], lines, &theme, sticky.as_deref(), unseen);
             draw_prompt(frame, view, chunks[1]);
             draw_status(frame, view, chunks[2], &theme);
         })?;
@@ -142,14 +161,19 @@ impl TerminalSession {
         panel: &cch_tui_panel::TaskPanel,
     ) -> io::Result<()> {
         let theme = self.theme;
+        let sticky = self.sticky_prompt.clone();
         let size = self.terminal.size()?;
         let width = size.width.max(1) as usize;
         let reserved = input_height(&view.input) as usize + 1;
-        let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
+        let sticky_height = usize::from(sticky.is_some());
+        let transcript_height = (size.height as usize)
+            .saturating_sub(reserved + sticky_height)
+            .max(1);
         // The sidebar takes ~30% and is only drawn when it has content.
         let sidebar_width = (width / 3).clamp(18, 44);
         let main_width = width.saturating_sub(sidebar_width + 1).max(1);
         let lines = transcript_lines(model, transcript_height, main_width, &theme);
+        let unseen = model.unseen_count();
         let panel_lines = panel_lines(panel, sidebar_width.saturating_sub(2), &theme);
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -162,7 +186,7 @@ impl TerminalSession {
             let content =
                 Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_width as u16)])
                     .split(chunks[0]);
-            frame.render_widget(Paragraph::new(lines.clone()), content[0]);
+            draw_transcript_region(frame, content[0], lines, &theme, sticky.as_deref(), unseen);
             let block = ratatui::widgets::Block::bordered()
                 .title(" Tasks ")
                 .border_style(Style::default().fg(theme.palette.border));
@@ -208,11 +232,16 @@ impl TerminalSession {
         dialog: &cch_tui_dialog::PermissionDialog,
     ) -> io::Result<()> {
         let theme = self.theme;
+        let sticky = self.sticky_prompt.clone();
         let size = self.terminal.size()?;
         let width = size.width.max(1) as usize;
         let reserved = input_height(&view.input) as usize + 1;
-        let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
+        let sticky_height = usize::from(sticky.is_some());
+        let transcript_height = (size.height as usize)
+            .saturating_sub(reserved + sticky_height)
+            .max(1);
         let lines = transcript_lines(model, transcript_height, width, &theme);
+        let unseen = model.unseen_count();
         self.terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([
@@ -221,7 +250,7 @@ impl TerminalSession {
                 Constraint::Length(1),
             ])
             .split(area);
-            frame.render_widget(Paragraph::new(lines.clone()), chunks[0]);
+            draw_transcript_region(frame, chunks[0], lines, &theme, sticky.as_deref(), unseen);
             draw_prompt(frame, view, chunks[1]);
             draw_status(frame, view, chunks[2], &theme);
             draw_permission(frame, dialog, &theme);
@@ -548,6 +577,85 @@ pub fn transcript_lines(
     rows_to_lines(&model.rows()[range], width, theme)
 }
 
+/// Paint the transcript and its scroll chrome inside `area`.
+///
+/// When a sticky prompt is set it occupies the first row of `area` and the
+/// transcript starts one row lower; otherwise the transcript gets the whole
+/// area. The "new messages" pill floats over the bottom-right row without
+/// changing the layout.
+fn draw_transcript_region(
+    frame: &mut Frame,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    theme: &Theme,
+    sticky: Option<&str>,
+    unseen: usize,
+) {
+    let body = match sticky {
+        Some(_) => Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        },
+        None => area,
+    };
+    frame.render_widget(Paragraph::new(lines), body);
+    draw_transcript_chrome(frame, area, theme, sticky, unseen);
+}
+
+/// Draw sticky-prompt and new-message chrome for the transcript region.
+///
+/// The sticky header is a single dim row prefixed with `▸ `, truncated to the
+/// region width. The pill is a dim `↓ N new` label aligned to the bottom-right
+/// corner and is omitted when `unseen` is zero.
+pub fn draw_transcript_chrome(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    sticky: Option<&str>,
+    unseen: usize,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let style = Style::default().fg(theme.palette.dim);
+    if let Some(text) = sticky {
+        let flattened = text.replace(['\n', '\r'], " ");
+        let line = truncate_to_width(&format!("▸ {flattened}"), area.width as usize);
+        let rect = Rect::new(area.x, area.y, area.width, 1);
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(line, style))), rect);
+    }
+    if unseen > 0 {
+        let label = truncate_to_width(&format!("↓ {unseen} new"), area.width as usize);
+        let width = UnicodeWidthStr::width(label.as_str()) as u16;
+        if width > 0 {
+            let rect = Rect::new(
+                area.right().saturating_sub(width),
+                area.bottom().saturating_sub(1),
+                width,
+                1,
+            );
+            frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), rect);
+        }
+    }
+}
+
+/// Truncate `text` to at most `width` display columns, never splitting a
+/// double-width character in half.
+fn truncate_to_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + char_width > width {
+            break;
+        }
+        out.push(ch);
+        used += char_width;
+    }
+    out
+}
+
 /// Rows reserved for the prompt: one per input line, capped so the live area
 /// never collapses.
 const MAX_INPUT_LINES: u16 = 6;
@@ -563,12 +671,7 @@ mod tests {
     use cch_tui_proto::parse_line;
     use ratatui::Terminal;
 
-    fn render(view: &ChatView, width: u16, height: u16) -> String {
-        let backend = ratatui::backend::TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_view(frame, view, &Theme::dark()))
-            .expect("draw");
+    fn buffer_screen(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
         let buffer = terminal.backend().buffer().clone();
         let mut out = String::new();
         for y in 0..buffer.area.height {
@@ -578,6 +681,42 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn render(view: &ChatView, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_view(frame, view, &Theme::dark()))
+            .expect("draw");
+        buffer_screen(&terminal)
+    }
+
+    fn chrome_screen(width: u16, height: u16, sticky: Option<&str>, unseen: usize) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_transcript_chrome(frame, area, &Theme::dark(), sticky, unseen);
+            })
+            .expect("draw");
+        buffer_screen(&terminal)
+    }
+
+    fn region_screen(width: u16, height: u16, sticky: Option<&str>, unseen: usize) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let lines = ["row 0", "row 1", "row 2"]
+                    .into_iter()
+                    .map(Line::from)
+                    .collect();
+                draw_transcript_region(frame, frame.area(), lines, &Theme::dark(), sticky, unseen);
+            })
+            .expect("draw");
+        buffer_screen(&terminal)
     }
 
     #[test]
@@ -840,5 +979,51 @@ mod tests {
         );
         let screen = render(&view, 60, 6);
         assert!(screen.contains("permission"), "screen: {screen}");
+    }
+
+    #[test]
+    fn sticky_chrome_truncates_prompt_to_the_region_width() {
+        let screen = chrome_screen(20, 4, Some(&"x".repeat(100)), 0);
+        let first = screen.lines().next().expect("first row");
+        assert_eq!(first.trim_end(), format!("▸ {}", "x".repeat(18)));
+        assert!(!screen.contains("new"), "screen: {screen}");
+    }
+
+    #[test]
+    fn pill_is_absent_when_nothing_is_unseen() {
+        let screen = chrome_screen(20, 4, None, 0);
+        assert!(!screen.contains('↓'), "screen: {screen}");
+        assert!(!screen.contains("new"), "screen: {screen}");
+    }
+
+    #[test]
+    fn pill_shows_unseen_count_at_the_bottom_right() {
+        let screen = chrome_screen(20, 4, None, 3);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[0].trim().is_empty(), "screen: {screen}");
+        let last = lines.get(3).copied().expect("bottom row");
+        assert_eq!(last.trim_start(), "↓ 3 new");
+        assert_eq!(last.chars().count(), 20, "screen: {screen}");
+    }
+
+    #[test]
+    fn sticky_none_does_not_consume_a_transcript_row() {
+        let without = region_screen(20, 4, None, 0);
+        assert!(without.lines().next().unwrap().starts_with("row 0"));
+
+        let with = region_screen(20, 4, Some("prompt"), 0);
+        let lines: Vec<&str> = with.lines().collect();
+        assert!(lines[0].starts_with("▸ prompt"), "screen: {with}");
+        assert!(lines[1].starts_with("row 0"), "screen: {with}");
+        assert!(lines[2].starts_with("row 1"), "screen: {with}");
+        assert!(lines[3].starts_with("row 2"), "screen: {with}");
+    }
+
+    #[test]
+    fn truncate_to_width_keeps_wide_chars_whole() {
+        assert_eq!(truncate_to_width("abcdef", 4), "abcd");
+        assert_eq!(truncate_to_width("你好", 3), "你");
+        assert_eq!(truncate_to_width("你好", 4), "你好");
+        assert_eq!(truncate_to_width("abc", 10), "abc");
     }
 }
