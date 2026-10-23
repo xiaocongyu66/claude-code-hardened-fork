@@ -72,13 +72,7 @@ impl TerminalSession {
             return Ok(());
         }
         let width = self.terminal.size()?.width.max(1) as usize;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        for row in rows {
-            let style = row_style(row.style);
-            for wrapped in wrap_text(&row.text, width) {
-                lines.push(Line::from(Span::styled(wrapped, style)));
-            }
-        }
+        let lines = rows_to_lines(rows, width);
         if lines.is_empty() {
             return Ok(());
         }
@@ -115,6 +109,30 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.restore();
     }
+}
+
+/// Convert domain rows into wrapped, styled terminal lines.
+///
+/// Assistant prose goes through the Markdown renderer at the target width;
+/// everything else (user input, tool output, errors) is wrapped verbatim.
+fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in rows {
+        let styled_rows = match row.style {
+            RowStyle::Assistant => cch_tui_markdown::render_markdown(&row.text, width),
+            _ => wrap_text(&row.text, width)
+                .into_iter()
+                .map(|line| Row::new(row.style, line))
+                .collect(),
+        };
+        for styled in &styled_rows {
+            lines.push(Line::from(Span::styled(
+                styled.text.clone(),
+                row_style(styled.style),
+            )));
+        }
+    }
+    lines
 }
 
 fn row_style(style: RowStyle) -> Style {
@@ -208,6 +226,27 @@ mod tests {
         for line in screen.lines() {
             assert!(line.chars().count() <= 20, "line too wide: {line:?}");
         }
+    }
+
+    #[test]
+    fn assistant_rows_are_markdown_rendered() {
+        let rows = vec![Row::new(RowStyle::Assistant, "# Title\n- item")];
+        let lines = rows_to_lines(&rows, 40);
+        let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        assert!(texts.iter().any(|text| text.contains("Title")), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.contains("# Title")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("item")), "{texts:?}");
+    }
+
+    #[test]
+    fn user_rows_are_verbatim() {
+        let rows = vec![Row::new(RowStyle::User, "# not a heading")];
+        let lines = rows_to_lines(&rows, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "# not a heading");
     }
 
     #[test]

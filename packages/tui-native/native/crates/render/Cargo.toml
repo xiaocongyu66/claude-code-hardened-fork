@@ -9,5 +9,6 @@ publish.workspace = true
 cch-tui-core = { path = "../core" }
 cch-tui-ui = { path = "../ui" }
 cch-tui-proto = { path = "../proto" }
+cch-tui-markdown = { path = "../markdown" }
 ratatui = "0.30"
 unicode-width = "0.2"
