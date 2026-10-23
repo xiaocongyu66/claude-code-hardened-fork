@@ -22,7 +22,17 @@ import type {
   CompactionSettings,
   TriggerReason,
 } from '../../contracts.js'
+import type {
+  PayloadGuardDecision,
+  PayloadRejectionEvidence,
+} from '../../guards/payload.js'
 import type { DecisionOutcome } from '../../orchestrator.js'
+import type { ContextPromotion } from '../../triggers/overflow.js'
+import {
+  createContextPromotion,
+  type PromotionCandidate,
+} from '../../triggers/promotion.js'
+import type { PromotionResult } from '../../triggers/types.js'
 import {
   applyShakeRegions,
   collectShakeRegions,
@@ -104,7 +114,30 @@ export interface FixtureExpectation {
   thresholdTokens?: number
   /** Final outcome kind; null means the chain produced no outcome. */
   outcomeKind: 'compacted' | 'reduced' | null
+  /**
+   * Promotion decision returned by the overflow trigger, when pinned.
+   * `null` asserts the trigger never reached the promotion step.
+   */
+  promotion?: PromotionResult | null
+  /** Payload guard fields pinned for payload-rejection fixtures. */
+  payload?: Pick<
+    PayloadGuardDecision,
+    'blockCompaction' | 'excludeMediaMethods' | 'tokenOverflowProven' | 'reason'
+  >
   trace: GoldenTraceEntry[]
+}
+
+/**
+ * Declarative promotion wiring. The harness builds the real
+ * `createContextPromotion` adapter so `selectPromotion` decides availability.
+ */
+export interface FixturePromotionPlan {
+  /** Explicitly known candidates. */
+  candidates?: readonly PromotionCandidate[]
+  /** Model → window override map, merged with `candidates`. */
+  windowOverrides?: Record<string, number>
+  /** Effective window of the current model; defaults to `windowTokens`. */
+  currentWindow?: number
 }
 
 export interface CompactionFixture {
@@ -119,6 +152,16 @@ export interface CompactionFixture {
   messages: FixtureMessageSpec[]
   methods: FixtureMethodsPlan
   consecutiveFailures?: number
+  /** Assistant stop reason; drives the incomplete trigger. */
+  stopReason?: string | null
+  /** Explicit provider overflow signal (needed when tokenCount ≤ window). */
+  overflowDetected?: boolean
+  /** Payload-shaped rejection evidence for the overflow guard. */
+  payloadRejection?: PayloadRejectionEvidence
+  /** Idle trigger activity clock input. */
+  lastActivityAt?: number
+  /** Overflow promotion wiring; absent = no promotion configured. */
+  promotion?: FixturePromotionPlan
   expected: FixtureExpectation
 }
 
@@ -328,6 +371,23 @@ export function createFixtureMethods(
         }
       : {}),
   }
+}
+
+/**
+ * Build the promotion adapter for a fixture. Reuses the production
+ * `createContextPromotion`/`selectPromotion` decision so goldens pin the real
+ * larger-window policy instead of a stub.
+ */
+export function createFixturePromotion(
+  fixture: CompactionFixture,
+): ContextPromotion | null {
+  const plan = fixture.promotion
+  if (!plan) return null
+  return createContextPromotion({
+    candidates: plan.candidates ?? null,
+    windowOverrides: plan.windowOverrides ?? null,
+    resolveWindow: () => plan.currentWindow ?? fixture.windowTokens,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +702,469 @@ export const FIXTURES: readonly CompactionFixture[] = [
       ],
     },
   },
+  {
+    name: 'overflow-payload-blocked',
+    description:
+      'A 413 with local headroom is a payload rejection, not token overflow: compaction is blocked before any method runs.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'overflow',
+    // threshold = 200_000 - max(30_000, 16_384) = 170_000
+    tokenCount: 100_000,
+    settings: {},
+    overflowDetected: true,
+    payloadRejection: { status: 413, message: 'request too large' },
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-payload-block-u1',
+        content: 'one',
+        tokens: 50_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-payload-block-a1',
+        content: 'two',
+        tokens: 50_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 100_000, tokensAfter: 40_000 },
+    },
+    expected: {
+      shouldCompact: false,
+      thresholdTokens: 170_000,
+      outcomeKind: null,
+      // Payload guard returns before promotion is attempted.
+      promotion: null,
+      payload: {
+        blockCompaction: true,
+        excludeMediaMethods: true,
+        tokenOverflowProven: false,
+        reason: 'payload-budget-with-headroom',
+      },
+      trace: [
+        {
+          method: null,
+          outcome: 'skipped',
+          reason: 'payload-rejection: payload-budget-with-headroom',
+          // 170_000 - 100_000.
+          headroomTokens: 70_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'overflow-media-blocked',
+    description:
+      'Explicit media-limit evidence (400 + "too many images") blocks compaction and excludes media methods.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'overflow',
+    tokenCount: 100_000,
+    settings: {},
+    overflowDetected: true,
+    payloadRejection: {
+      status: 400,
+      message: 'request_too_large: too many images',
+    },
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-media-block-u1',
+        content: 'one',
+        tokens: 50_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-media-block-a1',
+        content: 'two',
+        tokens: 50_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 100_000, tokensAfter: 40_000 },
+    },
+    expected: {
+      shouldCompact: false,
+      thresholdTokens: 170_000,
+      outcomeKind: null,
+      promotion: null,
+      payload: {
+        blockCompaction: true,
+        excludeMediaMethods: true,
+        tokenOverflowProven: false,
+        reason: 'media-limit-evidence',
+      },
+      trace: [
+        {
+          method: null,
+          outcome: 'skipped',
+          reason: 'payload-rejection: media-limit-evidence',
+          headroomTokens: 70_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'overflow-promotion',
+    description:
+      'A strictly larger-window candidate is promoted instead of compacting; no method runs.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'overflow',
+    tokenCount: 250_000,
+    settings: {},
+    overflowDetected: true,
+    promotion: {
+      candidates: [{ model: 'claude-opus-4-5', windowTokens: 1_000_000 }],
+      currentWindow: 200_000,
+    },
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-promotion-u1',
+        content: 'one',
+        tokens: 125_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-promotion-a1',
+        content: 'two',
+        tokens: 125_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 250_000, tokensAfter: 100_000 },
+    },
+    expected: {
+      shouldCompact: false,
+      thresholdTokens: 170_000,
+      outcomeKind: null,
+      promotion: {
+        kind: 'promoted',
+        model: 'claude-opus-4-5',
+        reason: 'larger-window:1000000',
+      },
+      trace: [
+        {
+          method: null,
+          outcome: 'skipped',
+          reason: 'context-promoted: claude-opus-4-5',
+          // 170_000 - 250_000.
+          headroomTokens: -80_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'overflow-media-overflow-proven',
+    description:
+      'Provider usage proves token overflow despite media evidence: compaction runs, but snapcompact is excluded by the payload guard.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'overflow',
+    tokenCount: 250_000,
+    settings: {},
+    overflowDetected: true,
+    payloadRejection: {
+      status: 413,
+      message: 'request_too_large: too many images',
+      providerInputTokens: 250_000,
+    },
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-media-proven-u1',
+        content: 'one',
+        tokens: 125_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-media-proven-a1',
+        content: 'two',
+        tokens: 125_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 250_000, tokensAfter: 100_000 },
+    },
+    expected: {
+      shouldCompact: true,
+      thresholdTokens: 170_000,
+      outcomeKind: 'compacted',
+      promotion: { kind: 'skipped', reason: 'no-promotion-configured' },
+      payload: {
+        blockCompaction: false,
+        excludeMediaMethods: true,
+        tokenOverflowProven: true,
+        reason: 'usage-proven-token-overflow',
+      },
+      trace: [
+        { method: 'remote', outcome: 'skipped', reason: 'unavailable' },
+        {
+          method: 'snapcompact',
+          outcome: 'skipped',
+          reason: 'payload-rejection-excludes-media',
+        },
+        { method: 'handoff', outcome: 'skipped', reason: 'unavailable' },
+        { method: 'shake', outcome: 'skipped', reason: 'unavailable' },
+        {
+          method: 'soft',
+          outcome: 'compacted',
+          reason: 'compacted',
+          tokensSaved: 150_000,
+          // 170_000 - 100_000.
+          headroomTokens: 70_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'incomplete-length-over',
+    description:
+      'A length stop above the threshold triggers incomplete-output recovery and compacts.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'incomplete',
+    tokenCount: 180_000,
+    settings: { methodOrder: ['soft'] },
+    stopReason: 'length',
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-inc-length-u1',
+        content: 'one',
+        tokens: 90_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-inc-length-a1',
+        content: 'two',
+        tokens: 90_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 180_000, tokensAfter: 60_000 },
+    },
+    expected: {
+      shouldCompact: true,
+      thresholdTokens: 170_000,
+      outcomeKind: 'compacted',
+      trace: [
+        {
+          method: 'soft',
+          outcome: 'compacted',
+          reason: 'compacted',
+          tokensSaved: 120_000,
+          // 170_000 - 60_000.
+          headroomTokens: 110_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'incomplete-max-tokens-under',
+    description:
+      'A max_tokens stop below the threshold does not trigger recovery; the chain is not walked.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'incomplete',
+    tokenCount: 160_000,
+    settings: { methodOrder: ['soft'] },
+    stopReason: 'max_tokens',
+    messages: [
+      { role: 'user', uuid: 'fx-inc-under-u1', content: 'one', tokens: 80_000 },
+      {
+        role: 'assistant',
+        uuid: 'fx-inc-under-a1',
+        content: 'two',
+        tokens: 80_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 160_000, tokensAfter: 40_000 },
+    },
+    expected: {
+      shouldCompact: false,
+      thresholdTokens: 170_000,
+      outcomeKind: null,
+      trace: [
+        {
+          method: null,
+          outcome: 'skipped',
+          reason: 'incomplete-output-below-threshold',
+          // 170_000 - 160_000.
+          headroomTokens: 10_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'midturn-enabled',
+    description:
+      'With midTurnEnabled the mid-turn pass applies the threshold rule and compacts.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'midTurn',
+    tokenCount: 180_000,
+    settings: { methodOrder: ['soft'], midTurnEnabled: true },
+    messages: [
+      { role: 'user', uuid: 'fx-mid-on-u1', content: 'one', tokens: 90_000 },
+      {
+        role: 'assistant',
+        uuid: 'fx-mid-on-a1',
+        content: 'two',
+        tokens: 90_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 180_000, tokensAfter: 60_000 },
+    },
+    expected: {
+      shouldCompact: true,
+      thresholdTokens: 170_000,
+      outcomeKind: 'compacted',
+      trace: [
+        {
+          method: 'soft',
+          outcome: 'compacted',
+          reason: 'compacted',
+          tokensSaved: 120_000,
+          headroomTokens: 110_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'midturn-disabled',
+    description:
+      'midTurnEnabled=false short-circuits the mid-turn pass even above the threshold.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'midTurn',
+    tokenCount: 180_000,
+    settings: { methodOrder: ['soft'], midTurnEnabled: false },
+    messages: [
+      { role: 'user', uuid: 'fx-mid-off-u1', content: 'one', tokens: 90_000 },
+      {
+        role: 'assistant',
+        uuid: 'fx-mid-off-a1',
+        content: 'two',
+        tokens: 90_000,
+      },
+    ],
+    methods: {
+      soft: { tokensBefore: 180_000, tokensAfter: 60_000 },
+    },
+    expected: {
+      shouldCompact: false,
+      thresholdTokens: 170_000,
+      outcomeKind: null,
+      trace: [
+        {
+          method: null,
+          outcome: 'skipped',
+          reason: 'mid-turn-disabled',
+          // 170_000 - 180_000.
+          headroomTokens: -10_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'progress-boundary-pass',
+    description:
+      'A reduction landing exactly on 80% of the threshold passes the progress guard.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'threshold',
+    tokenCount: 180_000,
+    settings: { methodOrder: ['shake'] },
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-progress-pass-u1',
+        content: 'one',
+        tokens: 90_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-progress-pass-a1',
+        content: 'two',
+        tokens: 90_000,
+      },
+    ],
+    methods: {
+      // 180_000 - 44_000 = 136_000 = floor(170_000 * 0.8).
+      shake: { mode: 'stub', tokensSaved: 44_000 },
+    },
+    expected: {
+      shouldCompact: true,
+      thresholdTokens: 170_000,
+      outcomeKind: 'reduced',
+      trace: [
+        {
+          method: 'shake',
+          outcome: 'reduced',
+          reason: 'reduced',
+          tokensSaved: 44_000,
+          // 170_000 - 136_000.
+          headroomTokens: 34_000,
+        },
+      ],
+    },
+  },
+  {
+    name: 'progress-boundary-fail',
+    description:
+      'One token above the 80% boundary guard-blocks the reduction; with no fallback the chain reports a final skip.',
+    model: 'claude-sonnet-4-5',
+    windowTokens: 200_000,
+    trigger: 'threshold',
+    tokenCount: 180_000,
+    settings: { methodOrder: ['shake'] },
+    messages: [
+      {
+        role: 'user',
+        uuid: 'fx-progress-fail-u1',
+        content: 'one',
+        tokens: 90_000,
+      },
+      {
+        role: 'assistant',
+        uuid: 'fx-progress-fail-a1',
+        content: 'two',
+        tokens: 90_000,
+      },
+    ],
+    methods: {
+      // 180_000 - 43_999 = 136_001 > 136_000.
+      shake: { mode: 'stub', tokensSaved: 43_999 },
+    },
+    expected: {
+      shouldCompact: true,
+      thresholdTokens: 170_000,
+      outcomeKind: null,
+      trace: [
+        {
+          method: 'shake',
+          outcome: 'guard-blocked',
+          reason:
+            'post-compaction context 136001 exceeds 136000 (80% of 170000)',
+          tokensSaved: 43_999,
+          // 170_000 - 136_001.
+          headroomTokens: 33_999,
+        },
+        {
+          method: null,
+          outcome: 'skipped',
+          reason: 'all-methods-unavailable-or-failed',
+          headroomTokens: -10_000,
+        },
+      ],
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -660,8 +1183,34 @@ function cloneFixture(fixture: CompactionFixture): CompactionFixture {
           : spec.content.map(block => ({ ...block })),
     })),
     methods: { ...fixture.methods },
+    ...(fixture.payloadRejection
+      ? { payloadRejection: { ...fixture.payloadRejection } }
+      : {}),
+    ...(fixture.promotion
+      ? {
+          promotion: {
+            ...fixture.promotion,
+            ...(fixture.promotion.candidates
+              ? {
+                  candidates: fixture.promotion.candidates.map(candidate => ({
+                    ...candidate,
+                  })),
+                }
+              : {}),
+            ...(fixture.promotion.windowOverrides
+              ? { windowOverrides: { ...fixture.promotion.windowOverrides } }
+              : {}),
+          },
+        }
+      : {}),
     expected: {
       ...fixture.expected,
+      ...(fixture.expected.promotion
+        ? { promotion: { ...fixture.expected.promotion } }
+        : {}),
+      ...(fixture.expected.payload
+        ? { payload: { ...fixture.expected.payload } }
+        : {}),
       trace: fixture.expected.trace.map(entry => ({ ...entry })),
     },
   }
