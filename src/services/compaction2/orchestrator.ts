@@ -53,9 +53,11 @@ import { evaluateManualTrigger } from './triggers/manual.js'
 import { evaluateMidTurnTrigger } from './triggers/midTurn.js'
 import {
   evaluateOverflowTrigger,
+  tryContextPromotion,
   type ContextPromotion,
 } from './triggers/overflow.js'
 import {
+  applyPromotionDecision,
   collectPromotionCandidates,
   createContextPromotion,
 } from './triggers/promotion.js'
@@ -115,6 +117,11 @@ export interface CompactionV2Options {
   shake?: ShakeReducer | null
   remote?: RemoteMethodDeps | null
   promotion?: ContextPromotion | null
+  /**
+   * Set false to suppress context promotion for every trigger (e.g. after
+   * the one-shot promotion retry already ran) so compaction runs instead.
+   */
+  allowPromotion?: boolean
   resolveWindowTokens?: (model: string) => number
   countTokens?: (messages: readonly Message[]) => number
   estimateEntryTokens?: (entry: EntryView) => number
@@ -244,6 +251,12 @@ export async function runCompactionV2(
     options.onTrace?.(full)
   }
 
+  // Promotion is tried before compaction for every automatic trigger that
+  // supports it. `allowPromotion: false` suppresses it everywhere so a spent
+  // one-shot retry falls through to compaction instead of looping.
+  const promotionSource =
+    options.allowPromotion === false ? null : (options.promotion ?? null)
+
   let triggerDecision: TriggerDecision
   switch (request.trigger) {
     case 'manual':
@@ -292,9 +305,24 @@ export async function runCompactionV2(
         ctx,
         overflowDetected: request.overflowDetected,
         payloadRejection: request.payloadRejection,
-        promotion: options.promotion ?? null,
+        promotion: promotionSource,
       })
       break
+  }
+
+  // omp orders promotion before compaction for every automatic trigger, not
+  // only overflow: a larger-context model avoids summarizing the history at
+  // all. The overflow trigger already made this decision for itself; mirror it
+  // for the threshold and incomplete triggers through the same availability
+  // check (no separate candidate selection). A promoted decision suppresses
+  // the method chain so the caller can switch models and retry once.
+  if (request.trigger === 'threshold' || request.trigger === 'incomplete') {
+    if (triggerDecision.shouldCompact) {
+      triggerDecision = applyPromotionDecision(
+        triggerDecision,
+        await tryContextPromotion(ctx, promotionSource),
+      )
+    }
   }
 
   const result: CompactionV2Result = {
@@ -600,8 +628,9 @@ export interface CompactionV2QueryRequest {
   /** Trigger tuning (e.g. midTurnEnabled). Defaults match DEFAULT_COMPACTION_SETTINGS. */
   settings?: Partial<CompactionSettings>
   /**
-   * Set false to suppress context promotion (e.g. after the one-shot
-   * promotion retry already ran) so an overflow compacts instead.
+   * Set false to suppress context promotion for every trigger (e.g. after
+   * the one-shot promotion retry already ran) so threshold, incomplete, and
+   * overflow all fall through to compaction instead.
    */
   allowPromotion?: boolean
 }
@@ -612,7 +641,10 @@ export interface CompactionV2QueryResult {
   consecutiveFailures?: number
   /** Mechanical reduction (shake) to use for this request only. */
   reducedMessages?: Message[]
-  /** Context-promotion decision from the overflow trigger, when applicable. */
+  /**
+   * Context-promotion decision from the triggering pass (threshold,
+   * incomplete, or overflow), when applicable.
+   */
   promotion?: PromotionResult
   /** Tokens removed by the reduction (drives the one-shot UI notice). */
   reducedTokensSaved?: number
@@ -718,8 +750,11 @@ export async function runCompactionV2ForQuery(
       shake: createShakeReducer(),
       remote,
       // Promotion is a decision only; the caller owns the model switch/retry.
+      // Both knobs are set so the settings read is skipped once promotion is
+      // spent and the gate still applies to every trigger.
       promotion:
         request.allowPromotion === false ? null : createQueryPromotion(),
+      allowPromotion: request.allowPromotion !== false,
       // The query loop only understands the legacy CompactionResult; let an
       // unrenderable remote/snapcompact outcome fall through to soft.
       canAcceptOutcome: outcome =>
