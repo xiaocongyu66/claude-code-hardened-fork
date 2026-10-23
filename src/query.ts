@@ -314,11 +314,10 @@ type CompactionSpeculationManager = SpeculationManager<
 
 let compactionSpeculationManager: CompactionSpeculationManager | null = null
 
-// Disabled until the runner is side-effect-free: it currently reuses the
-// committing soft path, so an armed pass that is later discarded leaves
-// transcript/journal/cleanup side effects behind. Re-enable together with
-// commit-time finalization and prefix-append semantics.
-const SPECULATION_WIRING_ENABLED = false
+// Background runs are compute-only (`deferApply`): a preview that is armed and
+// later discarded leaves no journal/transcript/cleanup trace. Commit applies
+// `deferredApply` once via `applyCompactionOutcome`.
+const SPECULATION_WIRING_ENABLED = true
 
 function getCompactionSpeculationManager(): CompactionSpeculationManager | null {
   if (!SPECULATION_WIRING_ENABLED) return null
@@ -376,6 +375,9 @@ function getCompactionSpeculationManager(): CompactionSpeculationManager | null 
           // The snapshot sits below the live threshold. Report the threshold
           // as the current size so the internal trigger fires for this run.
           tokenCount: snapshot.thresholdTokens + 1,
+          tokenCountOverride: snapshot.thresholdTokens + 1,
+          // Compute only: journal/transcript/cleanup happen at commit.
+          deferApply: true,
           toolUseContext,
           cacheSafeParams: {
             systemPrompt: context.systemPrompt,
@@ -916,6 +918,10 @@ async function* queryLoop(
       forkContextMessages: messagesForQuery,
     }
     let autoCompactOutcome: Awaited<ReturnType<typeof deps.autocompact>>
+    // Preview payload + messages appended after the speculative snapshot,
+    // captured here because `v2Result` is scoped to the feature branch.
+    let compactionV2DeferredApply: CompactionV2QueryResult['deferredApply']
+    let compactionV2AppendedMessages: Message[] | undefined
     if (feature('COMPACTION_V2')) {
       /* eslint-disable @typescript-eslint/no-require-imports */
       const { runCompactionV2ForQuery } =
@@ -980,7 +986,12 @@ async function* queryLoop(
         // the API compaction; otherwise fall through to the existing chain.
         if (v2TokenCount >= thresholdTokens) {
           const armed = speculation.consume(speculationCtx)
-          if (armed) v2Result = armed
+          if (armed) {
+            v2Result = armed.result
+            // Messages that arrived after the snapshot must survive the
+            // compaction; they are appended when the result is applied.
+            compactionV2AppendedMessages = armed.appendedMessages
+          }
         }
       }
       if (!midTurnSkip && !v2Result.wasCompacted && !v2Result.reducedMessages) {
@@ -1011,8 +1022,13 @@ async function* queryLoop(
         }
       }
       autoCompactOutcome = v2Result
+      compactionV2DeferredApply = v2Result.deferredApply
       if (v2Result.reducedMessages) {
-        messagesForQuery = v2Result.reducedMessages
+        // A speculative reduction covers only the snapshot; re-attach the
+        // messages appended after it (same rule as a committed compaction).
+        messagesForQuery = compactionV2AppendedMessages
+          ? [...v2Result.reducedMessages, ...compactionV2AppendedMessages]
+          : v2Result.reducedMessages
         compactionV2TokenOverride = countV2ContextTokens(
           messagesForQuery,
           toolUseContext.options.mainLoopModel,
@@ -1112,14 +1128,37 @@ async function* queryLoop(
         }),
       }
 
+      // A speculative preview only computed the summary. Commit it now that
+      // the snapshot was accepted: journal entry + soft-path transcript/
+      // cleanup effects. Discarded previews never reach this point.
+      if (compactionV2DeferredApply) {
+        /* eslint-disable @typescript-eslint/no-require-imports */
+        const { applyCompactionOutcome } =
+          require('./services/compaction2/orchestrator.js') as typeof import('./services/compaction2/orchestrator.js')
+        /* eslint-enable @typescript-eslint/no-require-imports */
+        try {
+          await applyCompactionOutcome(compactionV2DeferredApply.outcome, {
+            messages: compactionV2DeferredApply.messages,
+            querySource,
+          })
+        } catch (error) {
+          // Applying must never take down the loop; the summary is already
+          // usable and the journal write is best-effort.
+          logError(error)
+        }
+      }
+
       const postCompactMessages = buildPostCompactMessages(compactionResult)
 
       for (const message of postCompactMessages) {
         yield message
       }
 
-      // Continue on with the current query call using the post compact messages
-      messagesForQuery = postCompactMessages
+      // Continue on with the post compact messages, then re-attach the turn
+      // appended after the snapshot so speculative commits do not lose it.
+      messagesForQuery = compactionV2AppendedMessages
+        ? [...postCompactMessages, ...compactionV2AppendedMessages]
+        : postCompactMessages
     } else if (rapidRefillBreaker) {
       // 2.9 rapid-refill breaker, loop-side branch. Port of official
       // 2.1.284 kind==="rapid_refill_breaker_tripped" (byte 15516528):

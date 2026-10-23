@@ -5,14 +5,17 @@
 //
 //   idle --maybeStart (in band)--> running --runner resolves--> armed
 //   running --runner rejects / timeout--> idle
-//   armed --consume (prefix intact)--> idle (result returned)
-//   armed --consume (prefix changed) / timeout / cancel--> idle (discarded)
+//   armed --consume (anchor still live)--> idle (result + appended messages)
+//   armed --consume (branch rewritten) / timeout / cancel--> idle (discarded)
 //
 // The manager never blocks the query loop: `maybeStart` only schedules the
-// injected runner, and `consume` never awaits an in-flight run. A run whose
-// snapshot prefix no longer matches the live transcript is discarded instead
-// of committed. The module deliberately holds no singleton state — callers
-// own the instance and decide when it is created or cancelled.
+// injected runner, and `consume` never awaits an in-flight run. The transcript
+// is append-only between iterations, so a run is committed when the snapshot's
+// last message is still the live anchor; messages appended after it are
+// returned alongside the result so the caller can keep that turn. A run whose
+// anchor is gone (branch rewritten/truncated) is discarded instead of
+// committed. The module deliberately holds no singleton state — callers own
+// the instance and decide when it is created or cancelled.
 import type { Message } from '../../../types/message.js'
 import { speculationLeadTokens, type CompactionOutcome } from '../contracts.js'
 
@@ -39,7 +42,10 @@ export interface SpeculationContext<TContext = undefined> {
 
 /** Read-only branch snapshot handed to the runner. */
 export interface SpeculationSnapshot<TContext = undefined> {
-  /** Last message uuid covered by the snapshot; commit requires it to match. */
+  /**
+   * Last message uuid covered by the snapshot; commit requires it to still be
+   * the live anchor (at the same position). Appended messages are allowed.
+   */
   lastUuid: string | undefined
   messages: readonly Message[]
   tokenCount: number
@@ -67,15 +73,28 @@ export interface SpeculationManagerOptions<TResult, TContext = undefined> {
   timeoutMs?: number
 }
 
+/** Commit payload: the armed result plus the turn appended after the snapshot. */
+export interface SpeculationConsumption<TResult> {
+  result: TResult
+  /**
+   * Live messages that arrived after the snapshot's last message. The caller
+   * applies the result and then appends these, so the post-snapshot turn is
+   * never dropped.
+   */
+  appendedMessages: Message[]
+}
+
 export interface SpeculationManager<TResult, TContext = undefined> {
   /** Start one background run when `tokenCount` is in the pre-threshold band. */
   maybeStart(ctx: SpeculationContext<TContext>): boolean
   /**
    * Claim the armed result at threshold. Returns undefined when nothing is
-   * armed, the run is still in flight, it failed/timed out, or the snapshot
-   * prefix no longer matches the live transcript.
+   * armed, the run is still in flight, it failed/timed out, or the snapshot's
+   * last message is no longer the live anchor (branch rewritten/truncated).
    */
-  consume(ctx: SpeculationContext<TContext>): TResult | undefined
+  consume(
+    ctx: SpeculationContext<TContext>,
+  ): SpeculationConsumption<TResult> | undefined
   /** Abort and discard any in-flight or armed run. */
   cancel(): void
   state(): 'idle' | 'running' | 'armed'
@@ -87,6 +106,44 @@ interface SpeculationRun<TResult, TContext> {
   armed?: { value: TResult }
   finishedAt?: number
   timer?: ReturnType<typeof setTimeout>
+}
+
+/**
+ * Locate the messages appended after the snapshot in the live transcript.
+ * Returns undefined when the snapshot is no longer an intact prefix (branch
+ * rewritten, truncated from the front, or the anchor moved).
+ *
+ * The anchor is the snapshot's last message; it must still sit at the same
+ * index. Earlier uuids are cross-checked when both sides carry one. With no
+ * uuid on the last message we can only commit an unchanged transcript.
+ */
+function findAppendedMessages<TContext>(
+  snapshot: SpeculationSnapshot<TContext>,
+  live: readonly Message[],
+): Message[] | undefined {
+  const snapshotMessages = snapshot.messages
+  const anchor = snapshot.lastUuid
+  if (anchor === undefined) {
+    if (live.length !== snapshotMessages.length) return undefined
+    for (let i = 0; i < snapshotMessages.length; i++) {
+      const before = snapshotMessages[i]?.uuid
+      const now = live[i]?.uuid
+      if (before !== undefined && now !== undefined && before !== now) {
+        return undefined
+      }
+    }
+    return []
+  }
+  const anchorIndex = live.findIndex(message => message.uuid === anchor)
+  if (anchorIndex !== snapshotMessages.length - 1) return undefined
+  for (let i = 0; i < snapshotMessages.length; i++) {
+    const before = snapshotMessages[i]?.uuid
+    const now = live[i]?.uuid
+    if (before !== undefined && now !== undefined && before !== now) {
+      return undefined
+    }
+  }
+  return live.slice(anchorIndex + 1)
 }
 
 export function createSpeculationManager<
@@ -182,7 +239,9 @@ export function createSpeculationManager<
     return true
   }
 
-  const consume = (ctx: SpeculationContext<TContext>): TResult | undefined => {
+  const consume = (
+    ctx: SpeculationContext<TContext>,
+  ): SpeculationConsumption<TResult> | undefined => {
     if (!enabled) return undefined
     const current = run
     if (!current) return undefined
@@ -202,18 +261,15 @@ export function createSpeculationManager<
       current.controller.abort()
       return undefined
     }
-    // Commit only when the summarized prefix is still the live prefix. The
-    // last-uuid check is the cheap contract; the length check also catches a
-    // transcript that was truncated from the front.
-    const lastUuid = ctx.messages.at(-1)?.uuid
-    if (
-      current.snapshot.lastUuid !== lastUuid ||
-      ctx.messages.length < current.snapshot.messages.length
-    ) {
+    const appendedMessages = findAppendedMessages(
+      current.snapshot,
+      ctx.messages,
+    )
+    if (appendedMessages === undefined) {
       current.controller.abort()
       return undefined
     }
-    return current.armed.value
+    return { result: current.armed.value, appendedMessages }
   }
 
   const cancel = (): void => {

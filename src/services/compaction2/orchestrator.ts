@@ -135,6 +135,21 @@ export interface CompactionV2Options {
   compactionSettings?: unknown
   /** Environment map for CLAUDE_CODE_COMPACTION_* overrides. Defaults to process.env. */
   env?: Record<string, string | undefined>
+  /**
+   * Compute-only mode (speculative runs): the chain runs to a usable outcome
+   * but the journal entry and every commit-time side effect are skipped. The
+   * caller must invoke `applyCompactionOutcome()` once the snapshot is still
+   * valid. Default false keeps the direct path unchanged.
+   */
+  deferApply?: boolean
+  /**
+   * Override for the journal writer (tests). When omitted the feature flag
+   * gates `persistCompactionEntry`, matching production behavior.
+   */
+  persist?: (
+    outcome: CompactionOutcome,
+    messages: readonly Message[],
+  ) => Promise<unknown>
 }
 
 export interface CompactionV2Result {
@@ -450,8 +465,11 @@ export async function runCompactionV2(
       warning: outcome.warning,
     })
     result.outcome = outcome
-    if (outcome.kind === 'compacted') {
-      if (feature('COMPACTION_V2')) {
+    if (outcome.kind === 'compacted' && !options.deferApply) {
+      // Preview runs return the outcome untouched; the commit path journals it.
+      if (options.persist) {
+        await options.persist(outcome, request.messages)
+      } else if (feature('COMPACTION_V2')) {
         await persistCompactionEntry(outcome, request.messages)
       }
     }
@@ -521,6 +539,60 @@ export async function persistCompactionEntry(
     return null
   }
   return entry
+}
+
+export interface ApplyCompactionOutcomeContext {
+  /** Transcript the preview summary was computed from. */
+  messages?: readonly Message[]
+  /** Compacting query source (cleanup scope + journal metadata). */
+  querySource?: QuerySource
+  /**
+   * Override the soft-path notification flag (defaults to the post-compaction
+   * marker used by the direct path). Kept injectable for the commit tests.
+   */
+  applySideEffects?: (messages: readonly Message[]) => void
+}
+
+/** Injectable commit-time dependencies (tests). */
+export interface ApplyCompactionOutcomeDeps {
+  persist?: (
+    outcome: CompactionOutcome,
+    messages: readonly Message[],
+  ) => Promise<unknown>
+  resetLastSummarizedMessageId?: (id: undefined) => void
+  cleanup?: (querySource?: QuerySource) => void
+}
+
+/**
+ * Commit a preview outcome: apply the same effects the direct path performs
+ * inside `compactConversation` / the soft runner, then journal the entry.
+ *
+ * Soft compactions own the legacy transcript/session writes (session metadata,
+ * transcript segment, post-compaction marker, summarized-id reset, cleanup);
+ * other compacted methods only journal. Call exactly once per committed
+ * preview — discarded previews must never reach this function.
+ */
+export async function applyCompactionOutcome(
+  outcome: CompactionOutcome | undefined,
+  ctx: ApplyCompactionOutcomeContext = {},
+  deps: ApplyCompactionOutcomeDeps = {},
+): Promise<CompactionSessionEntry | null> {
+  if (outcome?.kind !== 'compacted') return null
+  const messages = ctx.messages ?? []
+  if (outcome.method === 'soft') {
+    const applySideEffects =
+      ctx.applySideEffects ?? loadCompact().applyCompactConversationSideEffects
+    applySideEffects(messages)
+    const reset =
+      deps.resetLastSummarizedMessageId ??
+      loadSessionMemory().setLastSummarizedMessageId
+    reset(undefined)
+    const cleanup =
+      deps.cleanup ?? loadPostCompactCleanup().runPostCompactCleanup
+    cleanup(ctx.querySource)
+  }
+  const persist = deps.persist ?? persistCompactionEntry
+  return (await persist(outcome, messages)) as CompactionSessionEntry | null
 }
 
 function resolveCompactionSummary(
@@ -610,6 +682,24 @@ export interface CompactionV2QueryRequest {
    * promotion retry already ran) so an overflow compacts instead.
    */
   allowPromotion?: boolean
+  /**
+   * Compute-only preview (speculative compaction): skip journaling and every
+   * commit-time side effect, and return a `deferredApply` payload on success.
+   */
+  deferApply?: boolean
+  /**
+   * Report this context size to the trigger instead of the measured count.
+   * Speculative runs summarize a pre-threshold snapshot but must still run
+   * the threshold chain.
+   */
+  tokenCountOverride?: number
+}
+
+/** Payload a preview run hands back for `applyCompactionOutcome`. */
+export interface DeferredCompactionApply {
+  outcome: CompactionOutcome
+  /** Transcript the summary was computed from (the frozen snapshot). */
+  messages: Message[]
 }
 
 export interface CompactionV2QueryResult {
@@ -623,6 +713,11 @@ export interface CompactionV2QueryResult {
   /** Tokens removed by the reduction (drives the one-shot UI notice). */
   reducedTokensSaved?: number
   reducedMethod?: CompactionMethodName
+  /**
+   * Present when the request ran with `deferApply: true`: the caller owns
+   * commit-time application via `applyCompactionOutcome`.
+   */
+  deferredApply?: DeferredCompactionApply
 }
 
 /**
@@ -686,8 +781,11 @@ export async function runCompactionV2ForQuery(
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
   // omp-style measurement: the last provider usage block anchors the count and
   // only the messages after it are tokenized. The caller's `tokenCount` is a
-  // legacy estimate and is deliberately not used on this path.
-  const tokenCount = countContextTokens(request.messages, request.model).tokens
+  // legacy estimate and is deliberately not used on this path. An explicit
+  // override is only for preview runs whose snapshot sits below the threshold.
+  const tokenCount =
+    request.tokenCountOverride ??
+    countContextTokens(request.messages, request.model).tokens
 
   // Remote compaction is opt-in. Build the provider-bound transport lazily so
   // the flag-off path never touches auth, and a missing transport keeps the
@@ -702,6 +800,7 @@ export async function runCompactionV2ForQuery(
     tokenCount,
     autoCompactThreshold,
     tracking: request.tracking,
+    deferApply: request.deferApply,
   })
 
   const result = await runCompactionV2(
@@ -737,6 +836,7 @@ export async function runCompactionV2ForQuery(
         !circuitOpen || name === 'snapcompact' || name === 'shake',
       resolveWindowTokens: getEffectiveContextWindowSize,
       compactionSettings,
+      deferApply: request.deferApply,
     },
   )
 
@@ -752,16 +852,25 @@ export async function runCompactionV2ForQuery(
     }
   }
   if (result.outcome?.kind === 'compacted') {
-    const legacyResult = getLegacyCompactionResult(result.outcome)
+    const outcome = result.outcome
+    const legacyResult = getLegacyCompactionResult(outcome)
     if (legacyResult) {
       return {
         wasCompacted: true,
         compactionResult: annotateCompactionResult(
           legacyResult,
-          result.outcome.method,
-          methodMetadata(result.outcome),
+          outcome.method,
+          methodMetadata(outcome),
         ),
         promotion: result.promotion,
+        ...(request.deferApply
+          ? {
+              deferredApply: {
+                outcome,
+                messages: [...request.messages],
+              },
+            }
+          : {}),
       }
     }
   }
@@ -1036,19 +1145,42 @@ function isCompactionEnabledInSettings(
   return true
 }
 
-function createLegacySoftDeps(input: {
+type CompactConversationFn =
+  typeof import('../compact/compact.js')['compactConversation']
+
+export interface LegacySoftDepsInput {
   toolUseContext: ToolUseContext
   cacheSafeParams: CacheSafeParams
   querySource?: QuerySource
   tokenCount: number
   autoCompactThreshold: number
   tracking?: CompactionV2Tracking
-}): SoftMethodDeps {
+  /**
+   * Compute-only preview: `compactConversation` skips its session/transcript
+   * writes and the cleanup/reset below are deferred to the commit path.
+   */
+  deferApply?: boolean
+  /** Test seams; production uses the legacy modules. */
+  compactConversation?: CompactConversationFn
+  runPostCompactCleanup?: (querySource?: QuerySource) => void
+  setLastSummarizedMessageId?: (id: undefined) => void
+}
+
+/**
+ * Build the soft-method runner around the legacy `compactConversation` path.
+ *
+ * Direct calls preserve the historical behavior: summarize, then reset the
+ * summarized-message id and run post-compact cleanup immediately. Preview
+ * (`deferApply`) calls only summarize; those writes happen in
+ * `applyCompactionOutcome` when the result is committed.
+ */
+export function createLegacySoftDeps(
+  input: LegacySoftDepsInput,
+): SoftMethodDeps {
   return {
     run: async request => {
-      const { compactConversation } = loadCompact()
-      const { runPostCompactCleanup } = loadPostCompactCleanup()
-      const { setLastSummarizedMessageId } = loadSessionMemory()
+      const compactConversation =
+        input.compactConversation ?? loadCompact().compactConversation
       const isAutoCompact = request.trigger !== 'manual'
       const result = await compactConversation(
         [...request.messages],
@@ -1063,9 +1195,18 @@ function createLegacySoftDeps(input: {
           autoCompactThreshold: input.autoCompactThreshold,
           querySource: input.querySource,
         },
+        { deferApply: input.deferApply === true },
       )
-      setLastSummarizedMessageId(undefined)
-      runPostCompactCleanup(input.querySource)
+      if (!input.deferApply) {
+        const setLastSummarizedMessageId =
+          input.setLastSummarizedMessageId ??
+          loadSessionMemory().setLastSummarizedMessageId
+        const runPostCompactCleanup =
+          input.runPostCompactCleanup ??
+          loadPostCompactCleanup().runPostCompactCleanup
+        setLastSummarizedMessageId(undefined)
+        runPostCompactCleanup(input.querySource)
+      }
       return {
         result,
         tokensBefore: result.preCompactTokenCount ?? input.tokenCount,
