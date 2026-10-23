@@ -177,6 +177,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cch-tui-dialog"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-core",
+ "cch-tui-keymap",
+ "cch-tui-proto",
+ "serde_json",
+]
+
+[[package]]
 name = "cch-tui-diff"
 version = "0.1.0"
 

@@ -1,0 +1,12 @@
+[package]
+name = "cch-tui-dialog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cch-tui-core = { path = "../core" }
+cch-tui-keymap = { path = "../keymap" }
+cch-tui-proto = { path = "../proto" }
+serde_json.workspace = true
