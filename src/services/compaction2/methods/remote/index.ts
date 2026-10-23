@@ -8,6 +8,8 @@ import type {
   CompactionOutcome,
   CutPoint,
 } from '../../contracts.js'
+import { estimateMessageTokens as estimatePruneMessageTokens } from '../../reducers/prune.js'
+import { estimateTokens } from '../../tokens/index.js'
 import {
   isAnthropicCompactionLaneAvailable,
   runAnthropicCompactionLane,
@@ -68,6 +70,12 @@ export interface RemoteLaneRequest {
   provider?: APIProvider
   env: Record<string, string | undefined>
   transport: RemoteLaneTransport
+  /**
+   * Cut computed once by the method before dispatch. Lanes that summarize a
+   * prefix (Anthropic) must send `cut.messages` and must not recompute the
+   * boundary after the request.
+   */
+  cut?: RemoteCut
   options?: {
     /** OpenAI lane request shape. `auto` tries V2 then falls back to V1. */
     openAiVersion?: 'v1' | 'v2' | 'auto'
@@ -217,28 +225,44 @@ export function isRemoteMethodAvailable(
   return resolveRemote(ctx, deps).lane !== undefined
 }
 
+/** A computed remote boundary: the summarized prefix and the retained tail. */
+export interface RemoteCut {
+  /** Leading messages the remote summary replaces and the request carries. */
+  messages: Message[]
+  /** Length of `messages`; equivalent to `ctx.messages.slice(0, index)`. */
+  index: number
+  cutPoint: CutPoint
+  kept: Message[]
+  tokensAfter: number
+}
+
 /**
  * The cut point a remote summary replaces: keep the newest
  * `settings.keepRecentTokens` intact, never splitting a tool result from its
  * assistant tool call.
+ *
+ * Token counts come from the reducers' `estimateMessageTokens` with the
+ * model's tokenizer (`estimateTokens`), not `JSON.stringify().length / 4`:
+ * the latter underestimates CJK by roughly 2-3x, which would keep far more
+ * context than requested.
  */
-export function computeRemoteCut(ctx: CompactionContext): {
-  cutPoint: CutPoint
-  kept: Message[]
-  tokensAfter: number
-} {
+export function computeRemoteCut(ctx: CompactionContext): RemoteCut {
   const messages = ctx.messages
   const keepRecent = Math.max(0, ctx.settings.keepRecentTokens)
+  const countText = (text: string): number =>
+    estimateTokens(text, ctx.model).tokens
   let index = messages.length
   if (keepRecent > 0) {
     let accumulated = 0
     for (let i = messages.length - 1; i >= 0; i--) {
-      const tokens = estimateMessageTokens(messages[i])
+      const tokens = estimatePruneMessageTokens(messages[i], countText)
       if (accumulated > 0 && accumulated + tokens > keepRecent) break
       accumulated += tokens
       index = i
     }
   }
+  // A kept tool_result without its assistant tool_use would make the kept tail
+  // unrenderable; pull the cut back until the tail starts before the call.
   while (
     index > 0 &&
     index < messages.length &&
@@ -259,7 +283,13 @@ export function computeRemoteCut(ctx: CompactionContext): {
     tokensBefore,
     boundaryMessage: createRemoteBoundary(ctx, tokensBefore),
   }
-  return { cutPoint, kept, tokensAfter }
+  return {
+    messages: messages.slice(0, index),
+    index,
+    cutPoint,
+    kept,
+    tokensAfter,
+  }
 }
 
 function createRemoteBoundary(
@@ -281,15 +311,6 @@ function createRemoteBoundary(
     },
   }
   return boundary as unknown as SystemMessage
-}
-
-export function estimateMessageTokens(message: Message): number {
-  try {
-    const serialized = JSON.stringify(message)
-    return serialized ? Math.ceil(serialized.length / 4) : 0
-  } catch {
-    return 0
-  }
 }
 
 function isToolResultMessage(message: Message | undefined): boolean {
@@ -336,8 +357,12 @@ export function createRemoteMethod(
       }
 
       try {
+        // Compute the boundary once, before the request: the lane serializes
+        // only this prefix and the outcome reuses the same cut point.
+        const cut = computeRemoteCut(ctx)
         const result = await resolved.lane({
           ctx,
+          cut,
           instructions:
             deps?.instructions ?? DEFAULT_REMOTE_COMPACTION_INSTRUCTIONS,
           signal: ctx.abortSignal,
@@ -358,7 +383,7 @@ export function createRemoteMethod(
             reason: result.skipped,
           }
         }
-        const { cutPoint, tokensAfter } = computeRemoteCut(ctx)
+        const { cutPoint, tokensAfter } = cut
         const threshold = ctx.settings.thresholdTokens ?? 0
         return {
           kind: 'compacted',
