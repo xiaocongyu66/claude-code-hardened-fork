@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use cch_tui_actions::{ExpandLimits, ExpandState, project};
+use cch_tui_actions::{
+    ExpandLimits, ExpandState, MessageActions, RowKey, copy_target, message_metas, project,
+    project_keyed, toggle_focused,
+};
 use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer, VimState};
 use cch_tui_dialog::PermissionDialog;
 use cch_tui_fullscreen::TranscriptModel;
@@ -163,6 +166,10 @@ pub fn run_with_deadline(
     let mut panel = TaskPanel::new();
     let mut expand = ExpandState::default();
     let mut all_expanded = false;
+    // Message focus derived from `view.completed`. The cursor is rebuilt when
+    // rows are appended and the numeric focus is preserved across rebuilds.
+    let mut actions = MessageActions::new(Vec::new());
+    let mut actions_rows = 0usize;
     let mut queued_prompts: Vec<String> = Vec::new();
     let mut clock_ms = 0u64;
     let mut engine_closed = false;
@@ -225,11 +232,17 @@ pub fn run_with_deadline(
                         _ => {}
                     }
                     panel.apply_engine_event(&event);
+                    // Expansion keys are global row indexes; take the base
+                    // before ingesting so a later focus toggle addresses the
+                    // same rows.
+                    let base = view.completed.len();
                     let frozen = view.ingest(&event);
                     // Inline rows are frozen into scrollback and cannot be
                     // re-projected, so collapse only applies to fullscreen.
                     let projected = if fullscreen {
-                        project(&frozen, &expand, ExpandLimits::default())
+                        let keys: Vec<RowKey> =
+                            (base..base + frozen.len()).map(RowKey::Index).collect();
+                        project_keyed(&frozen, &keys, &expand, ExpandLimits::default())
                     } else {
                         frozen.clone()
                     };
@@ -288,6 +301,18 @@ pub fn run_with_deadline(
         {
             palette_accept_prefix = None;
         }
+        // Rebuild the message cursor whenever rows were appended, keeping the
+        // numeric focus so the selection stays on the same message.
+        if view.completed.len() != actions_rows {
+            let focus = actions.focus();
+            actions = MessageActions::new(message_metas(&view.completed));
+            match focus {
+                Some(index) => actions.set_focus(Some(index)),
+                None => actions.clear(),
+            }
+            actions_rows = view.completed.len();
+        }
+        view.focus = actions.focus().map(|index| (index + 1, actions.len()));
         view.input = buffer.text().to_string();
         view.vim_mode = vim.status_indicator().map(str::to_owned);
 
@@ -506,6 +531,15 @@ pub fn run_with_deadline(
                     continue;
                 }
 
+                // Esc clears an active message focus. History search,
+                // transcript search and the permission dialog returned above,
+                // so they keep their own Esc handling.
+                if key.code == KeyCode::Esc && actions.focus().is_some() {
+                    actions.clear();
+                    view.focus = None;
+                    continue;
+                }
+
                 if engine_closed
                     && buffer.is_empty()
                     && key.code == KeyCode::Esc
@@ -514,20 +548,47 @@ pub fn run_with_deadline(
                     break;
                 }
 
-                // Alt+C copies the last assistant message (OSC52).
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
-                    if let Some(row) = view
-                        .completed
-                        .iter()
-                        .rev()
-                        .find(|row| row.style == RowStyle::Assistant)
-                    {
-                        session.copy_to_clipboard(&row.text)?;
-                        view.status = Some("copied last message".into());
-                    } else {
-                        view.status = Some("nothing to copy".into());
+                // Ctrl+Y (Ink-style message action) and Alt+C copy the focused
+                // message, falling back to the newest assistant message when
+                // nothing is focused (OSC52).
+                let copy_requested = (key.code == KeyCode::Char('y')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT))
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::ALT));
+                if copy_requested {
+                    match copy_target(&actions, &view.completed) {
+                        Some(text) => {
+                            session.copy_to_clipboard(&text)?;
+                            view.status = Some(match actions.focus() {
+                                Some(index) => {
+                                    format!("copied message {}/{}", index + 1, actions.len())
+                                }
+                                None => "copied last message".into(),
+                            });
+                        }
+                        None => view.status = Some("nothing to copy".into()),
                     }
                     continue;
+                }
+
+                // Alt+Up/Down move the message focus. These chords are not in
+                // the keymap, so the resolver would ignore them; claim them
+                // here instead.
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    match key.code {
+                        KeyCode::Up => {
+                            actions.previous_or_last();
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            actions.next_or_last();
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
 
                 // Fullscreen scrolling owns the page keys.
@@ -638,24 +699,37 @@ pub fn run_with_deadline(
                             }
                         } else if action == Action::APP_TOGGLE_TRANSCRIPT {
                             if fullscreen {
-                                all_expanded = !all_expanded;
-                                if all_expanded {
-                                    expand.expand_all();
+                                // A focused message expands on its own; with
+                                // no focus Ctrl+O keeps the all-tools toggle.
+                                if let Some(key) = toggle_focused(&actions, &mut expand) {
+                                    all_expanded = false;
+                                    let expanded = expand.is_expanded(key.clone());
+                                    rebuild_transcript(&mut transcript, &view.completed, &expand);
+                                    view.status = Some(
+                                        if expanded {
+                                            "message expanded"
+                                        } else {
+                                            "message collapsed"
+                                        }
+                                        .into(),
+                                    );
                                 } else {
-                                    expand.collapse_all();
-                                }
-                                let rows =
-                                    project(&view.completed, &expand, ExpandLimits::default());
-                                transcript.set_rows(rows);
-                                transcript.scroll_to_bottom();
-                                view.status = Some(
+                                    all_expanded = !all_expanded;
                                     if all_expanded {
-                                        "tool output expanded"
+                                        expand.expand_all();
                                     } else {
-                                        "tool output collapsed"
+                                        expand.collapse_all();
                                     }
-                                    .into(),
-                                );
+                                    rebuild_transcript(&mut transcript, &view.completed, &expand);
+                                    view.status = Some(
+                                        if all_expanded {
+                                            "tool output expanded"
+                                        } else {
+                                            "tool output collapsed"
+                                        }
+                                        .into(),
+                                    );
+                                }
                             } else {
                                 view.completed.push(Row::new(
                                     RowStyle::System,
@@ -997,6 +1071,14 @@ fn with_spacing(rows: &[Row], mut previous: Option<(RowStyle, bool)>) -> Vec<Row
         ));
     }
     out
+}
+
+/// Rebuild the fullscreen transcript from `rows` under `expand`, restoring the
+/// same separator rows the incremental freeze path inserts.
+fn rebuild_transcript(transcript: &mut TranscriptModel, rows: &[Row], expand: &ExpandState) {
+    let projected = project(rows, expand, ExpandLimits::default());
+    transcript.set_rows(with_spacing(&projected, None));
+    transcript.scroll_to_bottom();
 }
 
 fn freeze(

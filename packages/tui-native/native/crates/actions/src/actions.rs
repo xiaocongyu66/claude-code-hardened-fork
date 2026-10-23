@@ -133,6 +133,41 @@ impl MessageActions {
         Some(previous)
     }
 
+    /// Move to the previous (older) message, entering the newest one first
+    /// when nothing is focused yet.
+    pub fn previous_or_last(&mut self) -> Option<usize> {
+        if self.focus.is_none() {
+            self.focus_last();
+            return self.focus;
+        }
+        self.previous()
+    }
+
+    /// Move to the next (newer) message, entering the newest one first when
+    /// nothing is focused yet.
+    pub fn next_or_last(&mut self) -> Option<usize> {
+        if self.focus.is_none() {
+            self.focus_last();
+            return self.focus;
+        }
+        self.next()
+    }
+
+    /// Focus the newest message. A no-op on an empty transcript.
+    pub fn focus_last(&mut self) {
+        self.focus = self.messages.len().checked_sub(1);
+    }
+
+    /// Clear the focus without changing the messages.
+    pub fn clear(&mut self) {
+        self.focus = None;
+    }
+
+    /// Restore the focus to a message index. An out-of-range index clears it.
+    pub fn set_focus(&mut self, index: Option<usize>) {
+        self.focus = index.filter(|index| *index < self.messages.len());
+    }
+
     /// Whether `action` applies to the focused message.
     ///
     /// - `CopyText`: the focused message has non-empty text.
@@ -208,6 +243,28 @@ mod tests {
         assert_eq!(actions.previous(), Some(0));
         assert_eq!(actions.previous(), None);
         assert_eq!(actions.focus(), Some(0));
+    }
+
+    #[test]
+    fn focus_can_be_cleared_restored_and_entered_at_the_newest() {
+        let mut actions = MessageActions::new(transcript());
+        actions.clear();
+        assert_eq!(actions.focus(), None);
+        assert!(!actions.can(MessageAction::CopyText));
+
+        // Entering from no focus lands on the newest message.
+        assert_eq!(actions.previous_or_last(), Some(3));
+        actions.clear();
+        assert_eq!(actions.next_or_last(), Some(3));
+
+        // Restoring an index in range keeps it; out of range clears.
+        actions.set_focus(Some(1));
+        assert_eq!(actions.focus(), Some(1));
+        actions.set_focus(Some(99));
+        assert_eq!(actions.focus(), None);
+
+        actions.focus_last();
+        assert_eq!(actions.focus(), Some(3));
     }
 
     #[test]

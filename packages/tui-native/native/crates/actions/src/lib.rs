@@ -10,12 +10,16 @@
 //! - [`MessageActions`] tracks the focused message and answers whether
 //!   `copy`, `rewind`, and `toggle expand` are available, returning an
 //!   [`ActionOutcome`] instead of performing side effects.
+//! - [`block_starts`] and the other focus helpers derive that cursor from the
+//!   transcript rows, skipping spacing rows and tool-result continuations.
 //!
 //! The renderer and the binary key bindings consume these results; neither is
 //! touched here.
 
 mod actions;
 mod expand;
+mod focus;
 
 pub use actions::{ActionOutcome, MessageAction, MessageActions, MessageMeta};
 pub use expand::{ExpandLimits, ExpandState, RowKey, project, project_keyed};
+pub use focus::{block_starts, copy_target, latest_assistant_text, message_metas, toggle_focused};

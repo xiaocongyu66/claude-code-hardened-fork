@@ -20,8 +20,8 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Paste folding | `PromptInput.tsx` (~1399) | ✅ `TextBuffer::insert_paste` | >800 chars or >2 newlines |
 | History search | `HistorySearchDialog.tsx` | 🟡 wired (Ctrl+R) | UI is a status line; dialog view pending |
 | Vim mode | `PromptInput.tsx` (~2456) | ✅ `crates/core::vim` | env `CCH_TUI_VIM=1` |
-| Message actions | `messageActions.tsx` | 🟡 model ready | focus/copy/rewind not wired to keys yet |
-| Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | collapse 3 lines; inline is frozen |
+| Message actions | `messageActions.tsx` | ✅ focus/copy/expand | `Alt+Up/Down` focus (`msg i/n`), `Ctrl+Y`/`Alt+C` copy, `Ctrl+O` toggles the focused block, `Esc` clears; rewind awaits an engine op |
+| Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | per-message `Ctrl+O`; 3-line collapse; inline is frozen |
 | Task / agent panel | `TaskListV2.tsx`, `components/tasks/*` | ✅ `crates/panel` | status line + fullscreen sidebar |
 | Spinner / activity | `Spinner.tsx` | ✅ status line | frame advances while a turn runs |
 | Plan mode | `ExitPlanModePermissionRequest/*` | 🟡 view ready | `Ready to code?` + plan body; decision semantics in flight |
@@ -30,7 +30,7 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Global search | `GlobalSearchDialog.tsx` | 🟡 model ready (`crates/search`) | wiring in flight (Ctrl+F) |
 | @file completion | `fileSuggestions.ts` | ⬜ | engine-side index exists; TUI needs a picker |
 | Slash palette | slash command menu | 🟡 model ready (`crates/palette`) | wiring in flight |
-| Copy to clipboard | OSC52 / platform tools | 🟡 OSC52 only | Alt+C copies the last assistant message |
+| Copy to clipboard | OSC52 / platform tools | 🟡 OSC52 only | `Ctrl+Y`/`Alt+C` copy the focused message, or the newest assistant reply when unfocused |
 | Image paste | `imagePaste.ts`, `useClipboardImageHint` | ⛔ | no terminal image protocol; needs a clipboard image path |
 | Diff dialog | `diff/DiffDialog.tsx` | ⬜ | after Edit-tool diff wiring |
 | Settings/theme command | `Config.tsx` | 🟡 env `CCH_TUI_THEME` | `/theme` command later |
