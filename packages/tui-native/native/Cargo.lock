@@ -235,6 +235,7 @@ name = "cch-tui-render"
 version = "0.1.0"
 dependencies = [
  "cch-tui-core",
+ "cch-tui-dialog",
  "cch-tui-diff",
  "cch-tui-fullscreen",
  "cch-tui-highlight",
@@ -242,6 +243,7 @@ dependencies = [
  "cch-tui-proto",
  "cch-tui-ui",
  "ratatui",
+ "serde_json",
  "unicode-width",
 ]
 

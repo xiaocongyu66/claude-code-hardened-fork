@@ -118,6 +118,47 @@ impl TerminalSession {
         self.fullscreen
     }
 
+    /// Draw the live view with the permission dialog on top.
+    pub fn draw_with_permission(
+        &mut self,
+        view: &ChatView,
+        dialog: &cch_tui_dialog::PermissionDialog,
+    ) -> io::Result<()> {
+        self.terminal.draw(|frame| {
+            draw_view(frame, view);
+            draw_permission(frame, dialog);
+        })?;
+        Ok(())
+    }
+
+    /// Fullscreen variant of [`Self::draw_with_permission`].
+    pub fn draw_transcript_with_permission(
+        &mut self,
+        view: &ChatView,
+        model: &mut cch_tui_fullscreen::TranscriptModel,
+        dialog: &cch_tui_dialog::PermissionDialog,
+    ) -> io::Result<()> {
+        let size = self.terminal.size()?;
+        let width = size.width.max(1) as usize;
+        let reserved = input_height(&view.input) as usize + 1;
+        let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
+        let lines = transcript_lines(model, transcript_height, width);
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(input_height(&view.input)),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            frame.render_widget(Paragraph::new(lines.clone()), chunks[0]);
+            draw_prompt(frame, view, chunks[1]);
+            draw_status(frame, view, chunks[2]);
+            draw_permission(frame, dialog);
+        })?;
+        Ok(())
+    }
+
     pub fn restore(&mut self) -> io::Result<()> {
         disable_raw_mode()?;
         execute!(
@@ -324,6 +365,70 @@ fn draw_status(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) 
     frame.render_widget(status, area);
 }
 
+/// Draw the permission dialog as a centered overlay.
+pub fn draw_permission(frame: &mut Frame, dialog: &cch_tui_dialog::PermissionDialog) {
+    let area = frame.area();
+    let width = area
+        .width
+        .saturating_mul(7)
+        .saturating_div(10)
+        .clamp(24, 78);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Tool: {}", dialog.tool_name()),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if let Some(description) = dialog.description() {
+        for line in wrap_text(description, width.saturating_sub(4) as usize) {
+            lines.push(Line::from(line));
+        }
+    }
+    let input = serde_json::to_string_pretty(dialog.input()).unwrap_or_default();
+    let mut input_lines = wrap_text(&input, width.saturating_sub(4) as usize);
+    if input_lines.len() > 6 {
+        input_lines.truncate(6);
+        input_lines.push("…".into());
+    }
+    for line in input_lines {
+        lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
+    for (index, option) in dialog.options().iter().enumerate() {
+        let marker = if index == dialog.selected() { ">" } else { " " };
+        let style = if index == dialog.selected() {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {}", option.label()),
+            style,
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter confirm · Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = ratatui::layout::Rect::new(x, y, width, height);
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let block = ratatui::widgets::Block::bordered()
+        .title(" Permission required ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(paragraph, rect);
+}
+
 /// Convert the visible window of a transcript model into terminal lines.
 pub fn transcript_lines(
     model: &mut cch_tui_fullscreen::TranscriptModel,
@@ -454,6 +559,46 @@ mod tests {
             .find(|l| l.to_string().starts_with("- "))
             .expect("removed line");
         assert_eq!(removed.spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn permission_dialog_renders_tool_options_and_selection() {
+        let request = cch_tui_proto::CanUseToolRequest {
+            tool_name: "Bash".into(),
+            input: serde_json::Map::from_iter([(
+                "command".into(),
+                serde_json::Value::String("rm -rf /tmp/x".into()),
+            )]),
+            tool_use_id: "t1".into(),
+            permission_suggestions: None,
+            blocked_path: None,
+            decision_reason: None,
+            title: None,
+            display_name: None,
+            agent_id: None,
+            description: Some("Run a shell command".into()),
+        };
+        let dialog = cch_tui_dialog::PermissionDialog::new("r1", request);
+
+        let backend = ratatui::backend::TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_permission(frame, &dialog))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(buffer[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+
+        assert!(screen.contains("Permission required"), "{screen}");
+        assert!(screen.contains("Tool: Bash"), "{screen}");
+        assert!(screen.contains("rm -rf /tmp/x"), "{screen}");
+        assert!(screen.contains("> Allow once"), "{screen}");
+        assert!(screen.contains("Deny"), "{screen}");
     }
 
     #[test]
