@@ -1744,8 +1744,7 @@ async function* queryLoop(
                 // prompt and cache-safe params are rebuilt from this context at
                 // the top of the next iteration / next compaction call.
                 if (toolUseContext.options.refreshTools) {
-                  const refreshedTools =
-                    toolUseContext.options.refreshTools()
+                  const refreshedTools = toolUseContext.options.refreshTools()
                   if (refreshedTools !== toolUseContext.options.tools) {
                     toolUseContext.options.tools = refreshedTools
                   }
