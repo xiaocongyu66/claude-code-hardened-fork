@@ -181,6 +181,14 @@ name = "cch-tui-diff"
 version = "0.1.0"
 
 [[package]]
+name = "cch-tui-fullscreen"
+version = "0.1.0"
+dependencies = [
+ "cch-tui-core",
+ "cch-tui-ui",
+]
+
+[[package]]
 name = "cch-tui-highlight"
 version = "0.1.0"
 dependencies = [
