@@ -14,6 +14,7 @@ cch-tui-highlight = { path = "../highlight" }
 cch-tui-diff = { path = "../diff" }
 cch-tui-fullscreen = { path = "../fullscreen" }
 cch-tui-dialog = { path = "../dialog" }
+cch-tui-theme = { path = "../theme" }
 ratatui = "0.30"
 unicode-width = "0.2"
 serde_json.workspace = true

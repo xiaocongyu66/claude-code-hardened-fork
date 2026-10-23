@@ -8,6 +8,7 @@
 
 use std::io::{self, Stdout};
 
+use cch_tui_theme::Theme;
 use cch_tui_ui::{ChatView, Row, RowStyle, wrap_text};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::{MoveToColumn, SetCursorStyle, Show};
@@ -29,6 +30,7 @@ pub const DEFAULT_INLINE_HEIGHT: u16 = 12;
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     fullscreen: bool,
+    theme: Theme,
 }
 
 impl TerminalSession {
@@ -47,6 +49,7 @@ impl TerminalSession {
         Ok(Self {
             terminal,
             fullscreen: false,
+            theme: Theme::dark(),
         })
     }
 
@@ -60,7 +63,14 @@ impl TerminalSession {
         Ok(Self {
             terminal,
             fullscreen: true,
+            theme: Theme::dark(),
         })
+    }
+
+    /// Replace the palette used for subsequent draws. Defaults to
+    /// [`Theme::dark`].
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     /// Freeze `rows` into the terminal scrollback.
@@ -72,7 +82,7 @@ impl TerminalSession {
             return Ok(());
         }
         let width = self.terminal.size()?.width.max(1) as usize;
-        let lines = rows_to_lines(rows, width);
+        let lines = rows_to_lines(rows, width, &self.theme);
         if lines.is_empty() {
             return Ok(());
         }
@@ -84,7 +94,8 @@ impl TerminalSession {
     }
 
     pub fn draw(&mut self, view: &ChatView) -> io::Result<()> {
-        self.terminal.draw(|frame| draw_view(frame, view))?;
+        let theme = self.theme;
+        self.terminal.draw(|frame| draw_view(frame, view, &theme))?;
         Ok(())
     }
 
@@ -94,11 +105,12 @@ impl TerminalSession {
         view: &ChatView,
         model: &mut cch_tui_fullscreen::TranscriptModel,
     ) -> io::Result<()> {
+        let theme = self.theme;
         let size = self.terminal.size()?;
         let width = size.width.max(1) as usize;
         let reserved = input_height(&view.input) as usize + 1;
         let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
-        let lines = transcript_lines(model, transcript_height, width);
+        let lines = transcript_lines(model, transcript_height, width, &theme);
         self.terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([
@@ -109,7 +121,7 @@ impl TerminalSession {
             .split(area);
             frame.render_widget(Paragraph::new(lines.clone()), chunks[0]);
             draw_prompt(frame, view, chunks[1]);
-            draw_status(frame, view, chunks[2]);
+            draw_status(frame, view, chunks[2], &theme);
         })?;
         Ok(())
     }
@@ -124,9 +136,10 @@ impl TerminalSession {
         view: &ChatView,
         dialog: &cch_tui_dialog::PermissionDialog,
     ) -> io::Result<()> {
+        let theme = self.theme;
         self.terminal.draw(|frame| {
-            draw_view(frame, view);
-            draw_permission(frame, dialog);
+            draw_view(frame, view, &theme);
+            draw_permission(frame, dialog, &theme);
         })?;
         Ok(())
     }
@@ -138,11 +151,12 @@ impl TerminalSession {
         model: &mut cch_tui_fullscreen::TranscriptModel,
         dialog: &cch_tui_dialog::PermissionDialog,
     ) -> io::Result<()> {
+        let theme = self.theme;
         let size = self.terminal.size()?;
         let width = size.width.max(1) as usize;
         let reserved = input_height(&view.input) as usize + 1;
         let transcript_height = (size.height as usize).saturating_sub(reserved).max(1);
-        let lines = transcript_lines(model, transcript_height, width);
+        let lines = transcript_lines(model, transcript_height, width, &theme);
         self.terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([
@@ -153,8 +167,8 @@ impl TerminalSession {
             .split(area);
             frame.render_widget(Paragraph::new(lines.clone()), chunks[0]);
             draw_prompt(frame, view, chunks[1]);
-            draw_status(frame, view, chunks[2]);
-            draw_permission(frame, dialog);
+            draw_status(frame, view, chunks[2], &theme);
+            draw_permission(frame, dialog, &theme);
         })?;
         Ok(())
     }
@@ -186,7 +200,7 @@ impl Drop for TerminalSession {
 ///
 /// Assistant prose goes through the Markdown renderer at the target width;
 /// everything else (user input, tool output, errors) is wrapped verbatim.
-fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
+fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut index = 0;
     while index < rows.len() {
@@ -198,7 +212,7 @@ fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
             while index < rows.len() && rows[index].style == RowStyle::CodeBlock {
                 index += 1;
             }
-            lines.extend(code_block_lines(&rows[start..index]));
+            lines.extend(code_block_lines(&rows[start..index], theme));
             continue;
         }
         index += 1;
@@ -212,7 +226,7 @@ fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
         for styled in &styled_rows {
             lines.push(Line::from(Span::styled(
                 styled.text.clone(),
-                row_style(styled.style),
+                row_style(styled.style, theme),
             )));
         }
     }
@@ -222,7 +236,7 @@ fn rows_to_lines(rows: &[Row], width: usize) -> Vec<Line<'static>> {
 /// Highlight a fenced (or indented) code block. Fence lines are dropped; the
 /// inner code keeps one terminal line per source line so highlighting stays
 /// aligned with line numbers.
-fn code_block_lines(block: &[Row]) -> Vec<Line<'static>> {
+fn code_block_lines(block: &[Row], theme: &Theme) -> Vec<Line<'static>> {
     let mut inner = block;
     let mut language: Option<&str> = None;
     if let Some(first) = block.first() {
@@ -253,25 +267,26 @@ fn code_block_lines(block: &[Row]) -> Vec<Line<'static>> {
             let spans: Vec<Span<'static>> = line
                 .spans
                 .iter()
-                .map(|span| Span::styled(span.text.clone(), token_style(span.kind)))
+                .map(|span| Span::styled(span.text.clone(), token_style(span.kind, theme)))
                 .collect();
             Line::from(spans)
         })
         .collect()
 }
 
-fn token_style(kind: cch_tui_highlight::TokenKind) -> Style {
+fn token_style(kind: cch_tui_highlight::TokenKind, theme: &Theme) -> Style {
     use cch_tui_highlight::TokenKind;
+    let palette = theme.palette;
     match kind {
-        TokenKind::Keyword => Style::default().fg(Color::Magenta),
-        TokenKind::String => Style::default().fg(Color::Green),
-        TokenKind::Comment => Style::default().fg(Color::DarkGray),
-        TokenKind::Number => Style::default().fg(Color::Cyan),
-        TokenKind::Function => Style::default().fg(Color::Blue),
-        TokenKind::Type => Style::default().fg(Color::Yellow),
+        TokenKind::Keyword => Style::default().fg(palette.keyword),
+        TokenKind::String => Style::default().fg(palette.string),
+        TokenKind::Comment => Style::default().fg(palette.comment),
+        TokenKind::Number => Style::default().fg(palette.number),
+        TokenKind::Function => Style::default().fg(palette.function),
+        TokenKind::Type => Style::default().fg(palette.r#type),
         TokenKind::Variable => Style::default(),
-        TokenKind::Punctuation => Style::default().fg(Color::DarkGray),
-        TokenKind::Plain => Style::default().fg(Color::Green),
+        TokenKind::Punctuation => Style::default().fg(palette.punctuation),
+        TokenKind::Plain => Style::default().fg(palette.code_block),
     }
 }
 
@@ -296,26 +311,29 @@ pub fn diff_to_lines(rows: &[cch_tui_diff::DiffRow]) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn row_style(style: RowStyle) -> Style {
+fn row_style(style: RowStyle, theme: &Theme) -> Style {
+    let palette = theme.palette;
     match style {
-        RowStyle::User => Style::default().fg(Color::Cyan),
-        RowStyle::Assistant => Style::default(),
-        RowStyle::System => Style::default().fg(Color::DarkGray),
-        RowStyle::Error => Style::default().fg(Color::Red),
-        RowStyle::Tool => Style::default().fg(Color::Yellow),
+        RowStyle::User => Style::default().fg(palette.user),
+        RowStyle::Assistant => Style::default().fg(palette.assistant),
+        RowStyle::System => Style::default().fg(palette.system),
+        RowStyle::Error => Style::default().fg(palette.error),
+        RowStyle::Tool => Style::default().fg(palette.tool),
         // Markdown row roles. The markdown crate emits the text (markers,
         // prefixes and indentation included); these only pick a palette token.
-        RowStyle::Heading(_) => Style::default().add_modifier(Modifier::BOLD),
-        RowStyle::InlineCode => Style::default().fg(Color::Magenta),
-        RowStyle::CodeBlock => Style::default().fg(Color::Green),
-        RowStyle::ListItem => Style::default(),
-        RowStyle::Blockquote => Style::default().fg(Color::DarkGray),
-        RowStyle::Rule => Style::default().fg(Color::DarkGray),
+        RowStyle::Heading(_) => Style::default()
+            .fg(palette.heading)
+            .add_modifier(Modifier::BOLD),
+        RowStyle::InlineCode => Style::default().fg(palette.inline_code),
+        RowStyle::CodeBlock => Style::default().fg(palette.code_block),
+        RowStyle::ListItem => Style::default().fg(palette.foreground),
+        RowStyle::Blockquote => Style::default().fg(palette.dim),
+        RowStyle::Rule => Style::default().fg(palette.dim),
     }
 }
 
 /// Paint the live region: streaming text, input line, status line.
-pub fn draw_view(frame: &mut Frame, view: &ChatView) {
+pub fn draw_view(frame: &mut Frame, view: &ChatView, theme: &Theme) {
     let area = frame.area();
     let chunks = Layout::vertical([
         Constraint::Min(1),
@@ -324,11 +342,12 @@ pub fn draw_view(frame: &mut Frame, view: &ChatView) {
     ])
     .split(area);
 
-    let live = Paragraph::new(view.live_text.as_str()).style(Style::default());
+    let live = Paragraph::new(view.live_text.as_str())
+        .style(Style::default().fg(theme.palette.foreground));
     frame.render_widget(live, chunks[0]);
 
     draw_prompt(frame, view, chunks[1]);
-    draw_status(frame, view, chunks[2]);
+    draw_status(frame, view, chunks[2], theme);
 }
 
 fn draw_prompt(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) {
@@ -360,13 +379,17 @@ fn draw_prompt(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) 
     frame.set_cursor_position((x as u16, y.min(area.bottom().saturating_sub(1))));
 }
 
-fn draw_status(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect) {
-    let status = Paragraph::new(view.status_line()).style(Style::default().fg(Color::DarkGray));
+fn draw_status(frame: &mut Frame, view: &ChatView, area: ratatui::layout::Rect, theme: &Theme) {
+    let status = Paragraph::new(view.status_line()).style(Style::default().fg(theme.palette.dim));
     frame.render_widget(status, area);
 }
 
 /// Draw the permission dialog as a centered overlay.
-pub fn draw_permission(frame: &mut Frame, dialog: &cch_tui_dialog::PermissionDialog) {
+pub fn draw_permission(
+    frame: &mut Frame,
+    dialog: &cch_tui_dialog::PermissionDialog,
+    theme: &Theme,
+) {
     let area = frame.area();
     let width = area
         .width
@@ -392,7 +415,7 @@ pub fn draw_permission(frame: &mut Frame, dialog: &cch_tui_dialog::PermissionDia
     for line in input_lines {
         lines.push(Line::from(Span::styled(
             line,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.palette.dim),
         )));
     }
     lines.push(Line::from(""));
@@ -400,7 +423,7 @@ pub fn draw_permission(frame: &mut Frame, dialog: &cch_tui_dialog::PermissionDia
         let marker = if index == dialog.selected() { ">" } else { " " };
         let style = if index == dialog.selected() {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -412,7 +435,7 @@ pub fn draw_permission(frame: &mut Frame, dialog: &cch_tui_dialog::PermissionDia
     }
     lines.push(Line::from(Span::styled(
         "↑/↓ select · Enter confirm · Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.palette.dim),
     )));
 
     let height = (lines.len() as u16 + 2).min(area.height);
@@ -422,7 +445,7 @@ pub fn draw_permission(frame: &mut Frame, dialog: &cch_tui_dialog::PermissionDia
     frame.render_widget(ratatui::widgets::Clear, rect);
     let block = ratatui::widgets::Block::bordered()
         .title(" Permission required ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme.palette.border));
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(ratatui::widgets::Wrap { trim: false });
@@ -434,9 +457,10 @@ pub fn transcript_lines(
     model: &mut cch_tui_fullscreen::TranscriptModel,
     height: usize,
     width: usize,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     let range = model.window(height, width);
-    rows_to_lines(&model.rows()[range], width)
+    rows_to_lines(&model.rows()[range], width, theme)
 }
 
 /// Rows reserved for the prompt: one per input line, capped so the live area
@@ -457,7 +481,9 @@ mod tests {
     fn render(view: &ChatView, width: u16, height: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| draw_view(frame, view)).expect("draw");
+        terminal
+            .draw(|frame| draw_view(frame, view, &Theme::dark()))
+            .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let mut out = String::new();
         for y in 0..buffer.area.height {
@@ -499,7 +525,7 @@ mod tests {
     #[test]
     fn assistant_rows_are_markdown_rendered() {
         let rows = vec![Row::new(RowStyle::Assistant, "# Title\n- item")];
-        let lines = rows_to_lines(&rows, 40);
+        let lines = rows_to_lines(&rows, 40, &Theme::dark());
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(texts.iter().any(|text| text.contains("Title")), "{texts:?}");
         assert!(
@@ -532,7 +558,8 @@ mod tests {
             Row::new(RowStyle::CodeBlock, "let x = 1;"),
             Row::new(RowStyle::CodeBlock, "```"),
         ];
-        let lines = rows_to_lines(&rows, 40);
+        let theme = Theme::dark();
+        let lines = rows_to_lines(&rows, 40, &theme);
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "let x = 1;");
@@ -541,8 +568,8 @@ mod tests {
             lines[0]
                 .spans
                 .iter()
-                .any(|s| s.content.contains("let") && s.style.fg == Some(Color::Magenta)),
-            "keyword should be magenta"
+                .any(|s| s.content.contains("let") && s.style.fg == Some(theme.palette.keyword)),
+            "keyword should use the theme keyword color"
         );
     }
 
@@ -583,7 +610,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(70, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_permission(frame, &dialog))
+            .draw(|frame| draw_permission(frame, &dialog, &Theme::dark()))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let mut screen = String::new();
@@ -606,7 +633,8 @@ mod tests {
         let mut model = cch_tui_fullscreen::TranscriptModel::new();
         model.append((0..50).map(|i| Row::new(RowStyle::User, format!("line {i}"))));
 
-        let lines = transcript_lines(&mut model, 6, 40);
+        let theme = Theme::dark();
+        let lines = transcript_lines(&mut model, 6, 40, &theme);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(
             texts.iter().any(|text| text == "line 49"),
@@ -614,7 +642,7 @@ mod tests {
         );
 
         model.scroll_to_top();
-        let lines = transcript_lines(&mut model, 6, 40);
+        let lines = transcript_lines(&mut model, 6, 40, &theme);
         let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert!(
             texts.iter().any(|text| text == "line 0"),
@@ -626,9 +654,61 @@ mod tests {
     #[test]
     fn user_rows_are_verbatim() {
         let rows = vec![Row::new(RowStyle::User, "# not a heading")];
-        let lines = rows_to_lines(&rows, 40);
+        let lines = rows_to_lines(&rows, 40, &Theme::dark());
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].to_string(), "# not a heading");
+    }
+
+    #[test]
+    fn rows_to_lines_use_theme_colors() {
+        let theme = Theme::light();
+        let rows = vec![
+            Row::new(RowStyle::User, "hello"),
+            Row::new(RowStyle::Error, "boom"),
+            Row::new(RowStyle::Tool, "tool"),
+            Row::new(RowStyle::System, "sys"),
+        ];
+        let lines = rows_to_lines(&rows, 40, &theme);
+        let expected = [
+            theme.palette.user,
+            theme.palette.error,
+            theme.palette.tool,
+            theme.palette.system,
+        ];
+        assert_eq!(lines.len(), expected.len());
+        for (line, color) in lines.iter().zip(expected) {
+            assert_eq!(line.spans[0].style.fg, Some(color), "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn row_style_reads_palette_tokens() {
+        let theme = Theme::light();
+        let palette = theme.palette;
+        assert_eq!(row_style(RowStyle::User, &theme).fg, Some(palette.user));
+        assert_eq!(
+            row_style(RowStyle::Assistant, &theme).fg,
+            Some(palette.assistant)
+        );
+        assert_eq!(row_style(RowStyle::Error, &theme).fg, Some(palette.error));
+        assert_eq!(row_style(RowStyle::Tool, &theme).fg, Some(palette.tool));
+        assert_eq!(
+            row_style(RowStyle::InlineCode, &theme).fg,
+            Some(palette.inline_code)
+        );
+        assert_eq!(
+            row_style(RowStyle::CodeBlock, &theme).fg,
+            Some(palette.code_block)
+        );
+        assert_eq!(
+            row_style(RowStyle::Heading(2), &theme).fg,
+            Some(palette.heading)
+        );
+        assert_eq!(row_style(RowStyle::Rule, &theme).fg, Some(palette.dim));
+
+        let dark = Theme::dark();
+        assert_eq!(row_style(RowStyle::User, &dark).fg, Some(dark.palette.user));
+        assert_ne!(dark.palette.user, palette.user);
     }
 
     #[test]
