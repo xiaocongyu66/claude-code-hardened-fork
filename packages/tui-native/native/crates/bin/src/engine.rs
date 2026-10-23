@@ -157,3 +157,60 @@ pub fn replay(
 pub fn encode_event(event: &EngineEvent) -> Option<String> {
     encode(event).ok()
 }
+
+#[cfg(unix)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn spawn_reads_frames_and_reports_close() {
+        let script = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1"}'"#;
+        let (process, rx) =
+            EngineProcess::spawn("sh", &["-c".into(), script.into()]).expect("spawn");
+        let mut seen_event = false;
+        let mut closed = false;
+        for _ in 0..10 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(EngineMessage::Event(event)) => {
+                    seen_event = true;
+                    assert_eq!(event.kind(), "system");
+                }
+                Ok(EngineMessage::Closed) => {
+                    closed = true;
+                    break;
+                }
+                Ok(EngineMessage::Malformed(line)) => panic!("malformed: {line}"),
+                Err(error) => panic!("timed out: {error}"),
+            }
+        }
+        drop(process);
+        assert!(seen_event, "no event read");
+        assert!(closed, "close not reported");
+    }
+
+    #[test]
+    fn sends_prompts_as_stream_json_user_messages() {
+        // `cat` echoes our prompt back, which we parse as a user event.
+        let (mut process, rx) = EngineProcess::spawn("cat", &[]).expect("spawn");
+        process.send_prompt("hello engine").expect("send");
+        let event = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(EngineMessage::Event(event)) => event,
+            Ok(EngineMessage::Malformed(line)) => panic!("malformed: {line}"),
+            Ok(EngineMessage::Closed) => panic!("engine closed too early"),
+            Err(error) => panic!("timed out: {error}"),
+        };
+        assert_eq!(event.kind(), "user");
+        let EngineEvent::User { extra } = event else {
+            panic!("expected user frame");
+        };
+        let content = extra
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.get(0))
+            .and_then(|block| block.get("text"))
+            .and_then(|text| text.as_str());
+        assert_eq!(content, Some("hello engine"));
+    }
+}
