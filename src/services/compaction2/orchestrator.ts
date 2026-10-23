@@ -4,6 +4,7 @@ import type { QuerySource } from '../../constants/querySource.js'
 import type { Message } from '../../types/message.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { CacheSafeParams } from '../../utils/forkedAgent.js'
+import type { APIProvider } from '../../utils/model/providerClassification.js'
 import {
   DEFAULT_COMPACTION_SETTINGS,
   type CompactionContext,
@@ -18,7 +19,12 @@ import { evaluateProgressGuard } from './guards/progress.js'
 import type { PayloadRejectionEvidence } from './guards/payload.js'
 import { createHandoffMethod } from './methods/handoff.js'
 import { indexMethods, resolveMethodOrder } from './methods/registry.js'
-import { createRemoteMethod } from './methods/remote.js'
+import {
+  createRemoteMethod,
+  isRemoteCompactionEnabled,
+  type RemoteMethodDeps,
+} from './methods/remote.js'
+import { buildRemoteTransport } from './methods/remote/transport.js'
 import { createShakeMethod, type ShakeReducer } from './methods/shake.js'
 import {
   createSoftMethod,
@@ -36,6 +42,10 @@ import {
   evaluateOverflowTrigger,
   type ContextPromotion,
 } from './triggers/overflow.js'
+import {
+  collectPromotionCandidates,
+  createContextPromotion,
+} from './triggers/promotion.js'
 import { evaluateThresholdTrigger } from './triggers/threshold.js'
 import type {
   PromotionResult,
@@ -90,6 +100,7 @@ export interface CompactionV2Options {
   methods?: readonly CompactionMethod[]
   soft?: SoftMethodDeps | null
   shake?: ShakeReducer | null
+  remote?: RemoteMethodDeps | null
   promotion?: ContextPromotion | null
   resolveWindowTokens?: (model: string) => number
   countTokens?: (messages: readonly Message[]) => number
@@ -114,6 +125,7 @@ export interface CompactionV2Result {
 export interface DefaultMethodOptions {
   soft?: SoftMethodDeps | null
   shake?: ShakeReducer | null
+  remote?: RemoteMethodDeps | null
   instructions?: string
   resolveThresholdTokens?(ctx: CompactionContext): number | undefined
 }
@@ -131,7 +143,7 @@ export function createDefaultMethods(
       }
     : null
   return [
-    createRemoteMethod(),
+    createRemoteMethod(options.remote),
     createSnapcompactMethod(),
     createHandoffMethod(),
     createShakeMethod({
@@ -286,6 +298,7 @@ export async function runCompactionV2(
       createDefaultMethods({
         soft: options.soft,
         shake: options.shake,
+        remote: options.remote,
         instructions: request.instructions,
         resolveThresholdTokens: () => triggerDecision.threshold.thresholdTokens,
       }),
@@ -506,6 +519,13 @@ export async function runCompactionV2ForQuery(
   const windowTokens = getEffectiveContextWindowSize(request.model)
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
 
+  // Remote compaction is opt-in. Build the provider-bound transport lazily so
+  // the flag-off path never touches auth, and a missing transport keeps the
+  // existing lane-unavailable / transport-missing skips.
+  const remote = isRemoteCompactionEnabled()
+    ? createQueryRemoteDeps(request.model)
+    : null
+
   const result = await runCompactionV2(
     {
       model: request.model,
@@ -531,6 +551,9 @@ export async function runCompactionV2ForQuery(
         tracking: request.tracking,
       }),
       shake: createShakeReducer(),
+      remote,
+      // Promotion is a decision only for now; W8 owns the model switch/retry.
+      promotion: createQueryPromotion(),
       // The query loop only understands the legacy CompactionResult; let an
       // unrenderable remote/snapcompact outcome fall through to soft.
       canAcceptOutcome: outcome =>
@@ -633,6 +656,65 @@ export async function runIdleCompactionV2(
     }
   }
   return { compacted: false, trace: result.trace }
+}
+
+/**
+ * Resolve the provider once and build its transport. No credentials are read
+ * here beyond what `buildRemoteTransport` resolves synchronously; Google
+ * tokens are fetched per request inside the returned fetch.
+ */
+function createQueryRemoteDeps(model: string): RemoteMethodDeps {
+  const env = process.env
+  let provider: APIProvider | undefined
+  try {
+    const { getAPIProvider } = require('../../utils/model/providers.js') as {
+      getAPIProvider(): APIProvider
+    }
+    provider = getAPIProvider()
+  } catch {
+    provider = undefined
+  }
+  if (!provider) return { env }
+  const transport = buildRemoteTransport({ provider, model, env })
+  return {
+    env,
+    provider,
+    ...(transport
+      ? {
+          fetch: transport.fetch,
+          apiKey: transport.apiKey,
+          baseUrl: transport.baseUrl,
+        }
+      : {}),
+  }
+}
+
+/**
+ * Promotion candidates come from `contextWindowOverrides`: those entries are
+ * explicit user intent about a model's true window. No overrides → no
+ * promotion, so the overflow path is unchanged for existing users.
+ */
+function createQueryPromotion(): ContextPromotion | null {
+  try {
+    const { getInitialSettings } = require('../../utils/settings/settings.js') as {
+      getInitialSettings(): {
+        contextWindowOverrides?: Record<string, number>
+      }
+    }
+    const overrides = getInitialSettings().contextWindowOverrides
+    if (!overrides) return null
+    const candidates = collectPromotionCandidates({
+      windowOverrides: overrides,
+    })
+    if (candidates.length === 0) return null
+    return createContextPromotion({
+      candidates,
+      resolveWindow: model =>
+        loadAutoCompact().getEffectiveContextWindowSize(model),
+    })
+  } catch {
+    return null
+  }
 }
 
 function createLegacySoftDeps(input: {
