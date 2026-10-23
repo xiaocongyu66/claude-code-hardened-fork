@@ -16,34 +16,45 @@
 //!
 //! # Extension points
 //!
-//! Vim and the remaining Ink contexts are intentionally not implemented here.
-//! Add them as data, using [`BindingSpec`] tables and
-//! [`Context::VIM_NORMAL`] / [`Context::new`]:
+//! Vim normal/insert bindings ship in [`VIM_SPECS`] as an opt-in table. Build
+//! the keymap with [`Keymap::with_extensions`], push the vim context and
+//! resolve as usual:
 //!
 //! ```
-//! use cch_tui_keymap::{Action, BindingSpec, Context, Key, Keymap};
+//! use cch_tui_keymap::{
+//!     Action, Context, ContextStack, Key, Keymap, Resolution, VIM_SPECS,
+//! };
 //!
-//! const VIM: &[BindingSpec] = &[
-//!     BindingSpec::new(Context::VIM_NORMAL, &[Key::char('h')], Action::new("vim.left")),
-//!     BindingSpec::new(Context::VIM_NORMAL, &[Key::char('i')], Action::new("vim.insert")),
-//! ];
-//! let keymap = Keymap::with_extensions(&[VIM]);
-//! assert_eq!(keymap.bindings().len(), Keymap::default().bindings().len() + 2);
+//! let keymap = Keymap::with_extensions(&[VIM_SPECS]);
+//! let mut stack = ContextStack::new();
+//! stack.push(Context::PROMPT);
+//! stack.push(Context::VIM_NORMAL);
+//! assert_eq!(
+//!     keymap.resolve_once(&stack, Key::char('h'), 0),
+//!     Resolution::Action(Action::VIM_LEFT),
+//! );
 //! ```
+//!
+//! Other contexts can be added the same way with [`BindingSpec`] tables and
+//! [`Context::new`].
 
 #![forbid(unsafe_code)]
 
 mod binding;
 mod context;
+mod history;
 mod key;
 mod keymap;
 mod resolver;
+mod vim;
 
 pub use binding::{Action, Binding, BindingSpec};
 pub use context::{Context, ContextStack, Layer};
+pub use history::{HistorySearchCommand, HistorySearchOutcome, apply_history_search};
 pub use key::{Chord, Key, KeyCode, Modifiers};
 pub use keymap::{
     AUTOCOMPLETE_SPECS, BASE_TABLES, DIALOG_SPECS, GLOBAL_SPECS, HISTORY_SEARCH_SPECS, Keymap,
     MODAL_SPECS, PROMPT_SPECS,
 };
 pub use resolver::{Resolution, Resolver};
+pub use vim::{VIM_SPECS, VimAction};
