@@ -1,7 +1,8 @@
 {"type":"system","subtype":"init","session_id":"fixture-session","model":"claude-test","tools":["Bash","Read"],"cwd":"/tmp"}
 {"type":"user","uuid":"u1","message":{"role":"user","content":"list the files"}}
 {"type":"stream_event","uuid":"a1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"running "}}}
-{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"running ls"}]}}
+{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"running ls"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt\nb.txt"}]}}
 {"type":"control_request","request_id":"perm-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"ls"},"description":"Run ls"}}
 {"type":"control_response","response":{"subtype":"success","request_id":"perm-1","response":{"behavior":"allow"}}}
 {"type":"result","subtype":"success","total_cost_usd":0.002,"num_turns":1}
