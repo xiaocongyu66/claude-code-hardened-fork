@@ -11,17 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 cch-tui-proto = { path = "../proto" }
+cch-tui-runner = { path = "../runner" }
 cch-tui-ui = { path = "../ui" }
-cch-tui-render = { path = "../render" }
-cch-tui-core = { path = "../core" }
-cch-tui-theme = { path = "../theme" }
-cch-tui-keymap = { path = "../keymap" }
-cch-tui-dialog = { path = "../dialog" }
-cch-tui-fullscreen = { path = "../fullscreen" }
-cch-tui-panel = { path = "../panel" }
 cch-tui-actions = { path = "../actions" }
-cch-tui-palette = { path = "../palette" }
-cch-tui-search = { path = "../search" }
+cch-tui-fullscreen = { path = "../fullscreen" }
+cch-tui-render = { path = "../render" }
+cch-tui-theme = { path = "../theme" }
 ratatui = "0.30"
 serde_json.workspace = true
 
