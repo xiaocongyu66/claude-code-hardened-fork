@@ -74,6 +74,7 @@ async function postBuild() {
     'file-index',
     'clipboard',
     'search',
+    'tui',
   ]) {
     const src = `vendor/${name}`
     if (existsSync(src)) {

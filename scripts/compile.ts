@@ -67,6 +67,15 @@ const CRATES = [
     vendorDir: 'search',
     moduleName: 'search',
   },
+  {
+    // cch_tui napi cdylib (`crates/napi`, package `cch-tui-napi`). If the
+    // upstream branch renames the #[napi] crate, update `crate` to the cdylib
+    // name cargo emits (lib<crate>.so / <crate>.dll).
+    pkg: 'tui-napi',
+    crate: 'cch_tui',
+    vendorDir: 'tui',
+    moduleName: 'tui',
+  },
 ]
 
 function artifactName(crate: string, platform: string): string {
