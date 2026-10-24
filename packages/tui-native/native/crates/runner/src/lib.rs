@@ -222,6 +222,10 @@ pub fn run_interactive_with_mode(
             .as_deref(),
     );
     let started = Instant::now();
+    // TextMate grammars are a one-time load (hundreds of milliseconds in an
+    // unoptimised build). Load them off the main thread so the first frame is
+    // not delayed, mirroring Ink's Suspense-loaded `cli-highlight`.
+    let _ = std::thread::spawn(cch_tui_render::warm_up);
     let mut screen = Screen::new(&mode, fullscreen, theme.as_deref())?;
     let mut view = ChatView::new();
 
