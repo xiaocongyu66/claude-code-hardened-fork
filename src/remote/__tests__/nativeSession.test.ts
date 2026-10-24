@@ -253,10 +253,17 @@ describe('NativeSessionBridge', () => {
       },
     ])
 
-    // A duplicate delivery of the same request id is answered once.
+    // A duplicate delivery of the same request id (even after the first one
+    // completed) is ignored: one terminal response per request_id.
     transport.callbacks.onPermissionRequest(permissionRequest, 'remote-1')
     await flush()
     expect(transport.responses).toHaveLength(1)
+
+    // A different id is still an independent request.
+    transport.callbacks.onPermissionRequest(permissionRequest, 'remote-2')
+    await flush()
+    expect(transport.responses).toHaveLength(2)
+    expect(transport.responses[1]?.requestId).toBe('remote-2')
     bridge.disconnect()
   })
 

@@ -473,6 +473,9 @@ export interface NativeSessionBridgeOptions {
   describeDisconnect?: () => string | undefined
 }
 
+/** Cap on remembered terminal permission ids (oldest evicted first). */
+const MAX_ANSWERED_PERMISSIONS = 256
+
 /**
  * Connects a `SessionTransport` to the native host.
  *
@@ -492,6 +495,14 @@ export class NativeSessionBridge {
   private attached = false
   private disconnected = false
   private readonly pendingPermissions = new Set<string>()
+  /**
+   * Request ids that already received their terminal response. The protocol
+   * allows exactly one terminal response per request_id, so late duplicates
+   * (a re-send, or a second onPermissionRequest after the first resolved)
+   * must be ignored rather than opening the dialog again. Bounded because the
+   * id space is server-controlled.
+   */
+  private readonly answeredPermissions = new Set<string>()
 
   constructor(private readonly options: NativeSessionBridgeOptions) {
     this.adapter =
@@ -572,24 +583,47 @@ export class NativeSessionBridge {
     requestId: string,
   ): Promise<void> {
     if (this.disconnected || !this.host) return
-    // Servers may re-send the same request id; answer it once.
-    if (this.pendingPermissions.has(requestId)) return
+    // One terminal response per request_id: ignore while in flight and after
+    // it has been answered.
+    if (
+      this.pendingPermissions.has(requestId) ||
+      this.answeredPermissions.has(requestId)
+    ) {
+      return
+    }
     this.pendingPermissions.add(requestId)
     this.host.send(buildPermissionControlFrame(request, requestId))
     try {
       const decision = await this.host.requestPermission(requestId)
-      this.transport.respondToPermissionRequest(
+      this.respondOnce(
         requestId,
         permissionDecisionToResponse(decision, request.input ?? {}),
       )
     } catch {
-      this.transport.respondToPermissionRequest(requestId, {
+      this.respondOnce(requestId, {
         behavior: 'deny',
         message: 'Permission request failed',
       })
     } finally {
       this.pendingPermissions.delete(requestId)
     }
+  }
+
+  /**
+   * Record the terminal decision before writing it, so a throwing transport
+   * (or re-entrant duplicate) cannot produce a second response for the id.
+   */
+  private respondOnce(
+    requestId: string,
+    response: RemotePermissionResponse,
+  ): void {
+    if (this.answeredPermissions.has(requestId)) return
+    this.answeredPermissions.add(requestId)
+    if (this.answeredPermissions.size > MAX_ANSWERED_PERMISSIONS) {
+      const oldest = this.answeredPermissions.values().next().value
+      if (oldest !== undefined) this.answeredPermissions.delete(oldest)
+    }
+    this.transport.respondToPermissionRequest(requestId, response)
   }
 
   private handleDisconnected(): void {
