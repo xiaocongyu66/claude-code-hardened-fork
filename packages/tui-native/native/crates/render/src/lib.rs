@@ -7,6 +7,7 @@
 //! long sessions.
 
 use std::io::{self, Stdout};
+use std::ops::Range;
 use std::time::Instant;
 
 use cch_tui_theme::Theme;
@@ -48,24 +49,52 @@ pub enum OverlayPlacement {
 /// A list overlay drawn on top of the live view.
 ///
 /// `lines` are plain display rows; `selected` indexes into the visible window
-/// and is rendered with emphasis. The overlay is painted with a border and
-/// clears the cells underneath, matching the permission dialog.
+/// and is rendered with emphasis. `prompt` adds a query line above the list
+/// (history search), `highlights` carries per-line byte ranges to emphasise
+/// (the matching query) and `reverse_selected` swaps the selection style to
+/// reverse video. The overlay is painted with a border and clears the cells
+/// underneath, matching the permission dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Overlay {
     pub title: String,
+    pub prompt: Option<String>,
     pub lines: Vec<String>,
+    /// Byte ranges into the corresponding entry of [`Self::lines`].
+    pub highlights: Vec<Vec<Range<usize>>>,
     pub selected: Option<usize>,
     pub placement: OverlayPlacement,
+    pub reverse_selected: bool,
 }
 
 impl Overlay {
     pub fn new(title: impl Into<String>, lines: Vec<String>, selected: Option<usize>) -> Self {
         Self {
             title: title.into(),
+            prompt: None,
             lines,
+            highlights: Vec::new(),
             selected,
             placement: OverlayPlacement::AboveInput,
+            reverse_selected: false,
         }
+    }
+
+    /// Add a query line above the list (rendered dim).
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = Some(prompt.into());
+        self
+    }
+
+    /// Add per-line emphasis ranges matching [`Self::lines`].
+    pub fn with_highlights(mut self, highlights: Vec<Vec<Range<usize>>>) -> Self {
+        self.highlights = highlights;
+        self
+    }
+
+    /// Paint the selected row with reverse video instead of bold accent.
+    pub fn reversed_selection(mut self) -> Self {
+        self.reverse_selected = true;
+        self
     }
 
     pub fn centered(mut self) -> Self {
@@ -1061,39 +1090,150 @@ fn draw_overlay_list_styled(
     border: Style,
     selected_style: Style,
 ) {
+    draw_overlay_rows_styled(
+        frame,
+        rect,
+        title,
+        None,
+        lines,
+        &[],
+        selected,
+        border,
+        selected_style,
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+}
+
+/// Shared overlay painter: optional query line, highlighted rows and either a
+/// supplied selection style or reverse video.
+#[allow(clippy::too_many_arguments)]
+fn draw_overlay_rows_styled(
+    frame: &mut Frame,
+    rect: Rect,
+    title: &str,
+    prompt: Option<&str>,
+    lines: &[String],
+    highlights: &[Vec<Range<usize>>],
+    selected: Option<usize>,
+    border: Style,
+    selected_style: Style,
+    highlight_style: Style,
+) {
     if rect.width < 2 || rect.height < 2 {
         return;
     }
     let inner_width = rect.width.saturating_sub(2) as usize;
     let visible = rect.height.saturating_sub(2) as usize;
-    let rows: Vec<Line<'static>> = lines
-        .iter()
-        .take(visible)
-        .enumerate()
-        .map(|(index, text)| {
-            let style = if Some(index) == selected {
-                selected_style
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(truncate_to_width(text, inner_width), style))
-        })
-        .collect();
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    if let Some(prompt) = prompt
+        && visible > 0
+    {
+        rows.push(Line::from(Span::styled(
+            truncate_to_width(prompt, inner_width),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    let remaining = visible.saturating_sub(rows.len());
+    rows.extend(
+        lines
+            .iter()
+            .take(remaining)
+            .enumerate()
+            .map(|(index, text)| {
+                styled_overlay_line(
+                    text,
+                    highlights.get(index).map(Vec::as_slice).unwrap_or(&[]),
+                    inner_width,
+                    Some(index) == selected,
+                    selected_style,
+                    highlight_style,
+                )
+            }),
+    );
     frame.render_widget(Clear, rect);
     let block = Block::bordered().title(title).border_style(border);
     frame.render_widget(Paragraph::new(rows).block(block), rect);
 }
 
+/// One overlay row: clip to `width` columns, emphasise `ranges`, and apply
+/// the selection style to the whole row when `selected`.
+fn styled_overlay_line(
+    text: &str,
+    ranges: &[Range<usize>],
+    width: usize,
+    selected: bool,
+    selected_style: Style,
+    highlight_style: Style,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+    let clipped = UnicodeWidthStr::width(text) > width;
+    let budget = if clipped { width - 1 } else { width };
+    let mut chunks: Vec<(String, bool)> = Vec::new();
+    let mut used = 0usize;
+    for (start, ch) in text.char_indices() {
+        let char_width = ch.width().unwrap_or(0);
+        if used + char_width > budget {
+            break;
+        }
+        let end = start + ch.len_utf8();
+        let hit = ranges
+            .iter()
+            .any(|range| start >= range.start && end <= range.end);
+        push_chunk(&mut chunks, ch, hit);
+        used += char_width;
+    }
+    if clipped {
+        push_chunk(&mut chunks, '…', false);
+    }
+    let spans: Vec<Span<'static>> = chunks
+        .into_iter()
+        .map(|(text, hit)| {
+            let style = if selected {
+                if hit {
+                    selected_style.add_modifier(Modifier::BOLD)
+                } else {
+                    selected_style
+                }
+            } else if hit {
+                highlight_style
+            } else {
+                Style::default()
+            };
+            Span::styled(text, style)
+        })
+        .collect();
+    Line::from(spans)
+}
+
+fn push_chunk(chunks: &mut Vec<(String, bool)>, ch: char, hit: bool) {
+    match chunks.last_mut() {
+        Some((text, last_hit)) if *last_hit == hit => text.push(ch),
+        _ => chunks.push((ch.to_string(), hit)),
+    }
+}
+
 /// Paint `overlay` on top of the current frame.
 fn draw_overlay(frame: &mut Frame, area: Rect, input: &str, overlay: &Overlay, theme: &Theme) {
     let rect = overlay_rect(area, input, overlay);
-    draw_overlay_list_styled(
+    let selected_style = if overlay.reverse_selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(theme.palette.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    draw_overlay_rows_styled(
         frame,
         rect,
         &overlay.title,
+        overlay.prompt.as_deref(),
         &overlay.lines,
+        &overlay.highlights,
         overlay.selected,
         Style::default().fg(theme.palette.border),
+        selected_style,
         Style::default()
             .fg(theme.palette.accent)
             .add_modifier(Modifier::BOLD),
@@ -1112,7 +1252,8 @@ fn overlay_rect(area: Rect, input: &str, overlay: &Overlay) -> Rect {
         .saturating_div(10)
         .clamp(20, 78)
         .min(area.width);
-    let height = (overlay.lines.len() as u16 + 2).min(area.height);
+    let chrome = 2 + usize::from(overlay.prompt.is_some());
+    let height = (overlay.lines.len().saturating_add(chrome) as u16).min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = match overlay.placement {
         OverlayPlacement::Centered => area.y + area.height.saturating_sub(height) / 2,
@@ -2131,6 +2272,82 @@ mod tests {
 
         let centered = overlay_rect(area, "input", &overlay.clone().centered());
         assert_eq!(centered.y, 4);
+
+        // A query line above the list adds one row of chrome.
+        let with_prompt = overlay.with_prompt("> fix");
+        let rect = overlay_rect(area, "input", &with_prompt);
+        assert_eq!(rect.height, 5);
+        assert_eq!(rect.bottom(), 10);
+    }
+
+    #[test]
+    fn overlay_rows_prompt_highlights_and_reverses_the_selection() {
+        let selected_style = Style::default().add_modifier(Modifier::REVERSED);
+        let highlight_style = Style::default().add_modifier(Modifier::BOLD);
+
+        let line = styled_overlay_line(
+            "1/2  fix one",
+            &[Range { start: 5, end: 8 }],
+            40,
+            true,
+            selected_style,
+            highlight_style,
+        );
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>(),
+            ["1/2  ", "fix", " one"]
+        );
+        assert!(
+            line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // The match keeps reverse video and becomes bold.
+        assert!(
+            line.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+
+        let line = styled_overlay_line(
+            "1/2  fix one",
+            &[Range { start: 5, end: 8 }],
+            40,
+            false,
+            selected_style,
+            highlight_style,
+        );
+        assert!(
+            !line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            !line.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+
+        // Clipping appends an ellipsis and never exceeds the width.
+        let line = styled_overlay_line("abcdef", &[], 4, false, selected_style, highlight_style);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "abc…");
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 4);
     }
 
     #[test]

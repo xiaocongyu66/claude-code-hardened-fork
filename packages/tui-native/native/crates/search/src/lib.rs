@@ -25,6 +25,17 @@ pub struct Match {
     pub end: usize,
 }
 
+/// One row of the transcript-search overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayRow {
+    /// `N/M  <matched line summary>` text, cut to the requested width.
+    pub text: String,
+    /// Byte ranges of the query inside [`text`](Self::text), for emphasis.
+    pub highlights: Vec<Range<usize>>,
+    /// Whether this is the selected match.
+    pub current: bool,
+}
+
 /// Search state over a fixed list of rows.
 ///
 /// Rows are copied once at construction; call [`set_query`](Self::set_query)
@@ -140,7 +151,7 @@ impl TranscriptSearch {
             .iter()
             .take(max_visible)
             .enumerate()
-            .map(|(index, found)| self.result_line(index + 1, total, found, width))
+            .map(|(index, found)| self.result_parts(query, index + 1, total, found, width).0)
             .collect()
     }
 
@@ -152,6 +163,19 @@ impl TranscriptSearch {
     /// `bool` tells the overlay which row to highlight. At most `max_visible`
     /// rows are produced, truncated to `width` display columns.
     pub fn overlay_lines(&self, width: usize, max_visible: usize) -> Vec<(String, bool)> {
+        self.overlay_rows(width, max_visible)
+            .into_iter()
+            .map(|row| (row.text, row.current))
+            .collect()
+    }
+
+    /// Overlay rows with emphasis ranges for the active query.
+    ///
+    /// Each row is `N/M  <matched line summary>` cut to `width` display
+    /// columns; `highlights` holds byte ranges of every query occurrence in
+    /// the summary (never in the `N/M` prefix), and `current` marks the row
+    /// selected by [`next`](Self::next) / [`prev`](Self::prev).
+    pub fn overlay_rows(&self, width: usize, max_visible: usize) -> Vec<OverlayRow> {
         if width == 0 || max_visible == 0 {
             return Vec::new();
         }
@@ -161,10 +185,13 @@ impl TranscriptSearch {
             .take(max_visible)
             .enumerate()
             .map(|(index, found)| {
-                (
-                    self.result_line(index + 1, total, found, width),
-                    self.current == Some(index),
-                )
+                let (text, highlights) =
+                    self.result_parts(&self.query, index + 1, total, found, width);
+                OverlayRow {
+                    text,
+                    highlights,
+                    current: self.current == Some(index),
+                }
             })
             .collect()
     }
@@ -175,11 +202,29 @@ impl TranscriptSearch {
     }
 
     /// Render one `N/M  <summary>` result line, truncated to `width` columns.
-    fn result_line(&self, number: usize, total: usize, found: &Match, width: usize) -> String {
+    fn result_parts(
+        &self,
+        query: &str,
+        number: usize,
+        total: usize,
+        found: &Match,
+        width: usize,
+    ) -> (String, Vec<Range<usize>>) {
+        if width == 0 {
+            return (String::new(), Vec::new());
+        }
         let prefix = format!("{number}/{total}  ");
         let available = width.saturating_sub(display_width(&prefix));
         let summary = truncate_to_width(self.texts[found.row_index].trim(), available);
-        truncate_to_width(&format!("{prefix}{summary}"), width)
+        let prefix_bytes = prefix.len();
+        let highlights = find_ranges(&summary, query)
+            .into_iter()
+            .map(|range| prefix_bytes + range.start..prefix_bytes + range.end)
+            .collect();
+        (
+            truncate_to_width(&format!("{prefix}{summary}"), width),
+            highlights,
+        )
     }
 
     /// Scan every non-blank row for `query`, case-insensitively.
@@ -266,6 +311,28 @@ impl Lowered {
 }
 
 fn collect_matches(row_index: usize, text: &str, lowered_query: &str, matches: &mut Vec<Match>) {
+    let mut ranges = Vec::new();
+    collect_ranges(text, lowered_query, &mut ranges);
+    matches.extend(ranges.into_iter().map(|range| Match {
+        row_index,
+        start: range.start,
+        end: range.end,
+    }));
+}
+
+/// Case-insensitive byte ranges for `query` in `text`, using the same
+/// expansion-aware mapping as [`collect_matches`].
+fn find_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let lowered_query = query.to_lowercase();
+    if lowered_query.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    collect_ranges(text, &lowered_query, &mut ranges);
+    ranges
+}
+
+fn collect_ranges(text: &str, lowered_query: &str, ranges: &mut Vec<Range<usize>>) {
     debug_assert!(!lowered_query.is_empty());
     let lowered = Lowered::new(text);
     let mut from = 0;
@@ -280,11 +347,7 @@ fn collect_matches(row_index: usize, text: &str, lowered_query: &str, matches: &
         if lowered.boundary[start] && lowered.boundary[end] {
             let original_start = lowered.origin[start].0;
             let original_end = lowered.origin[end - 1].1;
-            matches.push(Match {
-                row_index,
-                start: original_start,
-                end: original_end,
-            });
+            ranges.push(original_start..original_end);
             from = end;
         } else {
             from = (start..=lowered.text.len())
@@ -536,6 +599,36 @@ mod tests {
         assert!(search.overlay_lines(40, 10).is_empty());
         assert!(search.overlay_lines(0, 10).is_empty());
         assert!(search.overlay_lines(40, 0).is_empty());
+    }
+
+    #[test]
+    fn overlay_rows_highlight_the_query_in_the_summary() {
+        let rows = [row("Foo one"), row("foo two")];
+        let mut search = TranscriptSearch::new(&rows);
+        search.set_query("foo");
+
+        let overlay = search.overlay_rows(40, 10);
+        assert_eq!(overlay[0].text, "1/2  Foo one");
+        assert_eq!(overlay[0].highlights, vec![5..8]);
+        assert!(overlay[0].current);
+        assert!(!overlay[1].current);
+
+        search.next();
+        let overlay = search.overlay_rows(40, 10);
+        assert!(!overlay[0].current);
+        assert!(overlay[1].current);
+        assert_eq!(overlay[1].highlights, vec![5..8]);
+
+        // Wide characters keep byte ranges on char boundaries.
+        let rows = [row("你好世界")];
+        let search = {
+            let mut search = TranscriptSearch::new(&rows);
+            search.set_query("世界");
+            search
+        };
+        let overlay = search.overlay_rows(40, 10);
+        assert_eq!(overlay[0].text, "1/1  你好世界");
+        assert_eq!(overlay[0].highlights, vec![11..17]);
     }
 
     #[test]

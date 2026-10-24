@@ -5,7 +5,9 @@
 //! channels to a child engine process; the napi crate wires them to the host
 //! TypeScript runtime.
 
+use std::collections::HashSet;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -248,6 +250,11 @@ pub fn run_interactive_with_mode(
     let mut resolver = Resolver::new(keymap.bindings(), &contexts, 800);
     let mut buffer = TextBuffer::new();
     let mut history = PromptHistory::default();
+    // Persisted history is loaded lazily the first time Ctrl+R opens the
+    // picker; `None` also means "not loaded yet".
+    let mut history_disk: Option<DiskHistory> = None;
+    let mut history_session_id: Option<String> = None;
+    let mut history_project_root: Option<String> = None;
     let mut transcript = TranscriptModel::new();
     let mut dialog: Option<PermissionDialog> = None;
     let mut search: Option<HistorySearch> = None;
@@ -297,6 +304,16 @@ pub fn run_interactive_with_mode(
                             palette.set_query(buffer.text());
                             palette_seen.clear();
                             palette_seen.push_str(buffer.text());
+                            history_session_id = extra
+                                .get("session_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned);
+                            history_project_root = extra
+                                .get("cwd")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned);
+                            // A new session may point at a different project.
+                            history_disk = None;
                         }
                         EngineEvent::ControlRequest {
                             request_id,
@@ -400,11 +417,15 @@ pub fn run_interactive_with_mode(
         // stays open (possibly empty) for any `/`-prefixed input, except while
         // the user is editing the arguments of an accepted command.
         let palette_hidden = palette_accept_prefix.is_some();
-        let overlay = transcript_search.as_ref().map(search_overlay).or_else(|| {
-            (!palette_hidden)
-                .then(|| palette_overlay(&palette))
-                .flatten()
-        });
+        let overlay = search
+            .as_ref()
+            .map(history_overlay)
+            .or_else(|| transcript_search.as_ref().map(search_overlay))
+            .or_else(|| {
+                (!palette_hidden)
+                    .then(|| palette_overlay(&palette))
+                    .flatten()
+            });
 
         match (dialog.as_ref(), fullscreen) {
             (Some(open), true) => {
@@ -444,44 +465,63 @@ pub fn run_interactive_with_mode(
                 // History search owns the keyboard while it is open.
                 if search.is_some() {
                     let mut close = false;
+                    let command = history_command(&key);
                     if let Some(active) = search.as_mut() {
-                        match key.code {
-                            KeyCode::Esc => {
+                        match command {
+                            HistoryCommand::Cancel => {
                                 active.cancel();
                                 close = true;
                             }
-                            KeyCode::Enter => {
+                            HistoryCommand::Accept => {
                                 if let Some(entry) = active.accept() {
                                     buffer.set_text(entry);
                                 }
                                 close = true;
                             }
-                            KeyCode::Up => {
+                            HistoryCommand::Previous => {
                                 active.prev();
                             }
-                            KeyCode::Down => {
+                            HistoryCommand::Next => {
                                 active.next();
                             }
-                            KeyCode::Backspace => {
+                            HistoryCommand::CycleScope => {
+                                ensure_history_disk(
+                                    &mut history_disk,
+                                    history_session_id.as_deref(),
+                                    history_project_root.as_deref(),
+                                );
+                                let (session, project, global) =
+                                    history_sources(&history, history_disk.as_ref());
+                                active.cycle_scope(&session, &project, &global);
+                            }
+                            HistoryCommand::Backspace => {
                                 let mut query = active.query.clone();
                                 query.pop();
-                                active.set_query(query, &history.entries);
+                                ensure_history_disk(
+                                    &mut history_disk,
+                                    history_session_id.as_deref(),
+                                    history_project_root.as_deref(),
+                                );
+                                let (session, project, global) =
+                                    history_sources(&history, history_disk.as_ref());
+                                active.set_query_scoped(query, &session, &project, &global);
                             }
-                            KeyCode::Char(ch)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
+                            HistoryCommand::Insert(ch) => {
                                 let mut query = active.query.clone();
                                 query.push(ch);
-                                active.set_query(query, &history.entries);
+                                ensure_history_disk(
+                                    &mut history_disk,
+                                    history_session_id.as_deref(),
+                                    history_project_root.as_deref(),
+                                );
+                                let (session, project, global) =
+                                    history_sources(&history, history_disk.as_ref());
+                                active.set_query_scoped(query, &session, &project, &global);
                             }
-                            _ => {}
+                            HistoryCommand::Ignore => {}
                         }
                         if !close {
-                            let total = active.matches.len();
-                            let position = if total == 0 { 0 } else { active.index + 1 };
-                            view.status =
-                                Some(format!("search: {} ({position}/{total})", active.query));
+                            view.status = Some(history_status(active));
                         }
                     }
                     if close {
@@ -868,13 +908,17 @@ pub fn run_interactive_with_mode(
                                 ));
                             }
                         } else if action == Action::HISTORY_SEARCH {
-                            let candidates: Vec<String> =
-                                history.entries().iter().rev().cloned().collect();
-                            search = Some(HistorySearch::with_matches(
-                                HistoryScope::Global,
-                                candidates,
-                            ));
-                            view.status = Some("search: (0/0)".into());
+                            ensure_history_disk(
+                                &mut history_disk,
+                                history_session_id.as_deref(),
+                                history_project_root.as_deref(),
+                            );
+                            let (session, project, global) =
+                                history_sources(&history, history_disk.as_ref());
+                            let mut active = HistorySearch::new(HistoryScope::Session);
+                            active.set_query_scoped("", &session, &project, &global);
+                            view.status = Some(history_status(&active));
+                            search = Some(active);
                         } else if let Some(intent) = vim_intent(action) {
                             vim_mode_changed = apply_vim_intent(intent, &mut vim, &mut buffer);
                         }
@@ -978,6 +1022,45 @@ fn palette_command(code: KeyCode, open: bool) -> Option<PaletteCommand> {
     }
 }
 
+/// What a key asks the history-search dialog to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryCommand {
+    Cancel,
+    Accept,
+    Previous,
+    Next,
+    CycleScope,
+    Backspace,
+    Insert(char),
+    Ignore,
+}
+
+/// Map a key to a history-search action. Ctrl+R cycles session → project →
+/// global; Enter/Tab insert the selection, Esc cancels, Up/Down and Ctrl+P/N
+/// move the cursor.
+fn history_command(key: &ratatui::crossterm::event::KeyEvent) -> HistoryCommand {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('r') => HistoryCommand::CycleScope,
+            KeyCode::Char('p') => HistoryCommand::Previous,
+            KeyCode::Char('n') => HistoryCommand::Next,
+            _ => HistoryCommand::Ignore,
+        };
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return HistoryCommand::Ignore;
+    }
+    match key.code {
+        KeyCode::Esc => HistoryCommand::Cancel,
+        KeyCode::Enter | KeyCode::Tab => HistoryCommand::Accept,
+        KeyCode::Up => HistoryCommand::Previous,
+        KeyCode::Down => HistoryCommand::Next,
+        KeyCode::Backspace => HistoryCommand::Backspace,
+        KeyCode::Char(ch) => HistoryCommand::Insert(ch),
+        _ => HistoryCommand::Ignore,
+    }
+}
+
 /// What a key asks the transcript search modal to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchCommand {
@@ -1001,7 +1084,15 @@ fn search_command(key: &ratatui::crossterm::event::KeyEvent, navigating: bool) -
         KeyCode::Backspace => return SearchCommand::Backspace,
         _ => {}
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+N / Ctrl+P cycle matches at any time, before or after Enter.
+        return match key.code {
+            KeyCode::Char('n') => SearchCommand::Next,
+            KeyCode::Char('p') => SearchCommand::Prev,
+            _ => SearchCommand::Ignore,
+        };
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
         return SearchCommand::Ignore;
     }
     match key.code {
@@ -1110,13 +1201,65 @@ fn palette_overlay(palette: &CommandPalette) -> Option<Overlay> {
     Some(Overlay::new(" Commands ", lines, selected))
 }
 
+/// The history-search dialog: scope in the title, query line, highlighted
+/// matches and a reverse-video selection.
+fn history_overlay(search: &HistorySearch) -> Overlay {
+    let rows = search.overlay_rows(74, MAX_HISTORY_ROWS);
+    let selected = rows.iter().position(|row| row.current);
+    let mut lines: Vec<String> = rows.iter().map(|row| row.text.clone()).collect();
+    let mut highlights: Vec<Vec<std::ops::Range<usize>>> =
+        rows.iter().map(|row| row.highlights.clone()).collect();
+    if lines.is_empty() {
+        lines.push(
+            if search.query.is_empty() {
+                "(no history)"
+            } else {
+                "(no matches)"
+            }
+            .to_string(),
+        );
+        highlights.push(Vec::new());
+    }
+    Overlay::new(
+        format!(" History Search · {} ", search.scope.label()),
+        lines,
+        selected,
+    )
+    .with_prompt(format!("> {}", search.query))
+    .with_highlights(highlights)
+    .reversed_selection()
+}
+
+/// Visible result rows in the history-search dialog.
+const MAX_HISTORY_ROWS: usize = 8;
+
+/// Lightweight status hint while the dialog is open.
+fn history_status(search: &HistorySearch) -> String {
+    let index = if search.matches.is_empty() {
+        0
+    } else {
+        search.index + 1
+    };
+    format!(
+        "search[{}]: {} ({index}/{})",
+        search.scope.label(),
+        search.query,
+        search.matches.len()
+    )
+}
+
 /// The transcript-search overlay with up to [`MAX_SEARCH_ROWS`] results.
 fn search_overlay(search: &TranscriptSearch) -> Overlay {
-    let lines = search.rows(search.query(), 76, MAX_SEARCH_ROWS);
-    let selected = search
-        .current_index()
-        .map(|index| index.min(lines.len().saturating_sub(1)));
-    Overlay::new(format!(" Search: {} ", search.query()), lines, selected).centered()
+    let rows = search.overlay_rows(76, MAX_SEARCH_ROWS);
+    let selected = rows.iter().position(|row| row.current);
+    let lines: Vec<String> = rows.iter().map(|row| row.text.clone()).collect();
+    let highlights: Vec<Vec<std::ops::Range<usize>>> =
+        rows.iter().map(|row| row.highlights.clone()).collect();
+    Overlay::new(format!(" Search: {} ", search.query()), lines, selected)
+        .with_prompt(format!("> {}", search.query()))
+        .with_highlights(highlights)
+        .reversed_selection()
+        .centered()
 }
 
 /// Visible result rows in the transcript-search overlay.
@@ -1126,6 +1269,113 @@ const MAX_SEARCH_ROWS: usize = 8;
 fn search_status(search: &TranscriptSearch) -> String {
     let index = search.current_index().map_or(0, |index| index + 1);
     format!("match {index}/{}", search.count())
+}
+
+/// Persisted prompt history, split by the three dialog scopes.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DiskHistory {
+    session: Vec<String>,
+    project: Vec<String>,
+    global: Vec<String>,
+}
+
+/// Most prompts kept per scope (matches Ink's `MAX_HISTORY_ITEMS`).
+const HISTORY_FILE_LIMIT: usize = 100;
+
+/// `$CLAUDE_CONFIG_DIR/history.jsonl`, or `~/.claude/history.jsonl`.
+fn history_file_path() -> Option<PathBuf> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".claude"))
+        })?;
+    Some(dir.join("history.jsonl"))
+}
+
+/// Load and partition the persisted history, tolerating missing files.
+fn load_history(path: &Path, project_root: Option<&str>, session_id: Option<&str>) -> DiskHistory {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return DiskHistory::default();
+    };
+    parse_history(&contents, project_root, session_id)
+}
+
+/// Parse `history.jsonl` newest-first. Each line carries `display`,
+/// `project` and an optional `sessionId`; malformed lines are skipped.
+fn parse_history(
+    contents: &str,
+    project_root: Option<&str>,
+    session_id: Option<&str>,
+) -> DiskHistory {
+    let mut history = DiskHistory::default();
+    let mut session_seen = HashSet::new();
+    let mut project_seen = HashSet::new();
+    let mut global_seen = HashSet::new();
+    for line in contents.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(display) = value
+            .get("display")
+            .and_then(serde_json::Value::as_str)
+            .filter(|display| !display.trim().is_empty())
+        else {
+            continue;
+        };
+        let project = value.get("project").and_then(serde_json::Value::as_str);
+        let session = value.get("sessionId").and_then(serde_json::Value::as_str);
+        push_history(&mut history.global, &mut global_seen, display);
+        if project.is_some_and(|project| Some(project) == project_root) {
+            push_history(&mut history.project, &mut project_seen, display);
+        }
+        if session.is_some_and(|session| Some(session) == session_id) {
+            push_history(&mut history.session, &mut session_seen, display);
+        }
+    }
+    history
+}
+
+fn push_history(list: &mut Vec<String>, seen: &mut HashSet<String>, entry: &str) {
+    if list.len() >= HISTORY_FILE_LIMIT {
+        return;
+    }
+    if seen.insert(entry.to_owned()) {
+        list.push(entry.to_owned());
+    }
+}
+
+/// Load the persisted history once per session/project.
+fn ensure_history_disk(
+    cache: &mut Option<DiskHistory>,
+    session_id: Option<&str>,
+    project_root: Option<&str>,
+) {
+    if cache.is_none() {
+        *cache = Some(
+            history_file_path()
+                .map(|path| load_history(&path, project_root, session_id))
+                .unwrap_or_default(),
+        );
+    }
+}
+
+/// Candidate lists for Ctrl+R: live session prompts first, then the persisted
+/// session/project/global partitions (missing history yields empty lists).
+fn history_sources(
+    history: &PromptHistory,
+    disk: Option<&DiskHistory>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut session: Vec<String> = history.entries().iter().rev().cloned().collect();
+    let (project, global) = match disk {
+        Some(disk) => {
+            session.extend(disk.session.iter().cloned());
+            (disk.project.clone(), disk.global.clone())
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    (session, project, global)
 }
 
 /// Snapshot the rows the search should scan for the current mode.
@@ -1885,6 +2135,24 @@ mod tests {
             search_command(&key(KeyCode::Char('f'), KeyModifiers::CONTROL), false),
             SearchCommand::Ignore
         );
+        // Ctrl+N / Ctrl+P cycle matches before and after Enter starts
+        // navigation.
+        assert_eq!(
+            search_command(&key(KeyCode::Char('n'), KeyModifiers::CONTROL), false),
+            SearchCommand::Next
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('p'), KeyModifiers::CONTROL), false),
+            SearchCommand::Prev
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('n'), KeyModifiers::CONTROL), true),
+            SearchCommand::Next
+        );
+        assert_eq!(
+            search_command(&key(KeyCode::Char('p'), KeyModifiers::CONTROL), true),
+            SearchCommand::Prev
+        );
     }
 
     #[test]
@@ -1916,10 +2184,140 @@ mod tests {
         assert_eq!(overlay.title, " Search: alpha ");
         assert_eq!(overlay.lines, vec!["1/2  alpha", "2/2  alpha again"]);
         assert_eq!(overlay.selected, Some(0));
+        assert_eq!(overlay.prompt.as_deref(), Some("> alpha"));
+        assert!(overlay.reverse_selected);
+        assert_eq!(overlay.highlights[0], vec![5..10]);
         assert_eq!(
             overlay.placement,
             cch_tui_render::OverlayPlacement::Centered
         );
+    }
+
+    #[test]
+    fn history_overlay_shows_scope_query_and_highlighted_hits() {
+        let mut search = HistorySearch::new(HistoryScope::Project);
+        search.set_query("fix", &["Fix one".to_owned(), "fix two".to_owned()]);
+        let overlay = history_overlay(&search);
+
+        assert_eq!(overlay.title, " History Search · project ");
+        assert_eq!(overlay.prompt.as_deref(), Some("> fix"));
+        assert_eq!(overlay.lines, ["1/2  Fix one", "2/2  fix two"]);
+        assert_eq!(overlay.selected, Some(0));
+        assert_eq!(overlay.highlights[0], vec![5..8]);
+        assert_eq!(overlay.highlights[1], vec![5..8]);
+        assert!(overlay.reverse_selected);
+        assert_eq!(
+            overlay.placement,
+            cch_tui_render::OverlayPlacement::AboveInput
+        );
+
+        search.next();
+        let overlay = history_overlay(&search);
+        assert_eq!(overlay.selected, Some(1));
+
+        let mut empty = HistorySearch::new(HistoryScope::Session);
+        empty.set_query("zzz", &["abc".to_owned()]);
+        let overlay = history_overlay(&empty);
+        assert_eq!(overlay.lines, ["(no matches)"]);
+        assert_eq!(overlay.selected, None);
+    }
+
+    #[test]
+    fn history_command_routes_navigation_scope_accept_and_cancel() {
+        use ratatui::crossterm::event::KeyEvent;
+
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let plain = KeyModifiers::NONE;
+        assert_eq!(
+            history_command(&key(KeyCode::Esc, plain)),
+            HistoryCommand::Cancel
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Enter, plain)),
+            HistoryCommand::Accept
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Tab, plain)),
+            HistoryCommand::Accept
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Up, plain)),
+            HistoryCommand::Previous
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Down, plain)),
+            HistoryCommand::Next
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Backspace, plain)),
+            HistoryCommand::Backspace
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Char('x'), plain)),
+            HistoryCommand::Insert('x')
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            HistoryCommand::CycleScope
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            HistoryCommand::Previous
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            HistoryCommand::Next
+        );
+        assert_eq!(
+            history_command(&key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            HistoryCommand::Ignore
+        );
+    }
+
+    #[test]
+    fn parse_history_partitions_and_dedupes_newest_first() {
+        let contents = [
+            r#"{"display":"one","project":"/p","sessionId":"s1"}"#,
+            r#"{"display":"two","project":"/q","sessionId":"s2"}"#,
+            r#"{"display":"one","project":"/p","sessionId":"s2"}"#,
+            "not json",
+            r#"{"display":"","project":"/p","sessionId":"s1"}"#,
+        ]
+        .join("\n");
+        let history = parse_history(&contents, Some("/p"), Some("s1"));
+        assert_eq!(history.global, ["one", "two"]);
+        assert_eq!(history.project, ["one"]);
+        assert_eq!(history.session, ["one"]);
+
+        // Missing scope identifiers leave only the global list.
+        let history = parse_history(&contents, None, None);
+        assert_eq!(history.global, ["one", "two"]);
+        assert!(history.project.is_empty());
+        assert!(history.session.is_empty());
+    }
+
+    #[test]
+    fn history_sources_merge_live_prompts_with_the_session_partition() {
+        let mut prompts = PromptHistory::default();
+        prompts.push("live one".into());
+        prompts.push("live two".into());
+        let disk = DiskHistory {
+            session: vec!["live two".to_owned(), "older".to_owned()],
+            project: vec!["project".to_owned()],
+            global: vec!["global".to_owned()],
+        };
+        let (session, project, global) = history_sources(&prompts, Some(&disk));
+        assert_eq!(session, ["live two", "live one", "live two", "older"]);
+        // Duplicates are removed when the query is applied.
+        let mut search = HistorySearch::new(HistoryScope::Session);
+        search.set_query_scoped("", &session, &project, &global);
+        assert_eq!(search.matches, ["live two", "live one", "older"]);
+        assert_eq!(project, ["project"]);
+        assert_eq!(global, ["global"]);
+
+        let (session, project, global) = history_sources(&prompts, None);
+        assert_eq!(session, ["live two", "live one"]);
+        assert!(project.is_empty() && global.is_empty());
     }
 
     #[test]
