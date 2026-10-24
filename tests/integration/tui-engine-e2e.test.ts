@@ -174,6 +174,10 @@ e2eDescribe('TUI engine E2E (mock Anthropic API)', () => {
       for (const key of PROVIDER_ENV_KEYS) {
         delete env[key]
       }
+      // `bun test` exports NODE_ENV=test, which turns on the VCR fixture layer
+      // in the child CLI. This test drives the mock server directly, so the
+      // child must not inherit the test environment.
+      delete env.NODE_ENV
       Object.assign(env, {
         ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.port}`,
         ANTHROPIC_API_KEY: 'test',
