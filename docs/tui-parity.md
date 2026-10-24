@@ -24,19 +24,19 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | per-message `Ctrl+O`; 3-line collapse; inline is frozen |
 | Task / agent panel | `TaskListV2.tsx`, `components/tasks/*` | ✅ `crates/panel` | status line + fullscreen sidebar |
 | Spinner / activity | `Spinner.tsx` | ✅ status line | frame advances while a turn runs |
-| Plan mode | `ExitPlanModePermissionRequest/*` | 🟡 view ready | `Ready to code?` + plan body; decision semantics in flight |
+| Plan mode | `ExitPlanModePermissionRequest/*` | ✅ | `Ready to code?` + plan body. Rows map to engine responses: auto-accept edits (`allow` + `setMode/acceptEdits` suggestion), manual approve (plain `allow`), keep planning (`deny` with the plan message). `Esc` sends one deny and restores the phase; engine `control_cancel_request` only closes the matching request, and late confirms are rejected. Ink's `Ctrl+G` ($EDITOR) plan-edit path is not wired: `can_use_tool` only carries allow/deny, so the native dialog offers the three decision rows |
 | Queued input display | `REPL.tsx` prompt queue | ✅ status line | `queued N`; prompts flush on `result` |
 | Sticky prompt | `VirtualMessageList.tsx` | ✅ fullscreen | `set_sticky_prompt` + `↓ N new` pill |
 | Global search | `GlobalSearchDialog.tsx` | 🟡 model ready (`crates/search`) | wiring in flight (Ctrl+F) |
 | @file completion | `fileSuggestions.ts` | ⬜ | engine-side index exists; TUI needs a picker |
 | Slash palette | slash command menu | 🟡 model ready (`crates/palette`) | wiring in flight |
-| Copy to clipboard | OSC52 / platform tools | 🟡 OSC52 only | `Ctrl+Y`/`Alt+C` copy the focused message, or the newest assistant reply when unfocused |
+| Copy to clipboard | OSC52 / platform tools | ✅ | `Ctrl+Y`/`Alt+C` copy the focused message, or the newest assistant reply when unfocused. Transports: OSC52 over SSH (then platform programs), otherwise `pbcopy` / `wl-copy` / `xclip` / `xsel` / `clip` first with OSC52 fallback; failures are silent (`crates/render/src/clipboard.rs`) |
 | Image paste | `imagePaste.ts`, `useClipboardImageHint` | ⛔ | no terminal image protocol; needs a clipboard image path |
-| Diff dialog | `diff/DiffDialog.tsx` | ⬜ | after Edit-tool diff wiring |
+| Diff dialog | `diff/DiffDialog.tsx` | ⛔ (deferred) | Minimal `/diff` overlay not wired: the frame stream carries per-Edit `structuredPatch` (already rendered inline as +/-/context rows) but no repository diff, which Ink fetches through host git commands. Needs a host command channel before the dialog is useful |
 | Settings/theme command | `Config.tsx` | 🟡 env `CCH_TUI_THEME` | `/theme` command later |
 | Trust / onboarding | `TrustDialog`, onboarding | ⛔ | engine owns trust; TUI starts after it |
 | Export / feedback | `ExportDialog`, `Feedback` | ⛔ | out of scope for the native TUI |
-| Legacy conhost | `legacyConsole.ts` | ⬜ | periodic full redraw on old Windows builds |
+| Legacy conhost | `legacyConsole.ts` | ✅ `crates/render/src/legacy.rs` | Windows build < 17763 auto-enables: one column narrower plus a full clear+repaint every 1000 ms. Env parity: `CCH_LEGACY_CONSOLE=0/1/2|always` (and the `CLAUDE_CODE_*` compat names), `..._RESET_MS` clamped to [100, 10000]. Non-Windows auto is off; pure logic has unit tests (`cmd /c ver` build detection is Windows-only) |
 
 ## Rules for porting
 
@@ -56,7 +56,7 @@ Verified against the Ink app; each row names the source of truth.
 | Prompt glyph | `figures.pointer` (`PromptInputModeIndicator.tsx:57`) | `❯ ` in `draw_prompt` | ✅ |
 | Message bullet | `BLACK_CIRCLE` = `⏺` (darwin) / `●` (`figures.ts:12`) | `message_bullet()` | ✅ |
 | Assistant prefix | `AssistantTextMessage.tsx:190-196` (bullet column, width 2) | first line `⏺ `, rest 2 spaces | ✅ |
-| Tool call label | `AssistantToolUseMessage.tsx:137-160` (`⏺ ` + bold name + `(input)`) | `⏺ ` + bold name + `(args)` spans | 🟡 args are a JSON summary, not `renderToolUseMessage()` |
+| Tool call label | `AssistantToolUseMessage.tsx:137-160` (`⏺ ` + bold name + `(input)`) | `⏺ ` + bold name + `(summary)` spans | ✅ per-tool summaries (`ui::tool_call_summary`): Bash/PowerShell command, Read/Edit/Write path, Glob/Grep `pattern: "..."` (+ path), WebFetch/WebSearch URL/query, Agent description; unknown tools fall back to the compact JSON, truncated to 80 chars |
 | Tool bullet colour | `ToolUseLoader.tsx:16` (success / error / dim while unresolved) | `ToolCallPending/ToolCall/ToolCallError` | ✅ |
 | Tool result gutter | `MessageResponse.tsx:20-25` (`  ⎿  ` dim, 5-col) | `  ⎿  ` + 5-space continuation | ✅ |
 | User prompt block | `UserPromptMessage.tsx:72-84`, `userMessageBackground` | full-width bg, 1 col right padding | ✅ |
@@ -69,8 +69,8 @@ Verified against the Ink app; each row names the source of truth.
 | Message meta header | `MessageRow.tsx:229-233`, `MessageTimestamp.tsx`, `MessageModel.tsx` (transcript mode only; assistant messages with a text block; 12-hour en-US clock; right-aligned, dim) | `RowStyle::MessageMeta` + right-aligned render; inline freeze drops it | ✅ OS local offset via `time` (UTC fallback); arrival time when the frame carries no timestamp |
 | Prompt send-now / queue-front | keymap table (`ctrl+enter` sendNow, `ctrl+x enter` queueSubmit) | `Ctrl+Enter` interrupts and sends; `Ctrl+X Enter` jumps the queue | ✅ |
 | Prose wrapping | `wrapAnsi` word wrap (`@anthropic/ink`) | `markdown::wrap_words` (space-first, hard-break overlong words/CJK) | ✅ |
-| Blockquote | `figures.BLOCKQUOTE_BAR` = `▎`, `utils/markdown.ts:64-71` (dim bar + italic text) | `▎ ` per level, italic body | 🟡 the bar shares the body style (Ink dims only the bar); needs a two-span row |
+| Blockquote | `figures.BLOCKQUOTE_BAR` = `▎`, `utils/markdown.ts:64-71` (dim bar + italic text) | `▎ ` per level: dim bar span + italic body span (both frozen and streaming paths) | ✅ |
 | Table layout | `MarkdownTable.tsx` (box grid, wrapped cells, centred headers, vertical fallback) | `markdown::render_table`: `┌─┬┐/├─┼┤/└─┴┘`, `MIN_COLUMN_WIDTH=3`, `MAX_ROW_LINES=4`, `SAFETY_MARGIN=4` | ✅ |
 | Link / image | `utils/markdown.ts:112-142` (`link` → text, `mailto:` → email, `image` → href) | same visible text; OSC 8 hyperlinks left to the painter | ✅ |
 | Block spacing | `markdown.ts` token stream (blank line between blocks) | one empty row between top-level blocks, painted as an empty line | ✅ |
-| Status line | `StatusLine.tsx` | model · session · ctx% · tasks · queue · spinner | 🟡 subset: Ink also shows cache hit rate, rate-limit windows and token budget, which the stream-json engine does not expose (Ink is settings-gated too) |
+| Status line | `StatusLine.tsx`, `BuiltinStatusLine.tsx` | model · session · ctx% · cache% · session% · weekly% · tasks · queue · spinner | ✅ for the data the engine frames expose: cache hit rate from assistant `usage` (`cache_read` / all prompt tokens) and five-hour/seven-day utilization from `rate_limit_event`. Token budget and cost remain unshown; Ink shows those settings-gated and the TUI status line stays one row |

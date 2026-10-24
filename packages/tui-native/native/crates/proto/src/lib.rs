@@ -41,6 +41,12 @@ pub enum EngineEvent {
         #[serde(flatten)]
         extra: Extra,
     },
+    /// Top-level `rate_limit_event` frame emitted by the SDK stream (it is not
+    /// wrapped in a `system` envelope).
+    RateLimitEvent {
+        #[serde(flatten)]
+        extra: Extra,
+    },
     ControlRequest {
         request_id: String,
         request: ControlRequest,
@@ -66,6 +72,7 @@ impl EngineEvent {
             EngineEvent::Assistant { .. } => "assistant",
             EngineEvent::StreamEvent { .. } => "stream_event",
             EngineEvent::Result { .. } => "result",
+            EngineEvent::RateLimitEvent { .. } => "rate_limit_event",
             EngineEvent::ControlRequest { .. } => "control_request",
             EngineEvent::ControlResponse { .. } => "control_response",
             EngineEvent::ControlCancelRequest { .. } => "control_cancel_request",
@@ -185,6 +192,7 @@ mod tests {
             r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"hi"}}"#,
             r#"{"type":"stream_event","uuid":"u3","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}}"#,
             r#"{"type":"result","subtype":"success","total_cost_usd":0.1}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","utilization":0.5}}"#,
         ]);
 
         assert!(matches!(&events[0], EngineEvent::System { subtype, .. } if subtype == "init"));
@@ -192,6 +200,7 @@ mod tests {
         assert!(matches!(&events[2], EngineEvent::User { .. }));
         assert!(matches!(&events[3], EngineEvent::StreamEvent { .. }));
         assert!(matches!(&events[4], EngineEvent::Result { .. }));
+        assert!(matches!(&events[5], EngineEvent::RateLimitEvent { .. }));
     }
 
     #[test]

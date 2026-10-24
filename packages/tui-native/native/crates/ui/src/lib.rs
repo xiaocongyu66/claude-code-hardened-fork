@@ -106,6 +106,13 @@ pub struct ChatView {
     pub panel_summary: Option<String>,
     /// Context-window usage in percent, when the engine reported it.
     pub context_percent: Option<f64>,
+    /// Cache hit rate from the latest assistant `usage` (`cache_read` over all
+    /// prompt tokens), matching `utils/cacheStats.ts::computeHitRate`.
+    pub cache_hit_percent: Option<u64>,
+    /// Five-hour session rate-limit utilization, from `rate_limit_event`.
+    pub rate_limit_session: Option<u64>,
+    /// Seven-day weekly rate-limit utilization, from `rate_limit_event`.
+    pub rate_limit_weekly: Option<u64>,
     /// Active message focus as `(index, total)`, both one-based. Shown on the
     /// status line while message actions are open.
     pub focus: Option<(usize, usize)>,
@@ -131,7 +138,12 @@ impl ChatView {
     pub fn ingest(&mut self, event: &EngineEvent) -> Vec<Row> {
         self.session.apply(event);
         match event {
-            EngineEvent::System { subtype, extra } => system_rows(subtype, extra),
+            EngineEvent::System { subtype, extra } => {
+                if subtype == "rate_limit_event" {
+                    self.record_rate_limit(extra);
+                }
+                system_rows(subtype, extra)
+            }
             EngineEvent::User { extra } => {
                 let rows = match structured_diff_rows(extra.get("tool_use_result")) {
                     Some(diff_rows) => diff_rows,
@@ -143,6 +155,7 @@ impl ChatView {
             }
             EngineEvent::Assistant { extra } => {
                 self.live_text.clear();
+                self.record_usage(extra.get("message"));
                 let mut rows = message_rows(extra.get("message"), true);
                 if let Some(meta) = message_meta_row(extra.get("message"), extra) {
                     rows.insert(0, meta);
@@ -156,6 +169,10 @@ impl ChatView {
                     self.live_text.push_str(&text);
                 }
                 Vec::new()
+            }
+            EngineEvent::RateLimitEvent { extra } => {
+                self.record_rate_limit(extra);
+                system_rows("rate_limit_event", extra)
             }
             EngineEvent::Result { extra } => {
                 let mut rows = Vec::new();
@@ -180,6 +197,44 @@ impl ChatView {
             EngineEvent::ControlCancelRequest { .. }
             | EngineEvent::KeepAlive
             | EngineEvent::Unknown => Vec::new(),
+        }
+    }
+
+    /// Update the cache hit-rate pill from an assistant message's `usage`.
+    fn record_usage(&mut self, message: Option<&Value>) {
+        let Some(usage) = message.and_then(|message| message.get("usage")) else {
+            return;
+        };
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or_default();
+        let read = count("cache_read_input_tokens");
+        let denominator = count("input_tokens") + count("cache_creation_input_tokens") + read;
+        if denominator > 0 {
+            self.cache_hit_percent =
+                Some((read as f64 / denominator as f64 * 100.0).round() as u64);
+        }
+    }
+
+    /// Update the status-line rate-limit buckets from `rate_limit_event`.
+    ///
+    /// `rate_limit_info.utilization` is a 0..=1 fraction; the engine emits the
+    /// event for five-hour and seven-day windows.
+    fn record_rate_limit(&mut self, extra: &serde_json::Map<String, Value>) {
+        // Older emitters may put the fields at the top level.
+        let info = extra
+            .get("rate_limit_info")
+            .and_then(Value::as_object)
+            .unwrap_or(extra);
+        let utilization = info
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .map(|fraction| (fraction * 100.0).round().clamp(0.0, 100.0) as u64);
+        let Some(percent) = utilization else {
+            return;
+        };
+        match info.get("rateLimitType").and_then(Value::as_str) {
+            Some("five_hour") => self.rate_limit_session = Some(percent),
+            Some("seven_day") => self.rate_limit_weekly = Some(percent),
+            _ => {}
         }
     }
 
@@ -265,6 +320,15 @@ impl ChatView {
             if let Some(percent) = self.context_percent {
                 line.push_str(&format!(" · {percent:.0}% ctx"));
             }
+            if let Some(percent) = self.cache_hit_percent {
+                line.push_str(&format!(" · cache {percent}%"));
+            }
+            if let Some(percent) = self.rate_limit_session {
+                line.push_str(&format!(" · session {percent}%"));
+            }
+            if let Some(percent) = self.rate_limit_weekly {
+                line.push_str(&format!(" · weekly {percent}%"));
+            }
             if let Some(summary) = &self.panel_summary
                 && !summary.is_empty()
             {
@@ -315,7 +379,8 @@ impl SessionView {
                     self.last_error = string_field(extra, "error");
                 }
             }
-            EngineEvent::ControlCancelRequest { .. }
+            EngineEvent::RateLimitEvent { .. }
+            | EngineEvent::ControlCancelRequest { .. }
             | EngineEvent::KeepAlive
             | EngineEvent::Unknown => {}
         }
@@ -711,14 +776,26 @@ fn block_rows(block: &Value, assistant: bool) -> Vec<Row> {
 /// whole JSON. Unknown tools fall back to a truncated compact payload.
 fn tool_call_summary(name: &str, input: &Value) -> String {
     let field = |key: &str| input.get(key).and_then(Value::as_str);
+    let pattern_summary = || {
+        let pattern = field("pattern")?;
+        Some(match field("path") {
+            Some(path) => format!("pattern: \"{pattern}\", path: \"{path}\""),
+            None => format!("pattern: \"{pattern}\""),
+        })
+    };
     let detail = match name.to_ascii_lowercase().as_str() {
+        // BashTool/UI.tsx `renderToolUseMessage`: the command itself.
         "bash" | "powershell" | "shell" => field("command").map(ToOwned::to_owned),
+        // FileRead/Edit/WriteTool/UI.tsx: the file path.
         "read" | "write" | "edit" | "notebookedit" => field("file_path")
             .or_else(|| field("notebook_path"))
             .map(ToOwned::to_owned),
-        "glob" | "grep" => field("pattern").map(ToOwned::to_owned),
+        // Glob/GrepTool/UI.tsx: `pattern: "..."`, plus an optional path.
+        "glob" | "grep" => pattern_summary(),
+        // WebFetchTool/UI.tsx: the URL.
         "webfetch" => field("url").map(ToOwned::to_owned),
         "websearch" => field("query").map(ToOwned::to_owned),
+        // AgentTool/UI.tsx: the short task description.
         "task" | "agent" => field("description")
             .or_else(|| field("prompt"))
             .map(ToOwned::to_owned),
@@ -796,6 +873,62 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use cch_tui_proto::parse_line;
+    use serde_json::json;
+
+    #[test]
+    fn tool_summaries_follow_each_tool_renderer() {
+        // Bash: the command, with newlines flattened.
+        assert_eq!(
+            tool_call_summary("Bash", &json!({"command": "ls -la\necho done"})),
+            "ls -la echo done"
+        );
+        // Read/Edit/Write: the path (not the whole input object).
+        assert_eq!(
+            tool_call_summary("Read", &json!({"file_path": "/tmp/a.rs", "limit": 5})),
+            "/tmp/a.rs"
+        );
+        assert_eq!(
+            tool_call_summary(
+                "Edit",
+                &json!({"file_path": "src/lib.rs", "old_string": "a"})
+            ),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            tool_call_summary("Write", &json!({"file_path": "b.txt", "content": "hi"})),
+            "b.txt"
+        );
+        // Glob/Grep: Ink quotes the pattern and appends an optional path.
+        assert_eq!(
+            tool_call_summary("Glob", &json!({"pattern": "**/*.rs"})),
+            "pattern: \"**/*.rs\""
+        );
+        assert_eq!(
+            tool_call_summary("Grep", &json!({"pattern": "TODO", "path": "src"})),
+            "pattern: \"TODO\", path: \"src\""
+        );
+        assert_eq!(
+            tool_call_summary(
+                "WebFetch",
+                &json!({"url": "https://example.com", "prompt": "x"})
+            ),
+            "https://example.com"
+        );
+        assert_eq!(
+            tool_call_summary(
+                "Agent",
+                &json!({"description": "find the bug", "prompt": "..."})
+            ),
+            "find the bug"
+        );
+        // Unknown tools keep the compact JSON fallback.
+        let unknown = tool_call_summary("Mystery", &json!({"x": 1}));
+        assert!(unknown.contains("\"x\":1"), "{unknown}");
+        // Unknown tools are truncated to a single line.
+        let long = tool_call_summary("Mystery", &json!({"x": "y".repeat(200)}));
+        assert_eq!(long.chars().count(), 81);
+        assert!(long.ends_with('…'), "{long}");
+    }
 
     #[test]
     fn folds_engine_events_into_the_session_view() {
@@ -843,6 +976,56 @@ mod tests {
             "{}",
             view.status_line()
         );
+    }
+
+    #[test]
+    fn status_line_shows_cache_hit_rate_from_usage() {
+        let mut view = ChatView::new();
+        view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[],"usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":700}}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(view.cache_hit_percent, Some(70));
+        assert!(
+            view.status_line().contains("cache 70%"),
+            "{}",
+            view.status_line()
+        );
+
+        // All-zero usage keeps the pill hidden.
+        let mut empty = ChatView::new();
+        empty.ingest(
+            &parse_line(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(empty.cache_hit_percent, None);
+    }
+
+    #[test]
+    fn status_line_shows_rate_limit_buckets() {
+        let mut view = ChatView::new();
+        // The SDK emits these as a top-level `rate_limit_event` frame.
+        view.ingest(
+            &parse_line(
+                r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","rateLimitType":"five_hour","utilization":0.42}}"#,
+            )
+            .unwrap(),
+        );
+        view.ingest(
+            &parse_line(
+                r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","utilization":0.1}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(view.rate_limit_session, Some(42));
+        assert_eq!(view.rate_limit_weekly, Some(10));
+        let line = view.status_line();
+        assert!(line.contains("session 42%"), "{line}");
+        assert!(line.contains("weekly 10%"), "{line}");
     }
 
     #[test]
