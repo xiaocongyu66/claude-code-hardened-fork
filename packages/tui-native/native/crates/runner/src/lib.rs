@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 use cch_tui_actions::{
     ExpandLimits, ExpandState, RowKey, block_starts, latest_assistant_text, project,
 };
-use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer, VimState};
+use cch_tui_core::{
+    FileCompletion, FileToken, HistoryScope, HistorySearch, TextBuffer, VimState, WorkspaceMatch,
+    WorkspaceSearch, insert_path,
+};
 use cch_tui_dialog::{DiffDialogState, FileDiff, PermissionDialog, parse_file_diff};
 use cch_tui_fullscreen::TranscriptModel;
 use cch_tui_keymap::{
@@ -72,6 +75,12 @@ pub enum TuiCommand {
     /// Ask the host for the current context usage. The host answers with a
     /// `control_response` engine event carrying `percent`.
     GetContextUsage { request_id: String },
+    /// Ask the host to resolve an `@file` completion query against its file
+    /// index. The host answers with a `system/file_suggestions` frame.
+    CompleteFile { request_id: String, query: String },
+    /// Ask the host to search workspace file contents. The host answers with
+    /// a `system/workspace_search_results` frame.
+    SearchWorkspace { request_id: String, query: String },
 }
 
 /// Why a [`TuiCommand`] JSON line could not be decoded.
@@ -115,6 +124,16 @@ impl TuiCommand {
                 "type": "get_context_usage",
                 "request_id": request_id,
             }),
+            Self::CompleteFile { request_id, query } => serde_json::json!({
+                "type": "complete_file",
+                "request_id": request_id,
+                "query": query,
+            }),
+            Self::SearchWorkspace { request_id, query } => serde_json::json!({
+                "type": "search_workspace",
+                "request_id": request_id,
+                "query": query,
+            }),
         };
         value.to_string()
     }
@@ -139,6 +158,28 @@ impl TuiCommand {
                     request_id: id.to_string(),
                 })
                 .ok_or(CommandError::Malformed("get_context_usage")),
+            "complete_file" | "search_workspace" => {
+                let label: &'static str = if kind == "complete_file" {
+                    "complete_file"
+                } else {
+                    "search_workspace"
+                };
+                let request_id = value
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(CommandError::Malformed(label))?
+                    .to_string();
+                let query = value
+                    .get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(CommandError::Malformed(label))?
+                    .to_string();
+                if kind == "complete_file" {
+                    Ok(Self::CompleteFile { request_id, query })
+                } else {
+                    Ok(Self::SearchWorkspace { request_id, query })
+                }
+            }
             "permission" => {
                 let request_id = value
                     .get("request_id")
@@ -187,6 +228,26 @@ pub enum TerminalMode {
 #[derive(Debug, Default)]
 pub struct RunReport {
     pub rows: Vec<Row>,
+}
+
+/// Debounce before dispatching a completion/search request.
+const FILE_COMPLETE_DEBOUNCE: Duration = Duration::from_millis(120);
+const WORKSPACE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// `@file` completion state: the live token, its bounded results and the
+/// pending debounce deadline.
+#[derive(Debug)]
+struct FileCompleteState {
+    token: FileToken,
+    completion: FileCompletion,
+    send_at: Option<Instant>,
+}
+
+/// Global workspace-search state: the modal query and its bounded hits.
+#[derive(Debug)]
+struct WorkspaceSearchState {
+    search: WorkspaceSearch,
+    send_at: Option<Instant>,
 }
 
 /// Run the interactive TUI until the user quits.
@@ -268,6 +329,12 @@ pub fn run_interactive_with_mode(
     let mut palette_seen = String::new();
     let mut transcript_search: Option<TranscriptSearch> = None;
     let mut search_navigating = false;
+    // `@file` completion and the global workspace search are independent
+    // overlays; `file_dismissed` remembers an Esc-closed token so it does not
+    // immediately reopen while the caret stays inside it.
+    let mut file_complete: Option<FileCompleteState> = None;
+    let mut file_dismissed: Option<FileToken> = None;
+    let mut workspace_search: Option<WorkspaceSearchState> = None;
     // After accepting a command, hide the palette while the input still starts
     // with the inserted text so arguments can be typed without a popup.
     let mut palette_accept_prefix: Option<String> = None;
@@ -318,6 +385,53 @@ pub fn run_interactive_with_mode(
                                 .map(str::to_owned);
                             // A new session may point at a different project.
                             history_disk = None;
+                        }
+                        EngineEvent::System { subtype, extra } if subtype == "file_suggestions" => {
+                            let request_id =
+                                extra.get("request_id").and_then(serde_json::Value::as_str);
+                            if let (Some(active), Some(request_id)) =
+                                (file_complete.as_mut(), request_id)
+                            {
+                                let files = extra
+                                    .get("files")
+                                    .and_then(serde_json::Value::as_array)
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(serde_json::Value::as_str)
+                                            .map(str::to_owned)
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                // `set_results` drops a response whose id no
+                                // longer matches the latest dispatched query.
+                                active.completion.set_results(request_id, files);
+                            }
+                        }
+                        EngineEvent::System { subtype, extra }
+                            if subtype == "workspace_search_results" =>
+                        {
+                            let request_id =
+                                extra.get("request_id").and_then(serde_json::Value::as_str);
+                            if let (Some(active), Some(request_id)) =
+                                (workspace_search.as_mut(), request_id)
+                            {
+                                let matches = extra
+                                    .get("matches")
+                                    .and_then(serde_json::Value::as_array)
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(parse_workspace_match)
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let truncated = extra
+                                    .get("truncated")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                active.search.set_results(request_id, matches, truncated);
+                            }
                         }
                         EngineEvent::ControlRequest {
                             request_id,
@@ -425,6 +539,9 @@ pub fn run_interactive_with_mode(
             view.spinner_frame = (started.elapsed().as_millis() / 120) as usize;
         }
         view.panel_summary = Some(panel.summary_line()).filter(|line| !line.is_empty());
+        sync_file_complete(&mut file_complete, &mut file_dismissed, &buffer);
+        dispatch_file_complete(&mut file_complete, &outbox, &mut request_seq);
+        dispatch_workspace_search(&mut workspace_search, &outbox, &mut request_seq);
         sync_palette(&mut palette, buffer.text(), &mut palette_seen);
         if palette_accept_prefix
             .as_deref()
@@ -443,6 +560,8 @@ pub fn run_interactive_with_mode(
             .as_ref()
             .map(history_overlay)
             .or_else(|| transcript_search.as_ref().map(search_overlay))
+            .or_else(|| workspace_search.as_ref().map(workspace_overlay))
+            .or_else(|| file_complete.as_ref().map(file_complete_overlay))
             .or_else(|| {
                 (!palette_hidden)
                     .then(|| palette_overlay(&palette))
@@ -685,6 +804,75 @@ pub fn run_interactive_with_mode(
                     continue;
                 }
 
+                // Global workspace search owns the keyboard while open. Enter
+                // inserts `@path:line ` at the prompt cursor (the native TUI
+                // has no external editor) and Esc closes.
+                if workspace_search.is_some() {
+                    let mut close = false;
+                    let mut insert: Option<String> = None;
+                    if let Some(active) = workspace_search.as_mut() {
+                        match key.code {
+                            KeyCode::Esc => close = true,
+                            KeyCode::Up => active.search.prev(),
+                            KeyCode::Down => active.search.next(),
+                            KeyCode::Enter => {
+                                insert = active.search.accept();
+                                close = true;
+                            }
+                            KeyCode::Backspace => {
+                                let mut query = active.search.query().to_string();
+                                query.pop();
+                                active.search.set_query(query);
+                                active.send_at = Some(Instant::now() + WORKSPACE_SEARCH_DEBOUNCE);
+                            }
+                            KeyCode::Char(ch)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                let mut query = active.search.query().to_string();
+                                query.push(ch);
+                                active.search.set_query(query);
+                                active.send_at = Some(Instant::now() + WORKSPACE_SEARCH_DEBOUNCE);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let inserted = insert.is_some();
+                    if let Some(text) = insert {
+                        let prefix = &buffer.text()[..buffer.cursor()];
+                        let needs_space = prefix
+                            .chars()
+                            .next_back()
+                            .is_some_and(|ch| !ch.is_whitespace());
+                        let insert = if needs_space {
+                            format!(" {text}")
+                        } else {
+                            text
+                        };
+                        buffer.insert_str(&insert);
+                        view.status = Some(format!("inserted {}", insert.trim()));
+                    }
+                    if close {
+                        workspace_search = None;
+                        if !inserted {
+                            view.status = None;
+                        }
+                    }
+                    continue;
+                }
+
+                // Ink binds global search to Ctrl+Shift+F (cmd+shift+f on
+                // macOS). Terminals that cannot distinguish Shift+Ctrl+F fall
+                // back to Ctrl+G, which the native TUI accepts as well.
+                if is_workspace_search_key(&key) {
+                    workspace_search = Some(WorkspaceSearchState {
+                        search: WorkspaceSearch::new(),
+                        send_at: None,
+                    });
+                    view.status = Some("workspace search".into());
+                    continue;
+                }
+
                 // Ctrl+F opens transcript search. It overrides the prompt's
                 // forward-char binding; Right still moves the cursor.
                 if key.code == KeyCode::Char('f')
@@ -695,6 +883,48 @@ pub fn run_interactive_with_mode(
                         Some(begin_transcript_search(&view, &transcript, fullscreen));
                     search_navigating = false;
                     view.status = (!fullscreen).then(|| "match 0/0".to_string());
+                    continue;
+                }
+
+                // `@file` completion owns Up/Down/Tab/Enter while it has
+                // rows; Esc dismisses the token until the caret leaves it.
+                let mut file_handled = false;
+                let mut file_close = false;
+                let mut file_accept: Option<String> = None;
+                if let Some(active) = file_complete.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            file_close = true;
+                            file_handled = true;
+                        }
+                        KeyCode::Up if !active.completion.is_empty() => {
+                            active.completion.prev();
+                            file_handled = true;
+                        }
+                        KeyCode::Down if !active.completion.is_empty() => {
+                            active.completion.next();
+                            file_handled = true;
+                        }
+                        KeyCode::Tab | KeyCode::Enter if !active.completion.is_empty() => {
+                            file_accept = active.completion.selected_path().map(str::to_owned);
+                            file_handled = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if file_handled {
+                    if let Some(path) = file_accept
+                        && let Some(active) = file_complete.as_ref()
+                    {
+                        let (text, cursor) = insert_path(buffer.text(), &active.token, &path);
+                        buffer.set_text(text);
+                        buffer.set_cursor(cursor);
+                    }
+                    if file_close {
+                        file_dismissed = file_complete.as_ref().map(|active| active.token.clone());
+                        file_complete = None;
+                        view.status = None;
+                    }
                     continue;
                 }
 
@@ -1093,6 +1323,195 @@ fn sync_vim_contexts(contexts: &mut ContextStack, vim: &VimState) {
     if vim.is_enabled() {
         contexts.push(vim_context(*vim));
     }
+}
+
+/// Keep the `@file` completion state in sync with the prompt.
+///
+/// The token is derived from the current buffer text/cursor. A token the user
+/// dismissed with Esc stays closed until it changes; a new or edited token
+/// opens a fresh completion (with a debounce before the request is sent).
+fn sync_file_complete(
+    state: &mut Option<FileCompleteState>,
+    dismissed: &mut Option<FileToken>,
+    buffer: &TextBuffer,
+) {
+    let Some(token) = FileToken::find(buffer.text(), buffer.cursor()) else {
+        *state = None;
+        *dismissed = None;
+        return;
+    };
+    if dismissed.as_ref() == Some(&token) {
+        *state = None;
+        return;
+    }
+    // A different token reopens completion even if an earlier one was
+    // dismissed.
+    *dismissed = None;
+    let replaced = match state.as_mut() {
+        Some(active) if active.token == token => false,
+        Some(active) if active.token.start == token.start && active.token.query == token.query => {
+            active.token = token.clone();
+            false
+        }
+        _ => true,
+    };
+    if replaced {
+        *state = Some(FileCompleteState {
+            token,
+            completion: FileCompletion::new(),
+            send_at: Some(Instant::now() + FILE_COMPLETE_DEBOUNCE),
+        });
+    }
+}
+
+/// Send a debounced `complete_file` once the deadline passes and the query
+/// differs from the last dispatch.
+fn dispatch_file_complete(
+    state: &mut Option<FileCompleteState>,
+    outbox: &Sender<TuiCommand>,
+    request_seq: &mut u64,
+) {
+    let Some(active) = state.as_mut() else {
+        return;
+    };
+    let Some(deadline) = active.send_at else {
+        return;
+    };
+    if Instant::now() < deadline {
+        return;
+    }
+    active.send_at = None;
+    if active.completion.sent_query() == Some(active.token.query.as_str()) {
+        return;
+    }
+    *request_seq = request_seq.wrapping_add(1);
+    let request_id = format!("file-{request_seq}");
+    if outbox
+        .send(TuiCommand::CompleteFile {
+            request_id: request_id.clone(),
+            query: active.token.query.clone(),
+        })
+        .is_ok()
+    {
+        active
+            .completion
+            .mark_sent(request_id, active.token.query.clone());
+    }
+}
+
+/// Send a debounced `search_workspace` for the modal query.
+fn dispatch_workspace_search(
+    state: &mut Option<WorkspaceSearchState>,
+    outbox: &Sender<TuiCommand>,
+    request_seq: &mut u64,
+) {
+    let Some(active) = state.as_mut() else {
+        return;
+    };
+    let Some(deadline) = active.send_at else {
+        return;
+    };
+    if Instant::now() < deadline {
+        return;
+    }
+    active.send_at = None;
+    let query = active.search.query().to_string();
+    if query.trim().is_empty() {
+        return;
+    }
+    *request_seq = request_seq.wrapping_add(1);
+    let request_id = format!("ws-{request_seq}");
+    if outbox
+        .send(TuiCommand::SearchWorkspace {
+            request_id: request_id.clone(),
+            query: query.clone(),
+        })
+        .is_ok()
+    {
+        active.search.mark_sent(request_id, query);
+    }
+}
+
+/// Parse one host-side `workspace_search_results` hit.
+fn parse_workspace_match(value: &serde_json::Value) -> Option<WorkspaceMatch> {
+    let path = value.get("path")?.as_str()?.to_string();
+    let line = value.get("line")?.as_u64()?;
+    let text = value
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some(WorkspaceMatch { path, line, text })
+}
+
+/// Ink binds global search to `ctrl+shift+f` / `cmd+shift+f`. Accept the
+/// shifted form under any case report plus `Ctrl+G`, which stays usable on
+/// terminals that fold Shift+Ctrl+F into Ctrl+F.
+fn is_workspace_search_key(key: &ratatui::crossterm::event::KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('F') => true,
+        KeyCode::Char('f') => key.modifiers.contains(KeyModifiers::SHIFT),
+        KeyCode::Char('g') | KeyCode::Char('G') => true,
+        _ => false,
+    }
+}
+
+/// The `@file` completion overlay while a token is live.
+fn file_complete_overlay(state: &FileCompleteState) -> Overlay {
+    let (rows, selected) = state
+        .completion
+        .visible(cch_tui_core::file_complete::MAX_ROWS);
+    let mut lines: Vec<String> = rows.into_iter().map(str::to_owned).collect();
+    if lines.is_empty() {
+        lines.push(
+            if state.completion.sent_query().is_some() {
+                "(no matches)"
+            } else {
+                "(searching…)"
+            }
+            .to_string(),
+        );
+    }
+    Overlay::new(" Files ", lines, selected).with_prompt(format!("> @{}", state.token.query))
+}
+
+/// The global workspace-search overlay: query line, `path:line  text` rows
+/// and a reverse-video selection.
+fn workspace_overlay(state: &WorkspaceSearchState) -> Overlay {
+    let (rows, selected) = state
+        .search
+        .visible(cch_tui_core::workspace_search::MAX_ROWS);
+    let mut lines: Vec<String> = rows
+        .into_iter()
+        .map(|hit| {
+            let text = hit.text.lines().next().unwrap_or_default().trim();
+            format!("{}:{}  {text}", hit.path, hit.line)
+        })
+        .collect();
+    if lines.is_empty() {
+        let query = state.search.query();
+        lines.push(
+            if query.trim().is_empty() {
+                "(type to search)"
+            } else if state.search.sent_query() == Some(query) {
+                "(no matches)"
+            } else {
+                "(searching…)"
+            }
+            .to_string(),
+        );
+    }
+    let mut overlay = Overlay::new(" Workspace Search ", lines, selected)
+        .with_prompt(format!("> {}", state.search.query()))
+        .reversed_selection()
+        .centered();
+    if state.search.truncated() {
+        overlay.title.push_str(" (truncated) ");
+    }
+    overlay
 }
 
 /// What a key asks the slash palette to do.
@@ -2609,6 +3028,17 @@ mod tests {
             },
             TuiCommand::Interrupt,
             TuiCommand::Exit,
+            TuiCommand::GetContextUsage {
+                request_id: "ctx-1".into(),
+            },
+            TuiCommand::CompleteFile {
+                request_id: "file-1".into(),
+                query: "src/ma".into(),
+            },
+            TuiCommand::SearchWorkspace {
+                request_id: "ws-1".into(),
+                query: "needle".into(),
+            },
         ];
         for command in commands {
             let json = command.to_json();
@@ -2636,6 +3066,22 @@ mod tests {
             .to_json(),
             r#"{"request_id":"r1","response":{"behavior":"deny"},"type":"permission"}"#
         );
+        assert_eq!(
+            TuiCommand::CompleteFile {
+                request_id: "f1".into(),
+                query: "src".into(),
+            }
+            .to_json(),
+            r#"{"query":"src","request_id":"f1","type":"complete_file"}"#
+        );
+        assert_eq!(
+            TuiCommand::SearchWorkspace {
+                request_id: "s1".into(),
+                query: "needle".into(),
+            }
+            .to_json(),
+            r#"{"query":"needle","request_id":"s1","type":"search_workspace"}"#
+        );
     }
 
     #[test]
@@ -2660,5 +3106,57 @@ mod tests {
             TuiCommand::from_json(r#"{"type":"permission","request_id":"r1"}"#),
             Err(CommandError::Malformed("permission"))
         ));
+        assert!(matches!(
+            TuiCommand::from_json(r#"{"type":"complete_file","request_id":"f1"}"#),
+            Err(CommandError::Malformed("complete_file"))
+        ));
+        assert!(matches!(
+            TuiCommand::from_json(r#"{"type":"search_workspace","query":"q"}"#),
+            Err(CommandError::Malformed("search_workspace"))
+        ));
+    }
+
+    #[test]
+    fn workspace_search_keys_match_ink_bindings() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert!(is_workspace_search_key(&key(
+            KeyCode::Char('F'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(is_workspace_search_key(&key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(is_workspace_search_key(&key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL
+        )));
+        // Plain Ctrl+F stays transcript search.
+        assert!(!is_workspace_search_key(&key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_workspace_search_key(&key(
+            KeyCode::Char('G'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT
+        )));
+    }
+
+    #[test]
+    fn parses_workspace_result_hits_and_rejects_partial_ones() {
+        let hit = parse_workspace_match(&serde_json::json!({
+            "path": "src/a.ts",
+            "line": 12,
+            "text": "needle",
+        }))
+        .expect("valid hit");
+        assert_eq!(hit.path, "src/a.ts");
+        assert_eq!(hit.line, 12);
+        assert_eq!(hit.text, "needle");
+
+        assert!(parse_workspace_match(&serde_json::json!({"path": "x"})).is_none());
+        assert!(parse_workspace_match(&serde_json::json!({"path": "x", "line": "nope"})).is_none());
     }
 }

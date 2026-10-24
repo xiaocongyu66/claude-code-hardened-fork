@@ -165,6 +165,63 @@ describe('runNativeTui', () => {
     expect((body.response as Record<string, unknown>).percent).toBe(42)
   })
 
+  test('answers complete_file and search_workspace with bounded system frames', async () => {
+    const mod = new FakeNativeModule()
+    mod.queue.push({
+      type: 'complete_file',
+      request_id: 'f1',
+      query: 'src',
+    })
+    mod.queue.push({
+      type: 'search_workspace',
+      request_id: 's1',
+      query: 'needle',
+    })
+
+    const workspaceMatch = (index: number) => ({
+      path: `src/f${index}.ts`,
+      line: index + 1,
+      text: 'needle',
+    })
+
+    const result = await runNativeTui({
+      nativeModule: mod,
+      completeFile: () =>
+        Array.from({ length: 101 }, (_, index) => `src/f${index}.ts`),
+      searchWorkspace: async () => ({
+        matches: Array.from({ length: 201 }, (_, index) =>
+          workspaceMatch(index),
+        ),
+        truncated: false,
+      }),
+      sleep: scriptedSleep(mod, [
+        () => ({ type: 'keep_alive' }),
+        () => ({ type: 'keep_alive' }),
+        () => ({ type: 'exit' }),
+      ]),
+      submitPrompt: async function* () {},
+    })
+
+    expect(result.started).toBe(true)
+    const suggestions = mod.sent.find(
+      frame =>
+        (frame as Record<string, unknown>).subtype === 'file_suggestions',
+    ) as Record<string, unknown> | undefined
+    expect(suggestions?.request_id).toBe('f1')
+    const files = suggestions?.files as string[] | undefined
+    expect(files?.length).toBe(100)
+
+    const workspace = mod.sent.find(
+      frame =>
+        (frame as Record<string, unknown>).subtype ===
+        'workspace_search_results',
+    ) as Record<string, unknown> | undefined
+    expect(workspace?.request_id).toBe('s1')
+    const matches = workspace?.matches as unknown[] | undefined
+    expect(matches?.length).toBe(200)
+    expect(workspace?.truncated).toBe(true)
+  })
+
   test('interrupt calls the injected abort and unknown frames are ignored', async () => {
     const mod = new FakeNativeModule()
     mod.queue.push({ type: 'mystery' })
