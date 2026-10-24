@@ -113,4 +113,6 @@ Bun process (engine)
 - `cch-tui` remains a development binary (`--replay`, `--bench-replay`,
   `--check-tui`) and is not distributed.
 - Missing/invalid addon or `is_supported() === false` (no TTY) falls back to the
-  Ink UI behind `CCH_TUI_NATIVE=1`.
+  Ink UI. The native TUI is the default for local interactive sessions
+  (`--tui auto`); Ink is opt-in via `--tui=ink`, `CCH_TUI=ink` or
+  `CCH_TUI_NATIVE=0`.

@@ -65,16 +65,20 @@ frame is sent when a base `canUseTool` is injected.
 
 ## CLI switch
 
-The native path is **off by default**:
+The native path is **on by default** for local interactive sessions:
 
 ```bash
-CCH_TUI_NATIVE=1 cch
+cch                 # --tui=auto: native when available, else Ink
+cch --tui=ink       # force the Ink REPL
+cch --tui=native    # require native; log a reason and fall back to Ink
+CCH_TUI=ink cch     # environment equivalent (CCH_TUI_NATIVE=0 also works)
 ```
 
-`src/replLauncher.tsx` checks the flag, requires a local interactive session
-(no remote/SSH/direct-connect), loads the module, and runs the host. If the
-module is missing or unsupported, the normal Ink REPL renders unchanged.
-The environment variable is the only switch — there is no config-file setting.
+Precedence: `--tui` > `CCH_TUI` > legacy `CCH_TUI_NATIVE` (`1` = native,
+`0` = ink) > `auto`. `src/replLauncher.tsx` resolves the mode, requires a
+local interactive session (no remote/SSH/direct-connect), loads the module,
+and runs the host. If the module is missing or unsupported, the normal Ink
+REPL renders unchanged. There is no config-file setting.
 
 ## Build and CI
 
@@ -145,4 +149,5 @@ Any of the following keeps the Ink REPL:
   payload in the compiled binary;
 - the loaded object lacks one of the five functions;
 - `is_supported()` returns false or throws;
-- the user runs with `CCH_TUI_NATIVE` unset (the default).
+- the user asks for Ink explicitly (`--tui=ink`, `CCH_TUI=ink`,
+  `CCH_TUI_NATIVE=0`, or an unsupported old boolean spelling).
