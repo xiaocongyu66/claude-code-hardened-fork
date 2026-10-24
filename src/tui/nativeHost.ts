@@ -5,7 +5,10 @@
  * the engine. Frames flow both ways:
  *
  *   engine events → send(JSON.stringify(event))   (assistant/stream_event/…)
- *   poll()       → prompt / permission / interrupt / exit
+ *   poll()       → prompt / permission / interrupt / exit / get_context_usage
+ *                  / complete_file / search_workspace
+ *   complete_file → system/file_suggestions response (bounded file list)
+ *   search_workspace → system/workspace_search_results response (bounded)
  *   canUseTool   → control_request can_use_tool frame; the terminal decision
  *                  arrives as a `permission` poll frame and resolves the
  *                  pending promise.
@@ -21,6 +24,22 @@ import type {
   TuiNativeModule,
   TuiStartOptions,
 } from '../utils/tuiNative.js'
+import type {
+  WorkspaceSearchMatch,
+  WorkspaceSearchResponse,
+} from './workspaceSearch.js'
+
+/** File paths returned for an `@` completion query (bounded by the host). */
+export type CompleteFileFn = (query: string) => Promise<string[]> | string[]
+
+/** Workspace content hits returned for a global-search query. */
+export type SearchWorkspaceFn = (
+  query: string,
+) => Promise<WorkspaceSearchResponse>
+
+/** Hard cap surfaced to the TUI even if a provider returns more. */
+const MAX_FILE_SUGGESTIONS = 100
+const MAX_WORKSPACE_RESULTS = 200
 
 /** Minimal permission answer shape carried by a `permission` poll frame. */
 export interface NativePermissionAnswer {
@@ -78,6 +97,16 @@ export interface RunNativeTuiDeps {
    * percentage from the newest `assistant.usage`.
    */
   getContextUsage?: () => Promise<number | null> | number | null
+  /**
+   * Resolve an `@file` completion query. Production uses the engine-side
+   * file index (`generateFileSuggestions`); tests inject a fake.
+   */
+  completeFile?: CompleteFileFn
+  /**
+   * Search workspace file contents. Production uses search-napi with a
+   * bounded TypeScript fallback; tests inject a fake.
+   */
+  searchWorkspace?: SearchWorkspaceFn
   /** Injected for deterministic tests; defaults to setTimeout. */
   sleep?: (ms: number) => Promise<void>
   onError?: (error: unknown) => void
@@ -92,6 +121,36 @@ const DEFAULT_POLL_INTERVAL_MS = 20
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Default `@file` provider: the same engine-side index Ink's typeahead uses.
+ * The dynamic import keeps the heavyweight index/config modules out of the
+ * host's load path until the first completion arrives.
+ */
+async function defaultCompleteFile(query: string): Promise<string[]> {
+  const { generateFileSuggestions } = await import(
+    '../hooks/fileSuggestions.js'
+  )
+  const items = await generateFileSuggestions(query, true)
+  return items
+    .map(item => item.displayText)
+    .filter(text => typeof text === 'string' && text.length > 0)
+    .slice(0, MAX_FILE_SUGGESTIONS)
+}
+
+/** Default workspace search: search-napi, then the bounded TS walk. */
+async function defaultSearchWorkspace(
+  query: string,
+): Promise<WorkspaceSearchResponse> {
+  const { searchWorkspace } = await import('./workspaceSearch.js')
+  return searchWorkspace(query)
+}
+
+/** Pick a non-empty string field from a poll frame. */
+function stringField(event: TuiNativeEvent, key: string): string | null {
+  const value = event[key]
+  return typeof value === 'string' ? value : null
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -396,6 +455,60 @@ export async function runNativeTui(
                 },
               })
             }
+            break
+          }
+          case 'complete_file': {
+            const requestId = stringField(event, 'request_id')
+            const query = stringField(event, 'query')
+            if (requestId === null || query === null) break
+            const completeFile = deps.completeFile ?? defaultCompleteFile
+            // Answer asynchronously: index lookups must never block polling
+            // for permission frames. Rust drops superseded request ids.
+            void (async () => {
+              let files: string[] = []
+              try {
+                files = (await completeFile(query)).slice(
+                  0,
+                  MAX_FILE_SUGGESTIONS,
+                )
+              } catch (error) {
+                onError(error)
+              }
+              sendFrame({
+                type: 'system',
+                subtype: 'file_suggestions',
+                request_id: requestId,
+                files,
+              })
+            })()
+            break
+          }
+          case 'search_workspace': {
+            const requestId = stringField(event, 'request_id')
+            const query = stringField(event, 'query')
+            if (requestId === null || query === null) break
+            const searchWorkspace =
+              deps.searchWorkspace ?? defaultSearchWorkspace
+            void (async () => {
+              let matches: WorkspaceSearchMatch[] = []
+              let truncated = false
+              try {
+                const result = await searchWorkspace(query)
+                matches = result.matches.slice(0, MAX_WORKSPACE_RESULTS)
+                truncated =
+                  result.truncated ||
+                  result.matches.length > MAX_WORKSPACE_RESULTS
+              } catch (error) {
+                onError(error)
+              }
+              sendFrame({
+                type: 'system',
+                subtype: 'workspace_search_results',
+                request_id: requestId,
+                matches,
+                truncated,
+              })
+            })()
             break
           }
           case 'interrupt': {
