@@ -145,6 +145,11 @@ fn target_area(frame: &Frame, legacy: bool) -> Rect {
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     fullscreen: bool,
+    /// `false` when the inline viewport could not be established (the
+    /// terminal did not answer the cursor-position query). The session then
+    /// falls back to a plain full-viewport terminal and `insert_rows` becomes
+    /// a no-op, so a flaky cursor probe can never blank the screen.
+    inline_ok: bool,
     theme: Theme,
     /// Prompt text pinned above the transcript while scrolled up.
     sticky_prompt: Option<String>,
@@ -169,17 +174,46 @@ impl TerminalSession {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnableBracketedPaste, Show)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::with_options(
-            backend,
+        // Viewport::Inline reads the cursor position (DSR, CSI 6n) on every
+        // draw. A terminal that never answers makes the first draw fail and we
+        // would blank the screen. Probe one draw now and, on failure, rebuild
+        // on a plain full-viewport terminal: the TUI keeps running (no
+        // scrollback freeze, full repaint) instead of exiting.
+        let probe = ChatView::new();
+        let inline = Terminal::with_options(
+            CrosstermBackend::new(stdout),
             TerminalOptions {
                 viewport: Viewport::Inline(height.max(4)),
             },
-        )?;
+        );
+        if let Ok(mut terminal) = inline
+            && terminal
+                .draw(|frame| {
+                    let theme = Theme::dark();
+                    draw_view_in(frame, frame.area(), &probe, &theme);
+                })
+                .is_ok()
+        {
+            let (legacy, legacy_redraw) = legacy_state(build_number);
+            return Ok(Self {
+                terminal,
+                fullscreen: false,
+                inline_ok: true,
+                theme: Theme::dark(),
+                sticky_prompt: None,
+                legacy,
+                legacy_redraw,
+            });
+        }
+        // DSR probe failed (or construction failed): fall back to a plain
+        // terminal. No scrollback freeze, but the UI stays visible.
+        let backend = CrosstermBackend::new(io::stdout());
+        let terminal = Terminal::new(backend)?;
         let (legacy, legacy_redraw) = legacy_state(build_number);
         Ok(Self {
             terminal,
             fullscreen: false,
+            inline_ok: false,
             theme: Theme::dark(),
             sticky_prompt: None,
             legacy,
@@ -203,6 +237,7 @@ impl TerminalSession {
         Ok(Self {
             terminal,
             fullscreen: true,
+            inline_ok: true,
             theme: Theme::dark(),
             sticky_prompt: None,
             legacy,
@@ -269,6 +304,12 @@ impl TerminalSession {
     /// an exact height (the inline viewport would otherwise scroll).
     pub fn insert_rows(&mut self, rows: &[Row]) -> io::Result<()> {
         if rows.is_empty() {
+            return Ok(());
+        }
+        if !self.inline_ok {
+            // No inline viewport: there is no scrollback to freeze into. The
+            // next draw repaints the whole view, which keeps the transcript
+            // visible even without DSR support.
             return Ok(());
         }
         // The per-message meta header is a full-screen affordance; Ink's inline
