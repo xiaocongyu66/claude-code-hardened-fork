@@ -50,6 +50,7 @@ import {
   type CompactionSessionEntry,
 } from './session/entries.js'
 import { estimateTokens } from './tokens/index.js'
+import { countContextTokens } from './tokens/contextCount.js'
 import { countMessagesForThreshold } from './tokens/messageCount.js'
 import { evaluateIdleTrigger } from './triggers/idle.js'
 import { evaluateIncompleteTrigger } from './triggers/incomplete.js'
@@ -940,7 +941,7 @@ export async function runCompactionV2ForQuery(
     countMessagesForThreshold(
       request.messages,
       request.model,
-      request.tokenCount,
+      () => countContextTokens(request.messages, request.model).tokens,
     )
 
   // Remote compaction is opt-in. Build the provider-bound transport lazily so
