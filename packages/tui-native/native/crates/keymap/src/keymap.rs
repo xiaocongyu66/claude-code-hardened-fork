@@ -30,6 +30,12 @@ pub const PROMPT_SPECS: &[BindingSpec] = &[
     // Enter submits; the Ink implementation also treats this as the
     // non-multiline default.
     BindingSpec::new(Context::PROMPT, &[Key::enter()], Action::PROMPT_SUBMIT),
+    // Ctrl+Enter bypasses the queue: it sends now, interrupting a running turn.
+    BindingSpec::new(
+        Context::PROMPT,
+        &[Key::enter().with_ctrl()],
+        Action::PROMPT_SEND_NOW,
+    ),
     BindingSpec::new(
         Context::PROMPT,
         &[Key::enter().with_shift()],
@@ -91,11 +97,12 @@ pub const PROMPT_SPECS: &[BindingSpec] = &[
     BindingSpec::new(Context::PROMPT, &[Key::end()], Action::EDIT_LINE_END),
     BindingSpec::new(Context::PROMPT, &[Key::backspace()], Action::EDIT_BACKSPACE),
     BindingSpec::new(Context::PROMPT, &[Key::delete()], Action::EDIT_DELETE),
-    // Explicit two-step submit, useful for terminals that rebind Enter.
+    // Explicit two-step queue submit: the draft jumps to the front of the
+    // pending queue without interrupting the current turn.
     BindingSpec::new(
         Context::PROMPT,
         &[Key::ctrl_char('x'), Key::enter()],
-        Action::PROMPT_SUBMIT,
+        Action::PROMPT_QUEUE_SUBMIT,
     ),
     BindingSpec::new(
         Context::PROMPT,
@@ -315,6 +322,11 @@ mod tests {
             Resolution::Action(Action::PROMPT_NEWLINE)
         );
         assert_eq!(
+            resolve(&stack, Key::enter().with_ctrl()),
+            Resolution::Action(Action::PROMPT_SEND_NOW),
+            "ctrl+enter sends now"
+        );
+        assert_eq!(
             resolve(&stack, Key::ctrl_char('c')),
             Resolution::Action(Action::APP_INTERRUPT)
         );
@@ -402,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn default_chord_submits_on_ctrl_x_enter() {
+    fn default_chord_queues_front_on_ctrl_x_enter() {
         let keymap = Keymap::default();
         let stack = prompt_stack();
         let mut resolver = keymap.resolver(&stack, 500);
@@ -412,7 +424,7 @@ mod tests {
         );
         assert_eq!(
             resolver.resolve(Key::enter(), 50),
-            Resolution::Action(Action::PROMPT_SUBMIT)
+            Resolution::Action(Action::PROMPT_QUEUE_SUBMIT)
         );
     }
 

@@ -766,7 +766,17 @@ pub fn run_interactive_with_mode(
                             } else {
                                 buffer.set_text("");
                             }
-                        } else if action == Action::PROMPT_SUBMIT {
+                        } else if action == Action::PROMPT_SUBMIT
+                            || action == Action::PROMPT_SEND_NOW
+                            || action == Action::PROMPT_QUEUE_SUBMIT
+                        {
+                            let mode = if action == Action::PROMPT_SEND_NOW {
+                                SubmitMode::SendNow
+                            } else if action == Action::PROMPT_QUEUE_SUBMIT {
+                                SubmitMode::QueueFront
+                            } else {
+                                SubmitMode::Normal
+                            };
                             submit(
                                 &mut view,
                                 &mut buffer,
@@ -778,6 +788,7 @@ pub fn run_interactive_with_mode(
                                 &outbox,
                                 &mut history,
                                 &mut queued_prompts,
+                                mode,
                             )?;
                         } else if action == Action::PROMPT_NEWLINE {
                             buffer.insert_str("\n");
@@ -1393,6 +1404,68 @@ struct ScreenTarget<'a> {
     fullscreen: bool,
 }
 
+/// How a submitted draft reaches the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitMode {
+    /// Enter: send when idle, append to the queue tail when busy.
+    Normal,
+    /// Ctrl+Enter: interrupt the running turn and send the draft now.
+    SendNow,
+    /// Ctrl+X Enter: insert at the queue front without interrupting.
+    QueueFront,
+}
+
+/// Commands and status produced by one submission. Kept free of rendering so
+/// the send/queue contract is unit-testable.
+#[derive(Debug, PartialEq)]
+struct SubmitPlan {
+    /// Engine commands, in the order they must be sent.
+    commands: Vec<TuiCommand>,
+    /// Status hint shown to the user.
+    status: &'static str,
+    /// Whether a prompt is sent immediately (rather than queued).
+    sends_prompt: bool,
+}
+
+/// Decide what a submission does. `queue` is only mutated for queue modes.
+fn plan_submit(mode: SubmitMode, busy: bool, draft: &str, queue: &mut Vec<String>) -> SubmitPlan {
+    match (mode, busy) {
+        (SubmitMode::Normal, false) => SubmitPlan {
+            commands: vec![TuiCommand::Prompt(draft.trim().to_string())],
+            status: "sent",
+            sends_prompt: true,
+        },
+        (SubmitMode::Normal, true) => {
+            queue.push(draft.to_string());
+            SubmitPlan {
+                commands: Vec::new(),
+                status: "queued",
+                sends_prompt: false,
+            }
+        }
+        (SubmitMode::SendNow, busy) => {
+            let mut commands = Vec::new();
+            if busy {
+                commands.push(TuiCommand::Interrupt);
+            }
+            commands.push(TuiCommand::Prompt(draft.trim().to_string()));
+            SubmitPlan {
+                commands,
+                status: "send now",
+                sends_prompt: true,
+            }
+        }
+        (SubmitMode::QueueFront, _) => {
+            queue.insert(0, draft.to_string());
+            SubmitPlan {
+                commands: Vec::new(),
+                status: "queued (front)",
+                sends_prompt: false,
+            }
+        }
+    }
+}
+
 fn submit(
     view: &mut ChatView,
     buffer: &mut TextBuffer,
@@ -1400,6 +1473,7 @@ fn submit(
     outbox: &Sender<TuiCommand>,
     history: &mut PromptHistory,
     queued_prompts: &mut Vec<String>,
+    mode: SubmitMode,
 ) -> io::Result<()> {
     let ScreenTarget {
         session,
@@ -1412,15 +1486,21 @@ fn submit(
         freeze(session, transcript, fullscreen, std::slice::from_ref(&row))?;
         view.completed.push(row);
         history.push(draft.clone());
-        if view.busy {
-            queued_prompts.push(draft.clone());
-            view.status = Some("queued".into());
-        } else if outbox
-            .send(TuiCommand::Prompt(draft.trim().to_string()))
-            .is_ok()
-        {
-            view.busy = true;
-            view.status = Some("sent".into());
+        let plan = plan_submit(mode, view.busy, &draft, queued_prompts);
+        let mut prompt_sent = false;
+        for command in plan.commands {
+            let is_prompt = matches!(command, TuiCommand::Prompt(_));
+            if outbox.send(command).is_ok() && is_prompt {
+                prompt_sent = true;
+            }
+        }
+        if plan.sends_prompt {
+            if prompt_sent {
+                view.busy = true;
+                view.status = Some(plan.status.into());
+            }
+        } else {
+            view.status = Some(plan.status.into());
         }
     }
     buffer.set_text("");
@@ -1638,6 +1718,9 @@ mod tests {
         let enter = KeyEvent::new(CKey::Enter, KeyModifiers::NONE);
         assert_eq!(to_key(&enter), Key::enter());
 
+        let ctrl_enter = KeyEvent::new(CKey::Enter, KeyModifiers::CONTROL);
+        assert_eq!(to_key(&ctrl_enter), Key::enter().with_ctrl());
+
         let ctrl_c = KeyEvent::new(CKey::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(to_key(&ctrl_c), Key::ctrl_char('c'));
 
@@ -1652,6 +1735,60 @@ mod tests {
             state: KeyEventState::NONE,
         };
         assert_eq!(to_key(&f1), Key::char('\0'));
+    }
+
+    #[test]
+    fn submit_normal_sends_when_idle_and_queues_at_the_tail_when_busy() {
+        let mut queue: Vec<String> = Vec::new();
+        let idle = plan_submit(SubmitMode::Normal, false, "hello", &mut queue);
+        assert_eq!(idle.commands, [TuiCommand::Prompt("hello".into())]);
+        assert!(queue.is_empty());
+        assert_eq!(idle.status, "sent");
+
+        let busy = plan_submit(SubmitMode::Normal, true, "later", &mut queue);
+        assert!(busy.commands.is_empty(), "queuing must not hit the engine");
+        assert_eq!(queue, ["later"]);
+
+        let busy = plan_submit(SubmitMode::Normal, true, "even later", &mut queue);
+        assert!(busy.commands.is_empty());
+        assert_eq!(queue, ["later", "even later"], "normal submit appends");
+        assert_eq!(busy.status, "queued");
+    }
+
+    #[test]
+    fn send_now_interrupts_busy_turn_then_prompts_and_joins_the_queue_when_idle() {
+        let mut queue = vec!["tail".to_string()];
+
+        let busy = plan_submit(SubmitMode::SendNow, true, " now ", &mut queue);
+        assert_eq!(
+            busy.commands,
+            [TuiCommand::Interrupt, TuiCommand::Prompt("now".into())],
+            "send now interrupts before prompting"
+        );
+        assert_eq!(queue, ["tail"], "send now bypasses the queue");
+        assert_eq!(busy.status, "send now");
+
+        let idle = plan_submit(SubmitMode::SendNow, false, "now", &mut queue);
+        assert_eq!(idle.commands, [TuiCommand::Prompt("now".into())]);
+        assert_eq!(queue, ["tail"]);
+    }
+
+    #[test]
+    fn queue_submit_inserts_at_the_front_without_interrupting() {
+        let mut queue = vec!["first".to_string(), "second".to_string()];
+
+        let plan = plan_submit(SubmitMode::QueueFront, true, "urgent", &mut queue);
+        assert!(plan.commands.is_empty(), "queue submit must not interrupt");
+        assert_eq!(
+            queue,
+            ["urgent", "first", "second"],
+            "queue submit jumps the pending queue"
+        );
+        assert_eq!(plan.status, "queued (front)");
+
+        // The head of the queue is what the drain loop sends next.
+        plan_submit(SubmitMode::QueueFront, true, "most urgent", &mut queue);
+        assert_eq!(queue[0], "most urgent");
     }
 
     #[test]
