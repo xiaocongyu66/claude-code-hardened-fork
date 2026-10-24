@@ -16,7 +16,7 @@ use cch_tui_actions::{
     ExpandLimits, ExpandState, RowKey, block_starts, latest_assistant_text, project,
 };
 use cch_tui_core::{HistoryScope, HistorySearch, TextBuffer, VimState};
-use cch_tui_dialog::PermissionDialog;
+use cch_tui_dialog::{DiffDialogState, FileDiff, PermissionDialog, parse_file_diff};
 use cch_tui_fullscreen::TranscriptModel;
 use cch_tui_keymap::{
     Action, Context, ContextStack, Key, KeyCode as KmKeyCode, Keymap, Modifiers as KmModifiers,
@@ -257,6 +257,10 @@ pub fn run_interactive_with_mode(
     let mut history_project_root: Option<String> = None;
     let mut transcript = TranscriptModel::new();
     let mut dialog: Option<PermissionDialog> = None;
+    let mut diff_dialog = DiffDialogState::new();
+    // Structured Edit/Write patches captured from user frames, keyed by the
+    // transcript row where their diff rows begin.
+    let mut diffs: Vec<DiffEntry> = Vec::new();
     let mut search: Option<HistorySearch> = None;
     // Slash palette and transcript search share the overlay slot; the palette
     // is driven by the input line, the transcript search owns a modal loop.
@@ -358,7 +362,20 @@ pub fn run_interactive_with_mode(
                         _ => {}
                     }
                     panel.apply_engine_event(&event);
+                    let diff_start = view.completed.len();
+                    let file_diff = match &event {
+                        EngineEvent::User { extra } => {
+                            parse_file_diff(extra.get("tool_use_result"))
+                        }
+                        _ => None,
+                    };
                     let frozen = view.ingest(&event);
+                    if let Some(file) = file_diff {
+                        diffs.push(DiffEntry {
+                            start: diff_start,
+                            file,
+                        });
+                    }
                     // Inline rows are frozen into scrollback and cannot be
                     // re-projected, so collapse only applies to fullscreen.
                     let projected = if fullscreen {
@@ -432,12 +449,18 @@ pub fn run_interactive_with_mode(
                     .flatten()
             });
 
-        match (dialog.as_ref(), fullscreen) {
-            (Some(open), true) => {
-                screen.draw_transcript_with_permission(&view, &mut transcript, open)?
+        // A pending permission dialog outranks the diff dialog; the diff
+        // dialog outranks the transcript and the list overlays.
+        if let Some(open) = dialog.as_ref() {
+            if fullscreen {
+                screen.draw_transcript_with_permission(&view, &mut transcript, open)?;
+            } else {
+                screen.draw_with_permission(&view, open)?;
             }
-            (Some(open), false) => screen.draw_with_permission(&view, open)?,
-            (None, true) => match overlay.as_ref() {
+        } else if let Some(open) = diff_dialog.as_mut() {
+            screen.draw_diff(&view, open)?;
+        } else if fullscreen {
+            match overlay.as_ref() {
                 Some(overlay) => screen.draw_transcript_with_overlay(
                     &view,
                     &mut transcript,
@@ -446,11 +469,12 @@ pub fn run_interactive_with_mode(
                 )?,
                 None if panel.is_empty() => screen.draw_transcript(&view, &mut transcript)?,
                 None => screen.draw_transcript_with_panel(&view, &mut transcript, &panel)?,
-            },
-            (None, false) => match overlay.as_ref() {
+            }
+        } else {
+            match overlay.as_ref() {
                 Some(overlay) => screen.draw_with_overlay(&view, overlay)?,
                 None => screen.draw(&view)?,
-            },
+            }
         }
 
         match next_event(&mode)? {
@@ -622,6 +646,45 @@ pub fn run_interactive_with_mode(
                     continue;
                 }
 
+                // The diff dialog is modal: it owns navigation and Esc closing.
+                if diff_dialog.is_open() {
+                    match key.code {
+                        KeyCode::Esc => diff_dialog.close(),
+                        KeyCode::Up => {
+                            if let Some(open) = diff_dialog.as_mut() {
+                                open.scroll_up();
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(open) = diff_dialog.as_mut() {
+                                open.scroll_down();
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            if let Some(open) = diff_dialog.as_mut() {
+                                open.page_up();
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            if let Some(open) = diff_dialog.as_mut() {
+                                open.page_down();
+                            }
+                        }
+                        KeyCode::Home => {
+                            if let Some(open) = diff_dialog.as_mut() {
+                                open.home();
+                            }
+                        }
+                        KeyCode::End => {
+                            if let Some(open) = diff_dialog.as_mut() {
+                                open.end();
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Ctrl+F opens transcript search. It overrides the prompt's
                 // forward-char binding; Right still moves the cursor.
                 if key.code == KeyCode::Char('f')
@@ -655,6 +718,34 @@ pub fn run_interactive_with_mode(
                             palette_seen.push_str(buffer.text());
                         }
                     }
+                    continue;
+                }
+
+                // `/diff` mirrors Ink's command: it opens the local
+                // structured-patch dialog instead of reaching the engine.
+                // Arguments are ignored (only Edit/Write patches exist here).
+                if key.code == KeyCode::Enter
+                    && key.modifiers.is_empty()
+                    && is_diff_command(buffer.text())
+                {
+                    let starts = block_starts(&view.completed);
+                    match target_diff(&diffs, &view, focus, &starts) {
+                        Some(file) => {
+                            diff_dialog.open(file.clone());
+                            view.status = None;
+                        }
+                        None => {
+                            view.status = Some(
+                                if focus.is_some() {
+                                    "no diff in focused message"
+                                } else {
+                                    "no diff available"
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                    buffer.set_text("");
                     continue;
                 }
 
@@ -1397,6 +1488,47 @@ fn begin_transcript_search(
     TranscriptSearch::new(&rows)
 }
 
+/// A structured patch captured from a tool result frame, keyed by the row
+/// where its diff rows start in the transcript.
+#[derive(Debug, Clone)]
+struct DiffEntry {
+    start: usize,
+    file: FileDiff,
+}
+
+/// True when the submitted draft is the local `/diff` command. Leading and
+/// trailing whitespace is ignored; arguments (e.g. `/diff src/lib.rs`) are
+/// accepted but unused because only per-tool-result patches are available.
+fn is_diff_command(text: &str) -> bool {
+    let text = text.trim();
+    text == "/diff" || text.starts_with("/diff ")
+}
+
+/// Pick the patch to show: the focused message's block, or the newest patch
+/// when no message is focused.
+fn target_diff<'a>(
+    diffs: &'a [DiffEntry],
+    view: &ChatView,
+    focus: Option<usize>,
+    starts: &[usize],
+) -> Option<&'a FileDiff> {
+    match focus {
+        Some(index) => {
+            let start = *starts.get(index)?;
+            let end = starts
+                .get(index + 1)
+                .copied()
+                .unwrap_or(view.completed.len());
+            diffs
+                .iter()
+                .rev()
+                .find(|entry| entry.start >= start && entry.start < end)
+                .map(|entry| &entry.file)
+        }
+        None => diffs.last().map(|entry| &entry.file),
+    }
+}
+
 /// Jump to the current search match. Inline mode has no transcript to scroll,
 /// so the status line is the only feedback (updated by the caller).
 fn jump_to_match(transcript: &mut TranscriptModel, fullscreen: bool, search: &TranscriptSearch) {
@@ -1510,6 +1642,17 @@ impl Screen {
     ) -> io::Result<()> {
         match self {
             Self::Tty(session) => session.draw_transcript_with_overlay(view, model, panel, overlay),
+            Self::Headless { .. } => Ok(()),
+        }
+    }
+
+    fn draw_diff(
+        &mut self,
+        _view: &ChatView,
+        dialog: &mut cch_tui_dialog::DiffDialog,
+    ) -> io::Result<()> {
+        match self {
+            Self::Tty(session) => session.draw_diff(dialog),
             Self::Headless { .. } => Ok(()),
         }
     }
@@ -2095,6 +2238,69 @@ mod tests {
         // A closed palette leaves the keys to prompt history/editing.
         assert_eq!(palette_command(KeyCode::Enter, false), None);
         assert_eq!(palette_command(KeyCode::Char('x'), true), None);
+    }
+
+    #[test]
+    fn diff_command_matches_the_slash_command_only() {
+        assert!(is_diff_command("/diff"));
+        assert!(is_diff_command("  /diff  "));
+        assert!(is_diff_command("/diff src/main.rs"));
+        assert!(!is_diff_command("/difficulty"));
+        assert!(!is_diff_command("/diffx"));
+        assert!(!is_diff_command(""));
+    }
+
+    #[test]
+    fn target_diff_prefers_the_focused_block_then_the_newest() {
+        use cch_tui_proto::parse_line;
+
+        let patch = |path: &str| {
+            parse_line(&format!(
+                r#"{{"type":"user","tool_use_result":{{"filePath":"{path}","structuredPatch":[{{"oldStart":1,"oldLines":1,"newStart":1,"newLines":2,"lines":[" same","+new"]}}]}},"message":{{"role":"user","content":[]}}}}"#
+            ))
+            .expect("frame")
+        };
+        let call = |id: &str| {
+            parse_line(&format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"Edit","input":{{}}}}]}}}}"#
+            ))
+            .expect("frame")
+        };
+
+        // Two tool-call blocks, each followed by its patch rows.
+        let mut view = ChatView::new();
+        let mut diffs: Vec<DiffEntry> = Vec::new();
+        for (id, path) in [("t1", "a.rs"), ("t2", "b.rs")] {
+            let start = view.completed.len();
+            view.ingest(&call(id));
+            let event = patch(path);
+            let EngineEvent::User { extra } = &event else {
+                panic!("expected user event");
+            };
+            let file = parse_file_diff(extra.get("tool_use_result")).expect("patch");
+            view.ingest(&event);
+            // The patch rows start after the call row.
+            diffs.push(DiffEntry {
+                start: start + 1,
+                file,
+            });
+        }
+        let starts = block_starts(&view.completed);
+        assert!(starts.len() >= 2, "{starts:?}");
+
+        // Unfocused: newest patch. Focused: only that block's patch.
+        assert_eq!(
+            target_diff(&diffs, &view, None, &starts).and_then(|file| file.path.as_deref()),
+            Some("b.rs")
+        );
+        assert_eq!(
+            target_diff(&diffs, &view, Some(0), &starts).and_then(|file| file.path.as_deref()),
+            Some("a.rs")
+        );
+        assert_eq!(
+            target_diff(&diffs, &view, Some(1), &starts).and_then(|file| file.path.as_deref()),
+            Some("b.rs")
+        );
     }
 
     #[test]

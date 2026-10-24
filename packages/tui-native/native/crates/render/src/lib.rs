@@ -470,6 +470,25 @@ impl TerminalSession {
         self.fullscreen
     }
 
+    /// Draw the full-screen structured-diff dialog.
+    ///
+    /// The dialog covers the frame, so the transcript underneath is not
+    /// repainted. Its viewport is updated from the current terminal size on
+    /// every call, which keeps scrolling clamped across resizes.
+    pub fn draw_diff(&mut self, dialog: &mut cch_tui_dialog::DiffDialog) -> io::Result<()> {
+        self.maybe_full_redraw()?;
+        let theme = self.theme;
+        let legacy = self.legacy;
+        let size = self.terminal.size()?;
+        // Borders (2) + footer (1) are chrome; the rest scrolls.
+        dialog.set_viewport(size.height.saturating_sub(3) as usize);
+        self.terminal.draw(|frame| {
+            let area = target_area(frame, legacy);
+            draw_diff_dialog_in(frame, area, dialog, &theme);
+        })?;
+        Ok(())
+    }
+
     /// Draw the live view with the permission dialog on top.
     pub fn draw_with_permission(
         &mut self,
@@ -1345,6 +1364,93 @@ const PLAN_APPROVAL_OPTIONS: [&str; 3] = [
 /// Most plan body lines rendered before truncating with an ellipsis.
 const MAX_PLAN_LINES: usize = 20;
 
+/// Footer/hint row of the diff dialog.
+const DIFF_FOOTER: &str = " esc close · ↑/↓ scroll · PgUp/PgDn ";
+
+/// Draw the structured-diff dialog across the whole frame.
+pub fn draw_diff_dialog(frame: &mut Frame, dialog: &cch_tui_dialog::DiffDialog, theme: &Theme) {
+    draw_diff_dialog_in(frame, frame.area(), dialog, theme);
+}
+
+/// [`draw_diff_dialog`] constrained to `area` (legacy consoles drop the last
+/// column).
+pub fn draw_diff_dialog_in(
+    frame: &mut Frame,
+    area: Rect,
+    dialog: &cch_tui_dialog::DiffDialog,
+    theme: &Theme,
+) {
+    frame.render_widget(Clear, area);
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    let block = Block::bordered()
+        .title(" Diff ")
+        .border_style(Style::default().fg(theme.palette.border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // One row is reserved for the fixed footer; everything above scrolls.
+    let content_height = inner.height.saturating_sub(1);
+    let lines: Vec<Line<'static>> = dialog
+        .visible_for(content_height as usize)
+        .iter()
+        .map(|line| diff_dialog_line(line, inner.width as usize, theme))
+        .collect();
+    let content = Rect::new(inner.x, inner.y, inner.width, content_height);
+    frame.render_widget(Paragraph::new(lines), content);
+
+    let footer = truncate_to_width(DIFF_FOOTER, inner.width as usize);
+    let footer_area = Rect::new(inner.x, inner.y + content_height, inner.width, 1);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
+            Style::default().fg(theme.palette.dim),
+        ))),
+        footer_area,
+    );
+}
+
+/// Style one document row. Added/removed rows use the same backgrounds as the
+/// inline transcript diff so both surfaces stay consistent.
+fn diff_dialog_line(
+    line: &cch_tui_dialog::DialogLine,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    use cch_tui_dialog::DialogLineKind;
+    let palette = theme.palette;
+    let dim = Style::default().fg(palette.dim);
+    let (text, style) = match line.kind {
+        DialogLineKind::FileHeader => (
+            line.text.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        DialogLineKind::Stats => (line.text.clone(), dim),
+        DialogLineKind::Divider => ("─".repeat(width), dim),
+        DialogLineKind::Hunk => (
+            line.text.clone(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        DialogLineKind::Context => (line.text.clone(), dim),
+        DialogLineKind::Added => (
+            line.text.clone(),
+            Style::default().bg(palette.diff_added_bg),
+        ),
+        DialogLineKind::Removed => (
+            line.text.clone(),
+            Style::default().bg(palette.diff_removed_bg),
+        ),
+        DialogLineKind::Empty => (line.text.clone(), dim),
+    };
+    Line::from(Span::styled(text, style))
+}
+
 /// Draw the permission dialog as a centered overlay.
 pub fn draw_permission(
     frame: &mut Frame,
@@ -2020,6 +2126,130 @@ mod tests {
         assert!(screen.contains("rm -rf /tmp/x"), "{screen}");
         assert!(screen.contains("> Allow once"), "{screen}");
         assert!(screen.contains("Deny"), "{screen}");
+    }
+
+    fn diff_fixture() -> cch_tui_dialog::FileDiff {
+        let hunk = cch_tui_dialog::DiffHunk {
+            old_start: 1,
+            old_lines: 2,
+            new_start: 1,
+            new_lines: 3,
+            number_width: 1,
+            lines: vec![
+                cch_tui_dialog::DiffLine {
+                    kind: cch_tui_dialog::DiffLineKind::Context,
+                    text: " fn main() {".into(),
+                    line_number: 1,
+                },
+                cch_tui_dialog::DiffLine {
+                    kind: cch_tui_dialog::DiffLineKind::Removed,
+                    text: "-    old();".into(),
+                    line_number: 2,
+                },
+                cch_tui_dialog::DiffLine {
+                    kind: cch_tui_dialog::DiffLineKind::Added,
+                    text: "+    new();".into(),
+                    line_number: 2,
+                },
+                cch_tui_dialog::DiffLine {
+                    kind: cch_tui_dialog::DiffLineKind::Added,
+                    text: "+    extra();".into(),
+                    line_number: 3,
+                },
+            ],
+        };
+        cch_tui_dialog::FileDiff {
+            path: Some("src/main.rs".into()),
+            hunks: vec![hunk],
+            added: 2,
+            removed: 1,
+        }
+    }
+
+    fn render_diff(dialog: &mut cch_tui_dialog::DiffDialog, width: u16, height: u16) -> String {
+        dialog.set_viewport(height.saturating_sub(3) as usize);
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_diff_dialog(frame, dialog, &Theme::dark()))
+            .expect("draw");
+        buffer_screen(&terminal)
+    }
+
+    #[test]
+    fn diff_dialog_renders_file_header_hunk_and_line_numbers() {
+        let mut dialog = cch_tui_dialog::DiffDialog::new(diff_fixture());
+        let screen = render_diff(&mut dialog, 60, 14);
+        assert!(screen.contains("┌ Diff"), "{screen}");
+        assert!(screen.contains("src/main.rs"), "{screen}");
+        assert!(screen.contains("+2 -1"), "{screen}");
+        assert!(screen.contains("@@ -1,2 +1,3 @@"), "{screen}");
+        assert!(screen.contains(" 1  fn main() {"), "{screen}");
+        assert!(screen.contains(" 2 -    old();"), "{screen}");
+        assert!(screen.contains(" 2 +    new();"), "{screen}");
+        assert!(screen.contains("esc close"), "{screen}");
+    }
+
+    #[test]
+    fn diff_dialog_styles_added_and_removed_backgrounds() {
+        let theme = Theme::dark();
+        let mut dialog = cch_tui_dialog::DiffDialog::new(diff_fixture());
+        dialog.set_viewport(11);
+        let backend = ratatui::backend::TestBackend::new(60, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_diff_dialog(frame, &dialog, &theme))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+
+        let mut added = false;
+        let mut removed = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                match cell.symbol() {
+                    "+" => added |= cell.style().bg == Some(theme.palette.diff_added_bg),
+                    "-" => removed |= cell.style().bg == Some(theme.palette.diff_removed_bg),
+                    _ => {}
+                }
+            }
+        }
+        assert!(added, "added marker should use the diffAdded background");
+        assert!(
+            removed,
+            "removed marker should use the diffRemoved background"
+        );
+    }
+
+    #[test]
+    fn diff_dialog_scrolls_and_survives_resize() {
+        let mut dialog = cch_tui_dialog::DiffDialog::new(diff_fixture());
+        dialog.set_viewport(3);
+        dialog.end();
+        let small = render_diff(&mut dialog, 50, 6);
+        assert!(small.contains("extra();"), "{small}");
+        assert!(!small.contains("fn main()"), "{small}");
+
+        // A taller window shows everything from the top; the stale offset is
+        // clamped by the renderer (and by the next key handling).
+        let large = render_diff(&mut dialog, 50, 20);
+        assert!(dialog.scroll() == 0, "scroll should clamp on resize");
+        assert!(large.contains("fn main()"), "{large}");
+        assert!(large.contains("extra();"), "{large}");
+    }
+
+    #[test]
+    fn diff_dialog_empty_patch_shows_placeholder() {
+        let file = cch_tui_dialog::FileDiff {
+            path: Some("new.rs".into()),
+            hunks: Vec::new(),
+            added: 0,
+            removed: 0,
+        };
+        let mut dialog = cch_tui_dialog::DiffDialog::new(file);
+        let screen = render_diff(&mut dialog, 40, 10);
+        assert!(screen.contains("new.rs"), "{screen}");
+        assert!(screen.contains("No diff content"), "{screen}");
     }
 
     fn render_permission_screen(
