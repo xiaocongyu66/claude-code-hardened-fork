@@ -292,6 +292,20 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # 发布前的真实加载验证：package job 已有本平台的 vendor/tui，直接走
+      # src/utils/tuiNative.ts 的加载器（dlopen + 五函数结构校验），而不是
+      # 只相信 cargo 编译通过。PTY 模式会完整跑 start → send(system:init) →
+      # poll ×20 → stop；失败阻塞打包。无 script(1) 时退化为 load-only。
+      - name: Smoke test native TUI module
+        run: |
+          set -euo pipefail
+          if command -v script >/dev/null 2>&1; then
+            script -qec "bun scripts/tui-native-smoke.ts" /dev/null
+          else
+            echo "::warning::script(1) not found — PTY path skipped, running load-only smoke (start() not called)"
+            CCH_TUI_SMOKE_NO_TTY=1 bun scripts/tui-native-smoke.ts
+          fi
+
       - name: One-shot build (bundle + npm tarball)
         run: node scripts/build-all.mjs --skip-native
 
