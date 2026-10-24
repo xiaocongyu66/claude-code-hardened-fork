@@ -18,7 +18,7 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Permission dialog | `permissions/PermissionRequest.tsx` | ✅ `crates/dialog` + overlay | allow/deny, suggestions, cancel |
 | Prompt editing | `PromptInput.tsx` | ✅ `TextBuffer` + `keymap` | multi-line, undo, kill ring, chords |
 | Paste folding | `PromptInput.tsx` (~1399) | ✅ `TextBuffer::insert_paste` | >800 chars or >2 newlines |
-| History search | `HistorySearchDialog.tsx` | 🟡 wired (Ctrl+R) | UI is a status line; dialog view pending |
+| History search | `HistorySearchDialog.tsx` | ✅ `crates/core::HistorySearch` + overlay | query line, numbered hits with highlighted matches, reverse-video selection; `Ctrl+R` cycles session → project → global (project/global read from `history.jsonl`, honouring `CLAUDE_CONFIG_DIR`); Enter/Tab inserts, Esc closes, status keeps `search[scope] q (i/n)` |
 | Vim mode | `PromptInput.tsx` (~2456) | ✅ `crates/core::vim` | env `CCH_TUI_VIM=1` |
 | Message actions | `messageActions.tsx` | ✅ focus/copy/expand | `Alt+Up/Down` focus (`msg i/n`), `Ctrl+Y`/`Alt+C` copy, `Ctrl+O` toggles the focused block, `Esc` clears; rewind awaits an engine op |
 | Tool output expand | `CtrlOToExpand.tsx` | ✅ fullscreen | per-message `Ctrl+O`; 3-line collapse; inline is frozen |
@@ -27,9 +27,10 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 | Plan mode | `ExitPlanModePermissionRequest/*` | 🟡 view ready | `Ready to code?` + plan body; decision semantics in flight |
 | Queued input display | `REPL.tsx` prompt queue | ✅ status line | `queued N`; prompts flush on `result` |
 | Sticky prompt | `VirtualMessageList.tsx` | ✅ fullscreen | `set_sticky_prompt` + `↓ N new` pill |
-| Global search | `GlobalSearchDialog.tsx` | 🟡 model ready (`crates/search`) | wiring in flight (Ctrl+F) |
-| @file completion | `fileSuggestions.ts` | ⬜ | engine-side index exists; TUI needs a picker |
-| Slash palette | slash command menu | 🟡 model ready (`crates/palette`) | wiring in flight |
+| Transcript search | `REPL.tsx` (`TranscriptSearchBar`) | ✅ `crates/search` + overlay | `Ctrl+F` opens a centered modal; Enter jumps, `n`/`N` (after Enter) and `Ctrl+N`/`Ctrl+P` cycle, Esc closes; query hits highlighted and the current hit reverse-selected; inline mode keeps `match i/n` on the status line |
+| Global workspace search | `GlobalSearchDialog.tsx` | ⬜ | no workspace file-content channel in the native TUI; needs the engine-side `search-napi` exposed as an RPC before a dialog can be wired |
+| @file completion | `fileSuggestions.ts` | ⬜ | blocked on protocol: `system/init` carries only `slash_commands` (no file list) and the engine-side `file-index` lives in the TS process. A picker needs an init/control channel that ships indexed paths (or an `@` query RPC); none added |
+| Slash palette | slash command menu | ✅ `crates/palette` + overlay | auto-opens for `/`-prefixed input; prefix then substring filter, hidden commands excluded; Up/Down select, Tab/Enter accept (inserts `/name <argumentHint>`), Esc dismisses; init `slash_commands` names (or metadata objects) populate it |
 | Copy to clipboard | OSC52 / platform tools | 🟡 OSC52 only | `Ctrl+Y`/`Alt+C` copy the focused message, or the newest assistant reply when unfocused |
 | Image paste | `imagePaste.ts`, `useClipboardImageHint` | ⛔ | no terminal image protocol; needs a clipboard image path |
 | Diff dialog | `diff/DiffDialog.tsx` | ⬜ | after Edit-tool diff wiring |
