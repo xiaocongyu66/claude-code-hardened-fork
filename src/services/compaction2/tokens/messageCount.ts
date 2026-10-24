@@ -58,9 +58,8 @@ function countMessage(message: Message, model: string): number {
     // Loaded lazily: utils/messages pulls the full tool/permission chain, and
     // the tokenizer layer must stay importable on its own (tests, CLI paths).
     /* eslint-disable @typescript-eslint/no-require-imports */
-    const messagesModule = require(
-      '../../../utils/messages.js'
-    ) as typeof import('../../../utils/messages.js')
+    const messagesModule =
+      require('../../../utils/messages.js') as typeof import('../../../utils/messages.js')
     const { normalizeAttachmentForAPI } = messagesModule
     /* eslint-enable @typescript-eslint/no-require-imports */
     let total = 0
@@ -99,9 +98,7 @@ function countBlock(block: unknown, model: string): number {
   const typed = block as Record<string, unknown>
   switch (typed.type) {
     case 'text':
-      return typeof typed.text === 'string'
-        ? countText(typed.text, model)
-        : 0
+      return typeof typed.text === 'string' ? countText(typed.text, model) : 0
     case 'image':
     case 'document':
       return IMAGE_TOKEN_ESTIMATE
@@ -116,9 +113,7 @@ function countBlock(block: unknown, model: string): number {
         ? countText(typed.thinking, model)
         : 0
     case 'redacted_thinking':
-      return typeof typed.data === 'string'
-        ? countText(typed.data, model)
-        : 0
+      return typeof typed.data === 'string' ? countText(typed.data, model) : 0
     default:
       return countText(stringify(block), model)
   }

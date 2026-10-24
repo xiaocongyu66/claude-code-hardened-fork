@@ -69,9 +69,7 @@ describe('countMessagesWithTokenizer', () => {
           content: 'abc hello',
         },
       ]),
-      assistant([
-        { type: 'tool_use', id: 't1', name: 'x', input: { a: 1 } },
-      ]),
+      assistant([{ type: 'tool_use', id: 't1', name: 'x', input: { a: 1 } }]),
       assistant([{ type: 'thinking', thinking: 'hello' }]),
       user([
         {
@@ -166,8 +164,6 @@ describe('countMessagesForThreshold', () => {
   })
 
   test('empty message lists count as zero with a tokenizer', () => {
-    expect(
-      countMessagesForThreshold([], 'mini/hf-basic-large', 50),
-    ).toBe(0)
+    expect(countMessagesForThreshold([], 'mini/hf-basic-large', 50)).toBe(0)
   })
 })
