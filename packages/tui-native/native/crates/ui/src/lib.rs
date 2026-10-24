@@ -24,6 +24,12 @@ pub enum RowStyle {
     ToolCallError,
     /// A tool result line, rendered with the `⎿` gutter.
     ToolResult,
+    /// A de-emphasized system line (hook progress, rate limits, task
+    /// notifications); painted with the theme's dim color.
+    Hook,
+    /// A warning-level system line (API retries); painted with the theme's
+    /// error color at normal intensity.
+    Warning,
     /// Markdown heading, carrying its level (`1..=6`).
     Heading(u8),
     /// A logical row made up entirely of inline code.
@@ -121,28 +127,25 @@ impl ChatView {
     pub fn ingest(&mut self, event: &EngineEvent) -> Vec<Row> {
         self.session.apply(event);
         match event {
-            EngineEvent::System { subtype, .. } => {
-                if subtype == "compact_boundary" {
-                    // Matches CompactBoundaryMessage in the Ink app.
-                    return vec![Row::new(
-                        RowStyle::System,
-                        "✻ Conversation compacted (ctrl+o for history)".to_string(),
-                    )];
-                }
-                Vec::new()
+            EngineEvent::System { subtype, extra } => {
+                let mut rows = system_rows(subtype, extra);
+                append_timestamp(&mut rows, extra);
+                rows
             }
             EngineEvent::User { extra } => {
-                let rows = match structured_diff_rows(extra.get("tool_use_result")) {
+                let mut rows = match structured_diff_rows(extra.get("tool_use_result")) {
                     Some(diff_rows) => diff_rows,
                     None => message_rows(extra.get("message"), false),
                 };
+                append_timestamp(&mut rows, extra);
                 self.resolve_tool_results(extra.get("message"));
                 self.completed.extend(rows.clone());
                 rows
             }
             EngineEvent::Assistant { extra } => {
                 self.live_text.clear();
-                let rows = message_rows(extra.get("message"), true);
+                let mut rows = message_rows(extra.get("message"), true);
+                append_timestamp(&mut rows, extra);
                 self.record_tool_calls(extra.get("message"), &rows);
                 self.completed.extend(rows.clone());
                 rows
@@ -316,6 +319,238 @@ impl SessionView {
             | EngineEvent::Unknown => {}
         }
     }
+}
+
+/// Rows for a `system` frame.
+///
+/// Mirrors the subtypes Ink renders through `SystemTextMessage` (compact
+/// boundary, hook progress, API retries, rate limits and task notifications).
+/// Anything else stays invisible.
+fn system_rows(subtype: &str, extra: &serde_json::Map<String, Value>) -> Vec<Row> {
+    match subtype {
+        // Matches CompactBoundaryMessage in the Ink app.
+        "compact_boundary" => vec![Row::new(
+            RowStyle::System,
+            "✻ Conversation compacted (ctrl+o for history)".to_string(),
+        )],
+        "hook_started" | "hook_progress" | "hook_response" => {
+            vec![Row::new(RowStyle::Hook, hook_line(subtype, extra))]
+        }
+        "api_retry" => vec![Row::new(RowStyle::Warning, api_retry_line(extra))],
+        "rate_limit_event" => vec![Row::new(RowStyle::Hook, rate_limit_line(extra))],
+        "task_notification" => vec![Row::new(RowStyle::Hook, task_notification_line(extra))],
+        _ => Vec::new(),
+    }
+}
+
+/// `  ⎿  {hook_name} {status}` for the three hook lifecycle frames.
+///
+/// Older emitters may omit `hook_name` (fall back to `hook_event`) or the
+/// output text; the status then describes the lifecycle phase instead.
+fn hook_line(subtype: &str, extra: &serde_json::Map<String, Value>) -> String {
+    let name = string_field(extra, "hook_name")
+        .or_else(|| string_field(extra, "hook_event"))
+        .unwrap_or_else(|| "hook".to_string());
+    let status = match subtype {
+        "hook_started" => "started".to_string(),
+        "hook_progress" => first_output_line(extra).unwrap_or_else(|| "running".to_string()),
+        _ => string_field(extra, "outcome")
+            .or_else(|| first_output_line(extra))
+            .unwrap_or_else(|| "done".to_string()),
+    };
+    format!("  ⎿  {name} {status}")
+}
+
+/// `API error · retrying in {n}s (attempt i/max)`.
+fn api_retry_line(extra: &serde_json::Map<String, Value>) -> String {
+    let attempt = extra.get("attempt").and_then(Value::as_u64).unwrap_or(0);
+    let max = extra
+        .get("max_retries")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let delay_ms = extra
+        .get("retry_delay_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let seconds = (delay_ms as f64 / 1000.0).round() as u64;
+    format!("API error · retrying in {seconds}s (attempt {attempt}/{max})")
+}
+
+/// `Rate limit: {status}` plus the reset clock when the frame carries one.
+///
+/// The SDK nests the payload under `rate_limit_info`; a top-level `status` is
+/// accepted too for older emitters.
+fn rate_limit_line(extra: &serde_json::Map<String, Value>) -> String {
+    let info = extra.get("rate_limit_info");
+    let status = info
+        .and_then(|info| info.get("status"))
+        .or_else(|| extra.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut line = format!("Rate limit: {status}");
+    if let Some(clock) = info.and_then(reset_clock) {
+        line.push_str(&format!(" · resets at {clock}"));
+    }
+    line
+}
+
+/// `✓ task {id} {status}`. The task panel keeps its own richer state; this is
+/// only the transcript breadcrumb.
+fn task_notification_line(extra: &serde_json::Map<String, Value>) -> String {
+    let id = string_field(extra, "task_id").unwrap_or_else(|| "?".to_string());
+    let status = string_field(extra, "status").unwrap_or_else(|| "unknown".to_string());
+    format!("✓ task {id} {status}")
+}
+
+/// First non-empty line of the hook `output` field.
+fn first_output_line(extra: &serde_json::Map<String, Value>) -> Option<String> {
+    let output = string_field(extra, "output")?;
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Extract the reset clock from `rate_limit_info.resetsAt`, which the SDK
+/// emits as epoch seconds but which may also arrive as an ISO string.
+fn reset_clock(info: &Value) -> Option<String> {
+    match info.get("resetsAt")? {
+        Value::Number(number) => {
+            let seconds = number
+                .as_i64()
+                .or_else(|| number.as_f64().map(|value| value as i64))?;
+            Some(epoch_hhmm(seconds))
+        }
+        Value::String(timestamp) => utc_hhmm(timestamp),
+        _ => None,
+    }
+}
+
+/// UTC `HH:MM` for epoch seconds. Days are discarded: the label only shows the
+/// time of day.
+fn epoch_hhmm(seconds: i64) -> String {
+    let seconds = seconds.rem_euclid(24 * 60 * 60);
+    format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
+}
+
+/// Append Ink's `  (HH:MM)` timestamp to the frame's last row when the frame
+/// carries an ISO8601 `timestamp` field.
+///
+/// The view model cannot reach the local timezone, so labels are rendered in
+/// UTC. An explicit zone designator (`Z`, `+08:00`, ...) is honoured; a naive
+/// timestamp is treated as UTC. Unparseable timestamps are ignored, matching
+/// Ink's fallback of simply not showing a time.
+fn append_timestamp(rows: &mut [Row], extra: &serde_json::Map<String, Value>) {
+    let Some(timestamp) = string_field(extra, "timestamp") else {
+        return;
+    };
+    let Some(clock) = utc_hhmm(&timestamp) else {
+        return;
+    };
+    if let Some(row) = rows.last_mut() {
+        row.text.push_str(&format!("  ({clock})"));
+    }
+}
+
+/// Parse an ISO8601 timestamp into a `HH:MM` clock, converted to UTC.
+///
+/// Only the date is validated for shape (it is otherwise unused); the time of
+/// day may include seconds and fractional seconds. Returns `None` for
+/// malformed input so callers can drop the timestamp instead of corrupting
+/// the row.
+fn utc_hhmm(timestamp: &str) -> Option<String> {
+    let (date, time) = timestamp
+        .split_once('T')
+        .or_else(|| timestamp.split_once(' '))?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?;
+    let month = date_parts.next()?;
+    let day = date_parts.next()?;
+    if date_parts.next().is_some()
+        || year.len() != 4
+        || month.len() != 2
+        || day.len() != 2
+        || !year
+            .chars()
+            .chain(month.chars())
+            .chain(day.chars())
+            .all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    let month: u32 = month.parse().ok()?;
+    let day: u32 = day.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let (clock, offset_minutes) = split_offset(time)?;
+    // Fractional seconds are irrelevant to an HH:MM label.
+    let clock = clock.split('.').next()?;
+    let mut parts = clock.split(':');
+    let hour = parts.next()?;
+    let minute = parts.next()?;
+    let seconds = parts.next();
+    if parts.next().is_some()
+        || hour.len() != 2
+        || minute.len() != 2
+        || !hour
+            .chars()
+            .chain(minute.chars())
+            .all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    let hour: i64 = hour.parse().ok()?;
+    let minute: i64 = minute.parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    if let Some(seconds) = seconds {
+        if seconds.len() != 2 || !seconds.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        if seconds.parse::<i64>().ok()? > 59 {
+            return None;
+        }
+    }
+    let total = (hour * 60 + minute - offset_minutes).rem_euclid(24 * 60);
+    Some(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
+/// Split a time of day from its UTC offset, returning `(clock, offset_minutes)`.
+fn split_offset(time: &str) -> Option<(&str, i64)> {
+    if let Some(clock) = time.strip_suffix('Z').or_else(|| time.strip_suffix('z')) {
+        return Some((clock, 0));
+    }
+    let Some(index) = time.rfind(['+', '-']) else {
+        return Some((time, 0));
+    };
+    let (clock, zone) = time.split_at(index);
+    let sign = if zone.starts_with('-') { -1 } else { 1 };
+    let zone = &zone[1..];
+    let (hour_part, minute_part) = match zone.find(':') {
+        Some(index) => (&zone[..index], &zone[index + 1..]),
+        None if zone.len() == 2 => (zone, "00"),
+        None if zone.len() == 4 => (&zone[..2], &zone[2..]),
+        None => return None,
+    };
+    if hour_part.len() != 2
+        || minute_part.len() != 2
+        || !hour_part
+            .chars()
+            .chain(minute_part.chars())
+            .all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    let hours: i64 = hour_part.parse().ok()?;
+    let minutes: i64 = minute_part.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some((clock, sign * (hours * 60 + minutes)))
 }
 
 /// Render `tool_use_result.structuredPatch` (Edit/Write results) as diff rows.
@@ -757,6 +992,166 @@ mod tests {
         assert_ne!(RowStyle::InlineCode, RowStyle::CodeBlock);
         assert_ne!(RowStyle::ListItem, RowStyle::Blockquote);
         assert_ne!(RowStyle::Assistant, RowStyle::Rule);
+    }
+
+    #[test]
+    fn hook_subtypes_become_dim_system_rows() {
+        let mut view = ChatView::new();
+        let started = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"lint","hook_event":"PreToolUse"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].style, RowStyle::Hook);
+        assert_eq!(started[0].text, "  ⎿  lint started");
+
+        let progress = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"hook_progress","hook_id":"h1","hook_name":"lint","hook_event":"PreToolUse","output":"checking files\nmore"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(progress[0].style, RowStyle::Hook);
+        assert_eq!(progress[0].text, "  ⎿  lint checking files");
+
+        let response = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"lint","hook_event":"PreToolUse","output":"","outcome":"error"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(response[0].text, "  ⎿  lint error");
+
+        // `hook_name` may be absent; `hook_event` and the lifecycle phase fill
+        // in. Empty progress output falls back to "running".
+        let fallback = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"hook_progress","hook_id":"h2","hook_event":"PostToolUse","output":""}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(fallback[0].text, "  ⎿  PostToolUse running");
+    }
+
+    #[test]
+    fn api_retry_becomes_a_warning_row() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"api_retry","attempt":2,"max_retries":4,"retry_delay_ms":1500,"error_status":529,"error":"server_error"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].style, RowStyle::Warning);
+        assert_eq!(rows[0].text, "API error · retrying in 2s (attempt 2/4)");
+    }
+
+    #[test]
+    fn rate_limit_includes_status_and_reset_clock() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1700000000}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows[0].style, RowStyle::Hook);
+        assert_eq!(rows[0].text, "Rate limit: rejected · resets at 22:13");
+
+        // Reset time is optional.
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows[0].text, "Rate limit: allowed_warning");
+    }
+
+    #[test]
+    fn task_notification_becomes_a_dim_breadcrumb() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"task_notification","task_id":"t42","status":"completed","output_file":"/tmp/o","summary":"done"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].style, RowStyle::Hook);
+        assert_eq!(rows[0].text, "✓ task t42 completed");
+    }
+
+    #[test]
+    fn unknown_system_subtypes_are_ignored() {
+        let mut view = ChatView::new();
+        for line in [
+            r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+            r#"{"type":"system","subtype":"something_new","content":"nope"}"#,
+        ] {
+            assert!(view.ingest(&parse_line(line).unwrap()).is_empty());
+        }
+        assert!(view.completed.is_empty());
+    }
+
+    #[test]
+    fn timestamp_is_appended_in_utc() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","timestamp":"2025-10-23T14:05:06.789Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows[0].text, "hello  (14:05)");
+
+        // An explicit offset is converted to UTC.
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","timestamp":"2025-10-23T22:05:06+08:00","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows[0].text, "hello  (14:05)");
+
+        // A naive timestamp is treated as UTC; multiline frames stamp their
+        // last row.
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"user","timestamp":"2025-10-23T09:30:00","message":{"role":"user","content":"one\ntwo"}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "one");
+        assert_eq!(rows[1].text, "two  (09:30)");
+    }
+
+    #[test]
+    fn unparseable_timestamps_are_ignored() {
+        let mut view = ChatView::new();
+        for timestamp in ["not-a-time", "2025-13-01T00:00:00Z", "2025-10-23T25:00:00Z"] {
+            let line = format!(
+                r#"{{"type":"assistant","timestamp":"{timestamp}","message":{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}}}}"#
+            );
+            let rows = view.ingest(&parse_line(&line).unwrap());
+            assert_eq!(rows[0].text, "hi", "timestamp {timestamp}");
+        }
+    }
+
+    #[test]
+    fn timestamp_applies_to_system_rows() {
+        let mut view = ChatView::new();
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"system","subtype":"hook_started","hook_name":"lint","hook_event":"PreToolUse","timestamp":"2025-10-23T00:01:00Z"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows[0].text, "  ⎿  lint started  (00:01)");
     }
 
     #[test]
