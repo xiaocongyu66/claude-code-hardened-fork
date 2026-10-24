@@ -65,7 +65,8 @@ frame is sent when a base `canUseTool` is injected.
 
 ## CLI switch
 
-The native path is **on by default** for local interactive sessions:
+The native path is **on by default** for local interactive sessions and for
+`claude ssh` / `claude connect`:
 
 ```bash
 cch                 # --tui=auto: native when available, else Ink
@@ -75,10 +76,11 @@ CCH_TUI=ink cch     # environment equivalent (CCH_TUI_NATIVE=0 also works)
 ```
 
 Precedence: `--tui` > `CCH_TUI` > legacy `CCH_TUI_NATIVE` (`1` = native,
-`0` = ink) > `auto`. `src/replLauncher.tsx` resolves the mode, requires a
-local interactive session (no remote/SSH/direct-connect), loads the module,
-and runs the host. If the module is missing or unsupported, the normal Ink
-REPL renders unchanged. There is no config-file setting.
+`0` = ink) > `auto`. `src/replLauncher.tsx` resolves the mode, requires an
+interactive session (local, `claude ssh` or `claude connect`), loads the
+module, and runs the host. KAIROS `--remote` still requires Ink. If the module
+is missing or unsupported, the normal Ink REPL renders unchanged. There is no
+config-file setting.
 
 ## Build and CI
 

@@ -188,6 +188,37 @@ describe('runNativeTui', () => {
     expect(mod.stopCalls).toBe(1)
   })
 
+  test('onHostReady registers external permission requests and onStop fires once', async () => {
+    const mod = new FakeNativeModule()
+    let pending: Promise<{ behavior: string }> | null = null
+    let stops = 0
+
+    const result = await runNativeTui({
+      nativeModule: mod,
+      onHostReady: controls => {
+        pending = controls.requestPermission('remote-1')
+      },
+      onStop: () => {
+        stops += 1
+      },
+      sleep: scriptedSleep(mod, [
+        () => ({ type: 'keep_alive' }),
+        () => ({
+          type: 'permission',
+          request_id: 'remote-1',
+          behavior: 'allow',
+        }),
+        () => ({ type: 'exit' }),
+      ]),
+      submitPrompt: async function* () {},
+    })
+
+    expect(result.started).toBe(true)
+    expect(stops).toBe(1)
+    const decision = await pending!
+    expect(decision.behavior).toBe('allow')
+  })
+
   test('returns not-started when no native module is available', async () => {
     const result = await runNativeTui({
       nativeModule: null,

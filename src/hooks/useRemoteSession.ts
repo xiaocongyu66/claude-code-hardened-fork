@@ -3,14 +3,13 @@ import { BoundedUUIDSet } from '../bridge/bridgeMessaging.js'
 import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
 import type { SpinnerMode } from '../components/Spinner/types.js'
 import {
-  type RemotePermissionResponse,
-  type RemoteSessionConfig,
-  RemoteSessionManager,
+  buildPermissionPrompt,
+  RemoteSessionTransport,
+} from '../remote/nativeSession.js'
+import type {
+  RemotePermissionResponse,
+  RemoteSessionConfig,
 } from '../remote/RemoteSessionManager.js'
-import {
-  createSyntheticAssistantMessage,
-  createToolStub,
-} from '../remote/remotePermissionBridge.js'
 import {
   convertSDKMessage,
   isSessionEndMessage,
@@ -18,12 +17,7 @@ import {
 import { useSetAppState } from '../state/AppState.js'
 import type { AppState } from '../state/AppStateStore.js'
 import type { Tool } from '../Tool.js'
-import { findToolByName } from '../Tool.js'
 import type { Message as MessageType } from '../types/message.js'
-import type {
-  PermissionAskDecision,
-  PermissionUpdate,
-} from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
 import { truncateToWidth } from '../utils/format.js'
 import {
@@ -121,7 +115,7 @@ export function useRemoteSession({
   // use a longer timeout and suppress spurious "unresponsive" warnings.
   const isCompactingRef = useRef(false)
 
-  const managerRef = useRef<RemoteSessionManager | null>(null)
+  const managerRef = useRef<RemoteSessionTransport | null>(null)
 
   // Track whether we've already updated the session title (for no-initial-prompt sessions)
   const hasUpdatedTitleRef = useRef(false)
@@ -156,7 +150,7 @@ export function useRemoteSession({
       `[useRemoteSession] Initializing for session ${config.sessionId}`,
     )
 
-    const manager = new RemoteSessionManager(config, {
+    const manager = new RemoteSessionTransport(config, {
       onMessage: sdkMessage => {
         const parts = [`type=${sdkMessage.type}`]
         if ('subtype' in sdkMessage)
@@ -343,33 +337,20 @@ export function useRemoteSession({
           `[useRemoteSession] Permission request for tool: ${request.tool_name}`,
         )
 
-        // Look up the Tool object by name, or create a stub for unknown tools
-        const tool =
-          findToolByName(toolsRef.current, request.tool_name) ??
-          createToolStub(request.tool_name)
-
-        const syntheticMessage = createSyntheticAssistantMessage(
+        const parts = buildPermissionPrompt(
           request,
           requestId,
+          toolsRef.current,
         )
 
-        const permissionResult: PermissionAskDecision = {
-          behavior: 'ask',
-          message:
-            request.description ?? `${request.tool_name} requires permission`,
-          suggestions: request.permission_suggestions as PermissionUpdate[],
-          blockedPath: request.blocked_path,
-        }
-
         const toolUseConfirm: ToolUseConfirm = {
-          assistantMessage: syntheticMessage,
-          tool,
-          description:
-            request.description ?? `${request.tool_name} requires permission`,
-          input: request.input,
+          assistantMessage: parts.syntheticMessage,
+          tool: parts.tool,
+          description: parts.description,
+          input: parts.input,
           toolUseContext: {} as ToolUseConfirm['toolUseContext'],
-          toolUseID: request.tool_use_id,
-          permissionResult,
+          toolUseID: parts.toolUseID,
+          permissionResult: parts.permissionResult,
           permissionPromptStartTimeMs: Date.now(),
           onUserInteraction() {
             // No-op for remote — classifier runs on the container

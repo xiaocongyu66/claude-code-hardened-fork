@@ -41,10 +41,29 @@ export interface NativePermissionEvent extends TuiNativeEvent {
   decision?: NativePermissionAnswer | PermissionDecision | Promise<unknown>
 }
 
+/**
+ * Capabilities handed to the caller once the TUI is running. Remote session
+ * bridges use them to inject SDK frames and to register permission requests
+ * that originate from a transport rather than `canUseTool`.
+ */
+export interface NativeHostControls {
+  send(frame: unknown): void
+  requestPermission(requestId: string): Promise<PermissionDecision>
+  /** End the host loop (used when a transport dies and cannot recover). */
+  shutdown(): void
+}
+
 export interface RunNativeTuiDeps {
   /** Injected in tests; production resolves `loadTuiNative()` lazily. */
   nativeModule?: TuiNativeModule | null
   options?: TuiStartOptions
+  /**
+   * Called after `start()` succeeds and before the poll loop runs. External
+   * session bridges connect their transport here.
+   */
+  onHostReady?: (controls: NativeHostControls) => void
+  /** Called exactly once when the host stops (exit, error or start failure). */
+  onStop?: () => void
   /**
    * Runs one turn and yields engine events (QueryEngine/query async
    * generator). Receives the wrapped permission function to hand to the
@@ -221,10 +240,34 @@ export async function runNativeTui(
     }
     pendingPermissions.clear()
     try {
+      deps.onStop?.()
+    } catch (error) {
+      onError(error)
+    }
+    try {
       native.stop()
     } catch (error) {
       onError(error)
     }
+  }
+
+  /**
+   * Register a permission request that did not come from `canUseTool`
+   * (remote transports). The matching `permission` poll frame resolves it,
+   * including when the host stops (deny).
+   */
+  const requestPermission = (
+    requestId: string,
+  ): Promise<PermissionDecision> => {
+    if (stopped) {
+      return Promise.resolve({
+        behavior: 'deny',
+        message: 'Native TUI stopped',
+      } as PermissionDecision)
+    }
+    return new Promise<PermissionDecision>(resolve => {
+      pendingPermissions.set(requestId, resolve)
+    })
   }
 
   let lastContextTokens = 0
@@ -345,6 +388,22 @@ export async function runNativeTui(
     return {
       started: false,
       reason: `start() failed: ${String(error).slice(0, 160)}`,
+    }
+  }
+
+  if (deps.onHostReady) {
+    try {
+      deps.onHostReady({
+        send: sendFrame,
+        requestPermission,
+        shutdown: stop,
+      })
+    } catch (error) {
+      stop()
+      return {
+        started: false,
+        reason: `onHostReady failed: ${String(error).slice(0, 160)}`,
+      }
     }
   }
 

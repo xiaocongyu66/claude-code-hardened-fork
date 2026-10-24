@@ -114,5 +114,8 @@ Bun process (engine)
   `--check-tui`) and is not distributed.
 - Missing/invalid addon or `is_supported() === false` (no TTY) falls back to the
   Ink UI. The native TUI is the default for local interactive sessions
-  (`--tui auto`); Ink is opt-in via `--tui=ink`, `CCH_TUI=ink` or
-  `CCH_TUI_NATIVE=0`.
+  (`--tui auto`) and for `claude ssh` / `claude connect` (their stream-json
+  transports are bridged by `src/remote/nativeSession.ts` through the same
+  `send`/`poll` channel). Ink is opt-in via `--tui=ink`, `CCH_TUI=ink` or
+  `CCH_TUI_NATIVE=0`, and remains the renderer for the KAIROS `--remote`
+  viewer.

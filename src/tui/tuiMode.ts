@@ -24,7 +24,10 @@ export interface TuiModeInput {
   legacyEnv?: string
   stdinIsTTY: boolean
   stdoutIsTTY: boolean
-  /** Remote/SSH/direct-connect REPL — the native host does not support these. */
+  /**
+   * Remote REPL mode the native host cannot drive yet (the KAIROS `--remote`
+   * viewer). SSH and direct-connect are supported and must pass `false`.
+   */
   remoteSession: boolean
   /** `loadTuiNative() !== null`: module present and `is_supported()`. */
   nativeAvailable: boolean
@@ -108,7 +111,7 @@ export function resolveTuiMode(input: TuiModeInput): TuiModeResolution {
     !input.stdinIsTTY || !input.stdoutIsTTY
       ? 'stdin/stdout must be a TTY'
       : input.remoteSession
-        ? 'remote/SSH/direct-connect sessions are not supported'
+        ? 'remote (KAIROS) sessions are not supported yet'
         : !input.nativeAvailable
           ? 'native TUI module unavailable'
           : undefined
