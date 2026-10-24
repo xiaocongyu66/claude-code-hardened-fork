@@ -116,27 +116,8 @@ function diagnoseTuiLoad(): string {
   }
 }
 
-/**
- * The frozen TS surface documents `start(options)`, while the current napi
- * binding takes the same fields as a JSON string (`start(options_json)`).
- * Try the object first (future-proof) and fall back to the wire form; rethrow
- * only if both are rejected.
- */
 function startTui(mod: TuiNativeModule): void {
-  try {
-    mod.start(START_OPTIONS)
-    return
-  } catch (objectError) {
-    try {
-      mod.start(JSON.stringify(START_OPTIONS) as unknown as TuiStartOptions)
-    } catch (stringError) {
-      throw new Error(
-        `start() rejected both options object and JSON: ${String(
-          objectError,
-        )} / ${String(stringError)}`,
-      )
-    }
-  }
+  mod.start(START_OPTIONS)
 }
 
 const stdinIsTty = process.stdin.isTTY === true

@@ -16,17 +16,14 @@ use cch_tui_runner::{
 };
 use napi::{Error, Result};
 use napi_derive::napi;
-use serde::Deserialize;
 
-/// Options accepted by [`start`].
-#[derive(Debug, Default, Deserialize)]
-struct StartOptions {
-    #[serde(default)]
-    fullscreen: Option<bool>,
-    #[serde(default)]
-    theme: Option<String>,
-    #[serde(default)]
-    vim: Option<bool>,
+/// Options accepted by [`start`] (the frozen JS surface passes an object).
+#[napi(object)]
+#[derive(Debug, Default)]
+pub struct StartOptions {
+    pub fullscreen: Option<bool>,
+    pub theme: Option<String>,
+    pub vim: Option<bool>,
 }
 
 struct Handle {
@@ -57,12 +54,11 @@ fn shutdown_handle(handle: Handle) -> Result<()> {
 
 /// Start the interactive TUI on a dedicated thread.
 ///
-/// `options_json` is `{"fullscreen": bool, "theme": "dark"|"light"|null,
-/// "vim": bool}`; every field is optional.
+/// `options` is `{fullscreen?: boolean, theme?: string, vim?: boolean}`;
+/// every field is optional and falls back to the file config.
 #[napi]
-pub fn start(options_json: String) -> Result<()> {
-    let options: StartOptions = serde_json::from_str(&options_json)
-        .map_err(|error| Error::from_reason(format!("invalid cch-tui options: {error}")))?;
+pub fn start(options: Option<StartOptions>) -> Result<()> {
+    let options = options.unwrap_or_default();
     let mut guard = lock_handle()?;
     if let Some(previous) = guard.take() {
         shutdown_handle(previous)?;
@@ -137,7 +133,7 @@ pub fn stop() -> Result<()> {
 }
 
 /// Whether stdin is a terminal (the TUI is attachable).
-#[napi]
+#[napi(js_name = "is_supported")]
 pub fn is_supported() -> bool {
     std::io::stdin().is_terminal()
 }
