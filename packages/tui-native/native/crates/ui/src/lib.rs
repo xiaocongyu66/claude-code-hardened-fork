@@ -30,6 +30,10 @@ pub enum RowStyle {
     /// A warning-level system line (API retries); painted with the theme's
     /// error color at normal intensity.
     Warning,
+    /// The per-message meta header (clock + model) that full-screen transcript
+    /// mode right-aligns above assistant replies (`MessageRow.tsx:229-233`).
+    /// Inline mode drops these rows.
+    MessageMeta,
     /// Markdown heading, carrying its level (`1..=6`).
     Heading(u8),
     /// A logical row made up entirely of inline code.
@@ -127,17 +131,12 @@ impl ChatView {
     pub fn ingest(&mut self, event: &EngineEvent) -> Vec<Row> {
         self.session.apply(event);
         match event {
-            EngineEvent::System { subtype, extra } => {
-                let mut rows = system_rows(subtype, extra);
-                append_timestamp(&mut rows, extra);
-                rows
-            }
+            EngineEvent::System { subtype, extra } => system_rows(subtype, extra),
             EngineEvent::User { extra } => {
-                let mut rows = match structured_diff_rows(extra.get("tool_use_result")) {
+                let rows = match structured_diff_rows(extra.get("tool_use_result")) {
                     Some(diff_rows) => diff_rows,
                     None => message_rows(extra.get("message"), false),
                 };
-                append_timestamp(&mut rows, extra);
                 self.resolve_tool_results(extra.get("message"));
                 self.completed.extend(rows.clone());
                 rows
@@ -145,7 +144,9 @@ impl ChatView {
             EngineEvent::Assistant { extra } => {
                 self.live_text.clear();
                 let mut rows = message_rows(extra.get("message"), true);
-                append_timestamp(&mut rows, extra);
+                if let Some(meta) = message_meta_row(extra.get("message"), extra) {
+                    rows.insert(0, meta);
+                }
                 self.record_tool_calls(extra.get("message"), &rows);
                 self.completed.extend(rows.clone());
                 rows
@@ -434,23 +435,69 @@ fn epoch_hhmm(seconds: i64) -> String {
     format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
 }
 
-/// Append Ink's `  (HH:MM)` timestamp to the frame's last row when the frame
-/// carries an ISO8601 `timestamp` field.
+/// The per-message meta header shown in full-screen transcript mode: the
+/// local clock followed by the model name (`MessageRow.tsx:229-233`).
 ///
-/// The view model cannot reach the local timezone, so labels are rendered in
-/// UTC. An explicit zone designator (`Z`, `+08:00`, ...) is honoured; a naive
-/// timestamp is treated as UTC. Unparseable timestamps are ignored, matching
-/// Ink's fallback of simply not showing a time.
-fn append_timestamp(rows: &mut [Row], extra: &serde_json::Map<String, Value>) {
-    let Some(timestamp) = string_field(extra, "timestamp") else {
-        return;
-    };
-    let Some(clock) = utc_hhmm(&timestamp) else {
-        return;
-    };
-    if let Some(row) = rows.last_mut() {
-        row.text.push_str(&format!("  ({clock})"));
+/// Ink only renders it for assistant messages that contain a text block and
+/// carry a model. The SDK's `timestamp` is optional; when it is missing or
+/// unparseable we fall back to the frame's arrival time, as the schema's
+/// `timestamp` description instructs consumers to do.
+fn message_meta_row(
+    message: Option<&Value>,
+    extra: &serde_json::Map<String, Value>,
+) -> Option<Row> {
+    let message = message?;
+    let model = message.get("model").and_then(Value::as_str)?;
+    let has_text = message
+        .get("content")
+        .and_then(Value::as_array)?
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("text"));
+    if !has_text {
+        return None;
     }
+    let clock = extra
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(meta_clock)
+        .unwrap_or_else(now_clock);
+    Some(Row::new(RowStyle::MessageMeta, format!("{clock}  {model}")))
+}
+
+/// Format an RFC3339 timestamp like Ink's
+/// `toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })`:
+/// two-digit hour, minutes, and an uppercase meridiem, in local time.
+fn meta_clock(timestamp: &str) -> Option<String> {
+    let parsed =
+        time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+            .ok()?;
+    Some(clock_label(localize(parsed)))
+}
+
+/// Arrival-time fallback for frames without a usable timestamp.
+fn now_clock() -> String {
+    clock_label(localize(time::OffsetDateTime::now_utc()))
+}
+
+/// Convert to the process's local offset; UTC when the platform cannot report
+/// one (`UtcOffset::current_local_offset` is documented to fail in some
+/// sandboxes).
+fn localize(instant: time::OffsetDateTime) -> time::OffsetDateTime {
+    match time::UtcOffset::current_local_offset() {
+        Ok(offset) => instant.to_offset(offset),
+        Err(_) => instant,
+    }
+}
+
+fn clock_label(instant: time::OffsetDateTime) -> String {
+    let hour = instant.hour();
+    let (hour, meridiem) = match hour {
+        0 => (12, "AM"),
+        1..=11 => (hour, "AM"),
+        12 => (12, "PM"),
+        _ => (hour - 12, "PM"),
+    };
+    format!("{hour:02}:{:02} {meridiem}", instant.minute())
 }
 
 /// Parse an ISO8601 timestamp into a `HH:MM` clock, converted to UTC.
@@ -1098,60 +1145,83 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_is_appended_in_utc() {
+    fn assistant_text_messages_get_a_meta_header() {
         let mut view = ChatView::new();
         let rows = view.ingest(
             &parse_line(
-                r#"{"type":"assistant","timestamp":"2025-10-23T14:05:06.789Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+                r#"{"type":"assistant","timestamp":"2025-10-23T14:05:06.789Z","message":{"role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello"}]}}"#,
             )
             .unwrap(),
         );
-        assert_eq!(rows[0].text, "hello  (14:05)");
-
-        // An explicit offset is converted to UTC.
-        let rows = view.ingest(
-            &parse_line(
-                r#"{"type":"assistant","timestamp":"2025-10-23T22:05:06+08:00","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
-            )
-            .unwrap(),
+        assert_eq!(rows[0].style, RowStyle::MessageMeta);
+        assert!(
+            rows[0].text.ends_with("  claude-test"),
+            "{:?}",
+            rows[0].text
         );
-        assert_eq!(rows[0].text, "hello  (14:05)");
-
-        // A naive timestamp is treated as UTC; multiline frames stamp their
-        // last row.
-        let rows = view.ingest(
-            &parse_line(
-                r#"{"type":"user","timestamp":"2025-10-23T09:30:00","message":{"role":"user","content":"one\ntwo"}}"#,
-            )
-            .unwrap(),
+        // `hh:mm AM` / `hh:mm PM`, like Ink's 12-hour en-US clock.
+        let clock = &rows[0].text[..8];
+        assert!(
+            clock.as_bytes()[2] == b':' && (clock.ends_with("AM") || clock.ends_with("PM")),
+            "clock should be hh:mm AM/PM: {clock:?}"
         );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].text, "one");
-        assert_eq!(rows[1].text, "two  (09:30)");
+        assert_eq!(rows[1].text, "hello");
     }
 
     #[test]
-    fn unparseable_timestamps_are_ignored() {
+    fn meta_header_requires_an_assistant_text_block_with_a_model() {
         let mut view = ChatView::new();
-        for timestamp in ["not-a-time", "2025-13-01T00:00:00Z", "2025-10-23T25:00:00Z"] {
-            let line = format!(
-                r#"{{"type":"assistant","timestamp":"{timestamp}","message":{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}}}}"#
-            );
-            let rows = view.ingest(&parse_line(&line).unwrap());
-            assert_eq!(rows[0].text, "hi", "timestamp {timestamp}");
-        }
-    }
+        // User frames never get a header.
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"user","timestamp":"2025-10-23T09:30:00Z","message":{"role":"user","content":"hi"}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(rows.iter().all(|row| row.style != RowStyle::MessageMeta));
 
-    #[test]
-    fn timestamp_applies_to_system_rows() {
-        let mut view = ChatView::new();
+        // Neither do system breadcrumbs, even when they carry a timestamp.
         let rows = view.ingest(
             &parse_line(
                 r#"{"type":"system","subtype":"hook_started","hook_name":"lint","hook_event":"PreToolUse","timestamp":"2025-10-23T00:01:00Z"}"#,
             )
             .unwrap(),
         );
-        assert_eq!(rows[0].text, "  ⎿  lint started  (00:01)");
+        assert_eq!(rows[0].style, RowStyle::Hook);
+        assert_eq!(rows[0].text, "  ⎿  lint started");
+
+        // Assistant frames without a model stay bare.
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(rows.iter().all(|row| row.style != RowStyle::MessageMeta));
+
+        // Tool-only assistant frames have no text block.
+        let rows = view.ingest(
+            &parse_line(
+                r#"{"type":"assistant","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(rows.iter().all(|row| row.style != RowStyle::MessageMeta));
+    }
+
+    #[test]
+    fn clock_label_uses_twelve_hour_time() {
+        use time::{Date, Month, OffsetDateTime, Time};
+        let at = |hour: u8, minute: u8| {
+            OffsetDateTime::new_utc(
+                Date::from_calendar_date(2025, Month::October, 23).unwrap(),
+                Time::from_hms(hour, minute, 0).unwrap(),
+            )
+        };
+        assert_eq!(clock_label(at(0, 0)), "12:00 AM");
+        assert_eq!(clock_label(at(9, 30)), "09:30 AM");
+        assert_eq!(clock_label(at(12, 5)), "12:05 PM");
+        assert_eq!(clock_label(at(23, 7)), "11:07 PM");
     }
 
     #[test]

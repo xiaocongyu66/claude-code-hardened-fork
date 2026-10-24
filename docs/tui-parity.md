@@ -8,7 +8,7 @@ Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferre
 
 | Area | Ink reference | Rust TUI | Notes |
 |---|---|---|---|
-| Transcript rendering | `components/Messages.tsx`, `MessageRow.tsx` | ✅ `crates/ui` | text, tool calls/results, errors, compact boundary |
+| Transcript rendering | `components/Messages.tsx`, `MessageRow.tsx` | ✅ `crates/ui` | text, tool calls/results, errors, compact boundary, system breadcrumbs (hooks, `api_retry`, rate limits, task notifications) |
 | Streaming text | `REPL.tsx` (`streamingText`) | ✅ `ChatView::live_text` | deltas never touch frozen rows |
 | Inline scrollback freeze | `ScrollBox` + `shouldRenderStatically` | ✅ `TerminalSession::insert_rows` | frozen via `insert_before` |
 | Fullscreen virtual list | `useVirtualScroll.ts` | ✅ `crates/fullscreen` | window, follow/unseen |
@@ -66,6 +66,8 @@ Verified against the Ink app; each row names the source of truth.
 | Diff colours | `theme.ts` `diffAdded`/`diffRemoved` used as **background** | `bg(diff_added_bg/diff_removed_bg)` | ✅ |
 | Palette values | `theme.ts` dark/light tables | exact RGB, line references in `crates/theme` | ✅ |
 | Message spacing | `marginTop={addMargin ? 1 : 0}` (`AssistantTextMessage.tsx:186`) | blank separator rows in both modes | ✅ |
+| Message meta header | `MessageRow.tsx:229-233`, `MessageTimestamp.tsx`, `MessageModel.tsx` (transcript mode only; assistant messages with a text block; 12-hour en-US clock; right-aligned, dim) | `RowStyle::MessageMeta` + right-aligned render; inline freeze drops it | ✅ OS local offset via `time` (UTC fallback); arrival time when the frame carries no timestamp |
+| Prompt send-now / queue-front | keymap table (`ctrl+enter` sendNow, `ctrl+x enter` queueSubmit) | `Ctrl+Enter` interrupts and sends; `Ctrl+X Enter` jumps the queue | ✅ |
 | Prose wrapping | `wrapAnsi` word wrap (`@anthropic/ink`) | `markdown::wrap_words` (space-first, hard-break overlong words/CJK) | ✅ |
 | Blockquote | `figures.BLOCKQUOTE_BAR` = `▎`, `utils/markdown.ts:64-71` (dim bar + italic text) | `▎ ` per level, italic body | 🟡 the bar shares the body style (Ink dims only the bar); needs a two-span row |
 | Table layout | `MarkdownTable.tsx` (box grid, wrapped cells, centred headers, vertical fallback) | `markdown::render_table`: `┌─┬┐/├─┼┤/└─┴┘`, `MIN_COLUMN_WIDTH=3`, `MAX_ROW_LINES=4`, `SAFETY_MARGIN=4` | ✅ |

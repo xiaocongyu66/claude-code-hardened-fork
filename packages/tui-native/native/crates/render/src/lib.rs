@@ -230,8 +230,14 @@ impl TerminalSession {
         if rows.is_empty() {
             return Ok(());
         }
+        // The per-message meta header is a full-screen affordance; Ink's inline
+        // REPL keeps scrollback free of clocks and model names.
+        let visible = inline_rows(rows);
+        if visible.is_empty() {
+            return Ok(());
+        }
         let width = self.content_width(self.terminal.size()?.width);
-        let lines = rows_to_lines(rows, width, &self.theme, true);
+        let lines = rows_to_lines(&visible, width, &self.theme, true);
         if lines.is_empty() {
             return Ok(());
         }
@@ -586,6 +592,14 @@ pub fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
+/// Rows the inline freeze paints: full-screen-only rows are dropped.
+fn inline_rows(rows: &[Row]) -> Vec<Row> {
+    rows.iter()
+        .filter(|row| row.style != RowStyle::MessageMeta)
+        .cloned()
+        .collect()
+}
+
 /// Convert domain rows into wrapped, styled terminal lines.
 ///
 /// Assistant prose goes through the Markdown renderer at the target width;
@@ -608,6 +622,23 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
             continue;
         }
         index += 1;
+        if row.style == RowStyle::MessageMeta {
+            // The header opens the message block, so it carries the block's
+            // top margin (`marginTop={1}` in `MessageRow.tsx`).
+            if spacing && !lines.is_empty() && !lines.last().is_some_and(|line| line.width() == 0) {
+                lines.push(Line::from(""));
+            }
+            // Ink right-aligns the clock/model header with `justifyContent`
+            // `flex-end` (`MessageRow.tsx:229-233`).
+            let used = UnicodeWidthStr::width(row.text.as_str());
+            let pad = width.saturating_sub(used);
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", " ".repeat(pad), row.text),
+                row_style(RowStyle::MessageMeta, theme),
+            )));
+            previous = Some(RowStyle::MessageMeta);
+            continue;
+        }
         // Rows with a gutter (assistant prose, tool calls, tool results) are
         // wrapped to the remaining width so the prefix never overflows. User
         // prompts lose one column to Ink's `paddingRight={1}`.
@@ -638,12 +669,14 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
             RowStyle::Assistant
             | RowStyle::ToolCall
             | RowStyle::ToolCallPending
-            | RowStyle::ToolCallError => true,
+            | RowStyle::ToolCallError
+            | RowStyle::MessageMeta => true,
             RowStyle::User => previous != Some(RowStyle::User),
             _ => false,
         };
         if spacing
             && starts_block
+            && previous != Some(RowStyle::MessageMeta)
             && !lines.is_empty()
             && !lines.last().is_some_and(|line| line.width() == 0)
         {
@@ -915,6 +948,7 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::Blockquote => Style::default()
             .fg(palette.foreground)
             .add_modifier(Modifier::ITALIC),
+        RowStyle::MessageMeta => Style::default().fg(palette.dim),
         RowStyle::Rule => Style::default().fg(palette.dim),
         RowStyle::DiffHunk => Style::default()
             .fg(palette.accent)
@@ -1438,6 +1472,35 @@ mod tests {
         );
         // The first rendered line of the message opens with the bullet.
         assert!(texts[0].starts_with(&format!("{} ", message_bullet())));
+    }
+
+    #[test]
+    fn message_meta_headers_are_right_aligned_and_fullscreen_only() {
+        let theme = Theme::dark();
+        let rows = vec![
+            Row::new(RowStyle::System, "note"),
+            Row::new(RowStyle::MessageMeta, "03:45 PM  claude-test"),
+            Row::new(RowStyle::Assistant, "hello"),
+        ];
+        let lines = rows_to_lines(&rows, 40, &theme, true);
+        let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        // Blank line before the block, then meta, then prose with no extra gap.
+        assert_eq!(texts.len(), 4, "{texts:?}");
+        assert_eq!(texts[0], "note");
+        assert_eq!(texts[1], "");
+        assert!(texts[2].ends_with("03:45 PM  claude-test"), "{texts:?}");
+        assert_eq!(texts[2].chars().count(), 40, "right-aligned to the width");
+        assert_eq!(texts[3], format!("{} hello", message_bullet()));
+        assert_eq!(
+            lines[2].spans[0].style.fg,
+            Some(theme.palette.dim),
+            "meta header is dim"
+        );
+
+        // Inline mode never paints the header.
+        let inline = inline_rows(&rows);
+        assert!(inline.iter().all(|row| row.style != RowStyle::MessageMeta));
+        assert_eq!(inline.len(), 2);
     }
 
     #[test]
