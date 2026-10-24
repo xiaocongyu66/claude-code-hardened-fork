@@ -813,6 +813,10 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::ToolCallPending => Style::default().fg(palette.dim),
         RowStyle::ToolCallError => Style::default().fg(palette.error),
         RowStyle::ToolResult => Style::default().fg(palette.dim),
+        // System breadcrumbs (hooks, rate limits, task notifications) stay
+        // de-emphasized; API retries use the error color at normal intensity.
+        RowStyle::Hook => Style::default().fg(palette.dim),
+        RowStyle::Warning => Style::default().fg(palette.error),
         // Markdown row roles. The markdown crate emits the text (markers,
         // prefixes and indentation included); these only pick a palette token.
         RowStyle::Heading(_) => Style::default()
@@ -1348,6 +1352,19 @@ mod tests {
             (RowStyle::ToolCallError, theme.palette.error),
         ] {
             let rows = vec![Row::new(style, "Bash(ls)")];
+            let lines = rows_to_lines(&rows, 40, &theme, true);
+            assert_eq!(lines[0].spans[0].style.fg, Some(color), "{style:?}");
+        }
+    }
+
+    #[test]
+    fn system_breadcrumb_styles_use_dim_and_error() {
+        let theme = Theme::dark();
+        for (style, color, text) in [
+            (RowStyle::Hook, theme.palette.dim, "  ⎿  lint started"),
+            (RowStyle::Warning, theme.palette.error, "API error"),
+        ] {
+            let rows = vec![Row::new(style, text)];
             let lines = rows_to_lines(&rows, 40, &theme, true);
             assert_eq!(lines[0].spans[0].style.fg, Some(color), "{style:?}");
         }
