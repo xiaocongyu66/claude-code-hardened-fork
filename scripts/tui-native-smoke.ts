@@ -46,6 +46,10 @@ import {
 const nodeRequire = createRequire(import.meta.url)
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 
+// The loader swallows failures by design; the smoke opts into its stderr trace
+// so a null result comes with the underlying reason.
+process.env.CCH_NATIVE_DEBUG = '1'
+
 const POLL_ATTEMPTS = 20
 const POLL_INTERVAL_MS = 10
 // Fullscreen avoids the inline viewport's cursor-position query (DSR,

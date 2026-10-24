@@ -24,6 +24,13 @@ import { logForDebugging } from './debug.js'
 
 const nodeRequire = createRequire(import.meta.url)
 
+/** Opt-in stderr trace for the smoke test: the loader normally swallows all. */
+function trace(message: string): void {
+  if (process.env.CCH_NATIVE_DEBUG === '1') {
+    console.error(`[native-debug] ${message}`)
+  }
+}
+
 // 已加载模块缓存
 const loadedCache = new Map<string, unknown>()
 
@@ -202,12 +209,19 @@ export function loadNativeModule<T>(
       triple,
       `${moduleName}.node`,
     )
-    if (existsSync(candidate)) {
-      const fromVendor = accept(nodeRequire(candidate))
+    const exists = existsSync(candidate)
+    trace(`${moduleName}: vendor candidate ${candidate} exists=${exists}`)
+    if (exists) {
+      const loaded = nodeRequire(candidate) as NativeModuleLike
+      trace(
+        `${moduleName}: require ok, exports=${Object.keys(loaded).join(',')}`,
+      )
+      const fromVendor = accept(loaded)
       if (fromVendor) return fromVendor
+      trace(`${moduleName}: structural validation rejected the module`)
     }
-  } catch {
-    // ignore
+  } catch (error) {
+    trace(`${moduleName}: vendor load threw: ${String(error)}`)
   }
 
   return null
