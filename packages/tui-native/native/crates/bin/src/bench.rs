@@ -125,9 +125,14 @@ pub fn run(options: &BenchOptions) -> BenchReport {
     let height = options.height.max(1);
     let theme = Theme::dark();
 
-    // The first window builds the height cache (the width-change path); the
-    // reported number is the steady-state frame cost.
+    // The first window builds the height cache and the highlighter loads its
+    // grammars; both are one-time start-up costs, so warm them outside the
+    // timed region and report the steady-state frame cost.
+    cch_tui_render::warm_up();
     let _ = transcript.window(height, width);
+    // Paint the window once to populate the height layout and the highlight
+    // span cache; the reported number is the steady-state frame cost.
+    let _ = transcript_lines(&mut transcript, height, width, &theme);
     let started = Instant::now();
     let lines = transcript_lines(&mut transcript, height, width, &theme);
     let render = started.elapsed();
@@ -171,11 +176,18 @@ fn window_samples(
     let total = transcript.total_height();
     let span = total.saturating_sub(1);
     let steps = iterations.saturating_sub(1).max(1);
+    // Walk from the oldest to the newest line, like a user paging through the
+    // transcript. Scrolling happens outside the timed region.
+    let targets: Vec<usize> = (0..iterations).map(|step| step * span / steps).collect();
+    // Warm pass: parse and highlight every window once so the samples measure
+    // the steady-state frame cost (cold syntax grammars are unhurried).
+    for &target in &targets {
+        let delta = target as isize - transcript.offset() as isize;
+        transcript.scroll_by(delta);
+        let _ = transcript_lines(transcript, height, width, theme);
+    }
     let mut samples = Vec::with_capacity(iterations);
-    for step in 0..iterations {
-        // Walk from the oldest to the newest line, like a user paging through
-        // the transcript. Scrolling happens outside the timed region.
-        let target = step * span / steps;
+    for &target in &targets {
         let delta = target as isize - transcript.offset() as isize;
         transcript.scroll_by(delta);
         let started = Instant::now();

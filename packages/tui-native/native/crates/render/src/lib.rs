@@ -499,6 +499,15 @@ impl Drop for TerminalSession {
     }
 }
 
+/// Load the syntax-highlight grammars before the first frame is painted.
+///
+/// Grammar deserialisation is a one-time cost (tens of ms release, hundreds
+/// in debug). Call this from the render thread's start-up so the first code
+/// block does not stall a frame.
+pub fn warm_up() {
+    cch_tui_highlight::warm_up();
+}
+
 /// Message bullet used by the Ink app (`figures.BLACK_CIRCLE`).
 pub fn message_bullet() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -516,8 +525,38 @@ pub fn live_lines(view: &ChatView, width: usize, theme: &Theme) -> Vec<Line<'sta
     }
     let mut lines = vec![Line::from("")];
     let body = cch_tui_markdown::render_markdown(&view.live_text, width.saturating_sub(2));
-    for (index, row) in body.iter().enumerate() {
-        let lead = if index == 0 {
+    let mut emitted = 0usize;
+    let mut index = 0usize;
+    while index < body.len() {
+        let row = &body[index];
+        // Fenced code streams through the highlighter with the fence lines
+        // dropped, exactly like the frozen path.
+        if row.style == RowStyle::CodeBlock {
+            let start = index;
+            while index < body.len() && body[index].style == RowStyle::CodeBlock {
+                index += 1;
+            }
+            for line in code_block_lines(&body[start..index], theme) {
+                let lead = if emitted == 0 {
+                    format!("{} ", message_bullet())
+                } else {
+                    "  ".to_string()
+                };
+                let mut spans = Vec::with_capacity(line.spans.len() + 1);
+                spans.push(Span::raw(lead));
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+                emitted += 1;
+            }
+            continue;
+        }
+        index += 1;
+        // Markdown block separators stay empty: no bullet, no gutter.
+        if row.text.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        let lead = if emitted == 0 {
             format!("{} ", message_bullet())
         } else {
             "  ".to_string()
@@ -526,6 +565,7 @@ pub fn live_lines(view: &ChatView, width: usize, theme: &Theme) -> Vec<Line<'sta
             format!("{lead}{}", row.text),
             row_style(row.style, theme),
         )));
+        emitted += 1;
     }
     lines
 }
@@ -611,7 +651,43 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
         }
         previous = Some(row.style);
         let mut tool_call_offset = 0usize;
-        for (line_index, styled) in styled_rows.iter().enumerate() {
+        // Lines actually emitted for this row; blank separator rows do not
+        // consume the message gutter.
+        let mut emitted = 0usize;
+        let mut line_index = 0usize;
+        while line_index < styled_rows.len() {
+            let styled = &styled_rows[line_index];
+            // Markdown block separators stay empty: no bullet, no gutter.
+            if styled.text.is_empty() {
+                lines.push(Line::from(""));
+                line_index += 1;
+                continue;
+            }
+            // Assistant Markdown code fences are highlighted as one unit; the
+            // fence lines disappear, exactly like Ink's `code` token.
+            if styled.style == RowStyle::CodeBlock {
+                let start = line_index;
+                while line_index < styled_rows.len()
+                    && styled_rows[line_index].style == RowStyle::CodeBlock
+                {
+                    line_index += 1;
+                }
+                for line in code_block_lines(&styled_rows[start..line_index], theme) {
+                    let lead = if emitted == 0 {
+                        format!("{prefix} ")
+                    } else {
+                        cont.to_string()
+                    };
+                    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+                    if !lead.is_empty() {
+                        spans.push(Span::raw(lead));
+                    }
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                    emitted += 1;
+                }
+                continue;
+            }
             if matches!(
                 row.style,
                 RowStyle::ToolCall | RowStyle::ToolCallPending | RowStyle::ToolCallError
@@ -619,19 +695,21 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
                 lines.push(tool_call_line(
                     row,
                     styled,
-                    line_index,
+                    emitted,
                     tool_call_offset,
                     prefix,
                     cont,
                     theme,
                 ));
                 tool_call_offset += styled.text.chars().count();
+                emitted += 1;
+                line_index += 1;
                 continue;
             }
-            let lead = if line_index == 0 { prefix } else { cont };
+            let lead = if emitted == 0 { prefix } else { cont };
             let mut text = if lead.is_empty() {
                 styled.text.clone()
-            } else if line_index == 0 && row.style == RowStyle::Assistant {
+            } else if emitted == 0 && row.style == RowStyle::Assistant {
                 // Ink reserves a 2-column gutter: bullet + one space.
                 format!("{lead} {}", styled.text)
             } else {
@@ -654,6 +732,8 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
                 row_style(styled.style, theme)
             };
             lines.push(Line::from(Span::styled(text, style)));
+            emitted += 1;
+            line_index += 1;
         }
     }
     lines
@@ -819,13 +899,22 @@ fn row_style(style: RowStyle, theme: &Theme) -> Style {
         RowStyle::Warning => Style::default().fg(palette.error),
         // Markdown row roles. The markdown crate emits the text (markers,
         // prefixes and indentation included); these only pick a palette token.
+        // Ink's heading styles: h1 bold+italic+underline, h2+ bold
+        // (`utils/markdown.ts` heading case).
+        RowStyle::Heading(1) => Style::default()
+            .fg(palette.heading)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED),
         RowStyle::Heading(_) => Style::default()
             .fg(palette.heading)
             .add_modifier(Modifier::BOLD),
         RowStyle::InlineCode => Style::default().fg(palette.inline_code),
         RowStyle::CodeBlock => Style::default().fg(palette.code_block),
         RowStyle::ListItem => Style::default().fg(palette.foreground),
-        RowStyle::Blockquote => Style::default().fg(palette.dim),
+        // Ink keeps quote text italic at normal brightness (its dim bar is
+        // nearly invisible on dark themes).
+        RowStyle::Blockquote => Style::default()
+            .fg(palette.foreground)
+            .add_modifier(Modifier::ITALIC),
         RowStyle::Rule => Style::default().fg(palette.dim),
         RowStyle::DiffHunk => Style::default()
             .fg(palette.accent)
@@ -1317,6 +1406,54 @@ mod tests {
         assert!(screen.contains("streaming"), "screen: {screen}");
         assert!(screen.contains("❯ hi"), "screen: {screen}");
         assert!(screen.contains("m1 · session s1"), "screen: {screen}");
+    }
+
+    #[test]
+    fn assistant_markdown_fences_are_highlighted_with_the_message_gutter() {
+        let rows = vec![Row::new(
+            RowStyle::Assistant,
+            "text\n\n```rust\nlet x = 1;\n```",
+        )];
+        let theme = Theme::dark();
+        let lines = rows_to_lines(&rows, 40, &theme, true);
+        let texts: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        // The markdown block separator survives as a truly empty line.
+        assert!(texts.iter().any(String::is_empty), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.contains("```")),
+            "fences must not be painted: {texts:?}"
+        );
+        let code = lines
+            .iter()
+            .find(|line| line.to_string().contains("let x"))
+            .expect("code line");
+        // Code keeps the assistant column gutter (bullet column, two cells).
+        assert!(code.to_string().starts_with("  "), "{code:?}");
+        assert!(
+            code.spans
+                .iter()
+                .any(|span| span.content.contains("let")
+                    && span.style.fg == Some(theme.palette.keyword)),
+            "keyword should use the theme keyword color: {code:?}"
+        );
+        // The first rendered line of the message opens with the bullet.
+        assert!(texts[0].starts_with(&format!("{} ", message_bullet())));
+    }
+
+    #[test]
+    fn heading_and_blockquote_styles_match_ink() {
+        let theme = Theme::dark();
+        let h1 = row_style(RowStyle::Heading(1), &theme);
+        assert!(
+            h1.add_modifier
+                .contains(Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED)
+        );
+        let h2 = row_style(RowStyle::Heading(2), &theme);
+        assert!(h2.add_modifier.contains(Modifier::BOLD));
+        assert!(!h2.add_modifier.contains(Modifier::ITALIC));
+        let quote = row_style(RowStyle::Blockquote, &theme);
+        assert!(quote.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(quote.fg, Some(theme.palette.foreground));
     }
 
     #[test]

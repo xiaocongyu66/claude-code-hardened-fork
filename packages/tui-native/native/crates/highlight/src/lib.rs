@@ -76,13 +76,28 @@ fn syntaxes() -> &'static SyntaxSet {
 /// to [`TokenKind::Plain`]. When the hint is absent, a small content sniff
 /// (shebang, `fn main`, `def ...:`) is used before giving up.
 pub fn highlight_lines(code: &str, language_hint: Option<&str>) -> Vec<StyledLine> {
-    static GLOBAL: OnceLock<Mutex<Highlighter>> = OnceLock::new();
-    let mutex = GLOBAL.get_or_init(|| Mutex::new(Highlighter::new()));
+    let mutex = highlighter();
     let mut highlighter = match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     highlighter.highlight(code, language_hint)
+}
+
+fn highlighter() -> &'static Mutex<Highlighter> {
+    static GLOBAL: OnceLock<Mutex<Highlighter>> = OnceLock::new();
+    GLOBAL.get_or_init(|| Mutex::new(Highlighter::new()))
+}
+
+/// Load the grammar set and start the cache ahead of the first frame.
+///
+/// Deserialising the TextMate grammars costs tens of milliseconds (hundreds
+/// in an unoptimised build). Calling this once at startup keeps the first code
+/// block from paying that cost, mirroring how Ink loads `cli-highlight`
+/// behind a Suspense boundary.
+pub fn warm_up() {
+    let _ = syntaxes();
+    let _ = highlighter();
 }
 
 /// Resolve a language hint (or content sniff) to a syntax name.
