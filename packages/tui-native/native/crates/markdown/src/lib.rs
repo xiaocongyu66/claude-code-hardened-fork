@@ -6,24 +6,31 @@
 //! verbatim (no wrapping) and tagged [`RowStyle::CodeBlock`] so a dedicated
 //! highlighter can take them over.
 //!
-//! Wrapping is delegated to [`cch_tui_ui::wrap_text`], which is display-width
-//! aware (CJK and other wide characters). List indentation, list markers and
-//! blockquote prefixes are prepended after wrapping, so the output is stable:
-//! the same input and width always produce the same rows byte for byte.
+//! Syntax and layout mirror the Ink app (`src/utils/markdown.ts` +
+//! `MarkdownTable.tsx`):
 //!
-//! Tables are laid out from display widths, with ` │ ` between columns and a
-//! `─┼─` separator under the header. When the table does not fit they shrink
-//! proportionally and cells are truncated with `…` so no row exceeds `width`.
-//! Inline formatting inside cells (code spans, emphasis) is flattened to text.
-//!
-//! Links render as their text, followed by ` (url)` when the destination
-//! differs from the text; URLs are capped at 60 characters. Images render as
-//! `[image: alt]` without loading anything. OSC 8 hyperlinks are deliberately
-//! not emitted: escape sequences would corrupt the display-width accounting
-//! used by wrapping and table layout. A terminal-level painter can add them
-//! later without changing these logical rows.
+//! - Prose is **word-wrapped** at display width (CJK-aware); a word wider than
+//!   the line is hard-broken, never dropped. List indentation, list markers
+//!   and blockquote bars are prepended after wrapping, so output is stable:
+//!   the same input and width always produce the same rows byte for byte.
+//! - Blockquotes use the `▎` bar (`figures.BLOCKQUOTE_BAR`) and a space per
+//!   nesting level; inline markers are stripped.
+//! - Top-level blocks are separated by one empty row, matching the blank line
+//!   Ink's token stream produces between blocks.
+//! - Tables are the Ink box layout: `┌─┬─┐ / ├─┼─┤ / └─┴─┘` borders, one space
+//!   of cell padding, headers centred, per-column alignment, and cells
+//!   **wrapped** (not truncated) at column widths derived from the longest
+//!   word. When rows would wrap past four lines — or the finished table would
+//!   crowd the width margin — the table degrades to Ink's vertical
+//!   `Label: value` form. Inline formatting in cells is flattened to text.
+//! - Links render as their display text; `mailto:` links render as the bare
+//!   email. OSC 8 hyperlinks are not emitted here: escape sequences would
+//!   corrupt the display-width accounting used by wrapping and table layout.
+//!   A terminal-level painter can add them later without changing these rows.
+//! - Images render as their destination URL, exactly like Ink's `image` token
+//!   handler, without loading anything.
 
-use cch_tui_ui::{Row, RowStyle, wrap_text};
+use cch_tui_ui::{Row, RowStyle};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -75,10 +82,10 @@ struct LinkState {
     start: usize,
 }
 
-/// Alt text of an image being collected; the destination is ignored.
-#[derive(Default)]
+/// An image being collected. Ink's `image` token renders the destination, so
+/// the alt text is skipped rather than buffered.
 struct ImageState {
-    alt: String,
+    dest: String,
 }
 
 /// A table being collected. Cells go through the normal inline buffer (so
@@ -100,6 +107,8 @@ struct Renderer {
     link: Option<LinkState>,
     image: Option<ImageState>,
     table: Option<TableState>,
+    /// A top-level block ended; the next one is preceded by a blank row.
+    pending_blank: bool,
 }
 
 impl Renderer {
@@ -114,6 +123,7 @@ impl Renderer {
             link: None,
             image: None,
             table: None,
+            pending_blank: false,
         }
     }
 
@@ -121,20 +131,17 @@ impl Renderer {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
+            // Image alt text never reaches the output: Ink renders the URL.
             Event::Text(text) => {
                 if let Some(code) = self.code.as_mut() {
                     code.text.push_str(&text);
-                } else if let Some(image) = self.image.as_mut() {
-                    image.alt.push_str(&text);
-                } else {
+                } else if self.image.is_none() {
                     self.buf.text.push_str(&text);
                     self.buf.saw_non_code = true;
                 }
             }
             Event::Code(text) => {
-                if let Some(image) = self.image.as_mut() {
-                    image.alt.push_str(&text);
-                } else {
+                if self.image.is_none() {
                     self.buf.text.push_str(&text);
                     self.buf.saw_code = true;
                 }
@@ -142,9 +149,7 @@ impl Renderer {
             Event::SoftBreak => {
                 if let Some(code) = self.code.as_mut() {
                     code.text.push('\n');
-                } else if let Some(image) = self.image.as_mut() {
-                    image.alt.push(' ');
-                } else {
+                } else if self.image.is_none() {
                     self.buf.text.push(' ');
                     self.buf.saw_break = true;
                 }
@@ -152,16 +157,16 @@ impl Renderer {
             Event::HardBreak => {
                 if let Some(code) = self.code.as_mut() {
                     code.text.push('\n');
-                } else if let Some(image) = self.image.as_mut() {
-                    image.alt.push(' ');
-                } else {
+                } else if self.image.is_none() {
                     self.buf.text.push('\n');
                     self.buf.saw_break = true;
                 }
             }
             Event::Rule => {
                 self.flush_pending();
+                self.begin_block();
                 self.emit_rule();
+                self.pending_blank = self.lists.is_empty();
             }
             // Raw HTML is not rendered (no terminal markup in this layer).
             Event::Html(_) | Event::InlineHtml(_) | Event::FootnoteReference(_) => {}
@@ -178,16 +183,47 @@ impl Renderer {
         }
     }
 
+    /// Insert the blank separator before a new top-level block.
+    fn begin_block(&mut self) {
+        if self.pending_blank && !self.rows.is_empty() {
+            self.rows.push(Row::new(RowStyle::Assistant, String::new()));
+        }
+        self.pending_blank = false;
+    }
+
+    /// Whether blank-line separation applies at the current nesting level.
+    /// Inside lists and blockquotes blocks stay adjacent, exactly like Ink's
+    /// token walk (a quoted blank line arrives as its own `space` token there,
+    /// not as a block boundary).
+    fn separates_blocks(&self) -> bool {
+        self.lists.is_empty() && self.quote_depth == 0
+    }
+
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph => {}
-            Tag::Heading { .. } => self.flush_pending(),
+            Tag::Paragraph => {
+                if self.separates_blocks() && self.table.is_none() {
+                    self.begin_block();
+                }
+            }
+            Tag::Heading { .. } => {
+                self.flush_pending();
+                if self.separates_blocks() {
+                    self.begin_block();
+                }
+            }
             Tag::BlockQuote(_kind) => {
                 self.flush_pending();
+                if self.separates_blocks() {
+                    self.begin_block();
+                }
                 self.quote_depth += 1;
             }
             Tag::CodeBlock(kind) => {
                 self.flush_pending();
+                if self.separates_blocks() {
+                    self.begin_block();
+                }
                 let (fenced, lang) = match kind {
                     CodeBlockKind::Indented => (false, String::new()),
                     CodeBlockKind::Fenced(info) => (true, info.to_string()),
@@ -200,6 +236,9 @@ impl Renderer {
             }
             Tag::List(start) => {
                 self.flush_pending();
+                if self.separates_blocks() {
+                    self.begin_block();
+                }
                 self.lists.push(ListCtx {
                     ordered: start.is_some(),
                     next: start.unwrap_or(1),
@@ -227,11 +266,16 @@ impl Renderer {
                     });
                 }
             }
-            Tag::Image { .. } => {
-                self.image = Some(ImageState::default());
+            Tag::Image { dest_url, .. } => {
+                self.image = Some(ImageState {
+                    dest: dest_url.to_string(),
+                });
             }
             Tag::Table(align) => {
                 self.flush_pending();
+                if self.separates_blocks() {
+                    self.begin_block();
+                }
                 self.table = Some(TableState {
                     align,
                     header: Vec::new(),
@@ -257,20 +301,29 @@ impl Renderer {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph => self.flush_pending(),
-            TagEnd::Heading(level) => self.flush_with(RowStyle::Heading(heading_level(level))),
+            TagEnd::Paragraph => {
+                self.flush_pending();
+                self.pending_blank = self.separates_blocks();
+            }
+            TagEnd::Heading(level) => {
+                self.flush_with(RowStyle::Heading(heading_level(level)));
+                self.pending_blank = self.separates_blocks();
+            }
             TagEnd::BlockQuote(_kind) => {
                 self.flush_pending();
                 self.quote_depth = self.quote_depth.saturating_sub(1);
+                self.pending_blank = self.separates_blocks();
             }
             TagEnd::CodeBlock => {
                 if let Some(state) = self.code.take() {
                     self.emit_code(state);
                 }
+                self.pending_blank = self.separates_blocks();
             }
             TagEnd::List(_ordered) => {
                 self.flush_pending();
                 self.lists.pop();
+                self.pending_blank = self.separates_blocks();
             }
             TagEnd::Item => self.flush_pending(),
             TagEnd::Link => self.finish_link(),
@@ -297,41 +350,43 @@ impl Renderer {
                 if let Some(table) = self.table.take() {
                     self.render_table(table);
                 }
+                self.pending_blank = self.separates_blocks();
             }
             _ => {}
         }
     }
 
-    /// Append ` (url)` when a link's destination differs from its text.
+    /// Links keep their display text; `mailto:` links collapse to the bare
+    /// email address (Ink's `link` token handler). The hyperlink itself is a
+    /// painter concern, so no OSC 8 sequence is emitted here.
     fn finish_link(&mut self) {
         let Some(link) = self.link.take() else {
             return;
         };
-        let text = self.buf.text.get(link.start..).unwrap_or_default();
-        if link.dest == text {
-            return;
+        if let Some(email) = link.dest.strip_prefix("mailto:") {
+            self.buf.text.truncate(link.start);
+            self.buf.text.push_str(email);
+            self.buf.saw_non_code = true;
         }
-        let url: String = link.dest.chars().take(MAX_URL_CHARS).collect();
-        self.buf.text.push_str(" (");
-        self.buf.text.push_str(&url);
-        self.buf.text.push(')');
-        self.buf.saw_non_code = true;
     }
 
-    /// Replace an image with its textual placeholder; nothing is loaded.
+    /// Render an image as its destination URL; nothing is loaded.
     fn finish_image(&mut self) {
         let Some(image) = self.image.take() else {
             return;
         };
-        self.buf.text.push_str("[image: ");
-        self.buf.text.push_str(image.alt.trim());
-        self.buf.text.push(']');
+        self.buf.text.push_str(&image.dest);
         self.buf.saw_non_code = true;
     }
 
-    /// Lay the collected table out and emit one row per logical line.
+    /// Lay the collected table out and emit logical rows.
+    ///
+    /// Mirrors `MarkdownTable.tsx`: box-drawing borders, centred headers,
+    /// per-column alignment, cells wrapped at widths derived from the longest
+    /// word, and a vertical `Label: value` fallback when a row would need more
+    /// than four lines (or the grid would crowd the width margin).
     fn render_table(&mut self, table: TableState) {
-        let mut columns = table
+        let columns = table
             .align
             .len()
             .max(table.header.len())
@@ -339,53 +394,175 @@ impl Renderer {
         if columns == 0 {
             return;
         }
-        let (first_prefix, continuation) = self.prefixes();
-        let total_width = self
-            .width
-            .saturating_sub(display_width(&first_prefix))
-            .max(1);
-        // A column needs at least one glyph and, except for the first, ` │ `
-        // (three cells), so drop columns that cannot fit at all.
-        columns = columns.min(total_width.div_ceil(4).max(1));
+        // Normalise ragged rows to the reported column count.
+        let header: Vec<String> = (0..columns)
+            .map(|index| table.header.get(index).cloned().unwrap_or_default())
+            .collect();
+        let rows: Vec<Vec<String>> = table
+            .rows
+            .iter()
+            .map(|row| {
+                (0..columns)
+                    .map(|index| row.get(index).cloned().unwrap_or_default())
+                    .collect()
+            })
+            .collect();
 
-        let mut natural = vec![0usize; columns];
-        for (index, cell) in table.header.iter().take(columns).enumerate() {
-            natural[index] = natural[index].max(display_width(cell));
-        }
-        for row in &table.rows {
-            for (index, cell) in row.iter().take(columns).enumerate() {
-                natural[index] = natural[index].max(display_width(cell));
+        let (first_prefix, continuation) = self.prefixes();
+        let prefix_width = display_width(&first_prefix);
+        let content_width = self.width.saturating_sub(prefix_width).max(1);
+        // One border cell plus two padding cells and one border per column,
+        // then Ink's four-column safety margin.
+        let border_overhead = 1 + columns * 3;
+        let available = content_width
+            .saturating_sub(border_overhead + TABLE_SAFETY_MARGIN)
+            .max(columns * MIN_COLUMN_WIDTH);
+
+        let mut min_widths = vec![MIN_COLUMN_WIDTH; columns];
+        let mut ideal_widths = vec![MIN_COLUMN_WIDTH; columns];
+        for (index, ideal) in ideal_widths.iter_mut().enumerate() {
+            let cells = std::iter::once(&header[index]).chain(rows.iter().map(|row| &row[index]));
+            for cell in cells {
+                min_widths[index] = min_widths[index].max(longest_word_width(cell));
+                *ideal = (*ideal).max(display_width(cell));
             }
         }
 
-        let gaps = display_width(COLUMN_GAP) * (columns - 1);
-        let budget = total_width.saturating_sub(gaps);
-        let widths = if natural.iter().sum::<usize>() <= budget {
-            natural
+        let total_ideal: usize = ideal_widths.iter().sum();
+        let total_min: usize = min_widths.iter().sum();
+        let widths = if total_ideal <= available {
+            ideal_widths
+        } else if total_min <= available {
+            let extra = available - total_min;
+            let overflows: Vec<usize> = ideal_widths
+                .iter()
+                .zip(&min_widths)
+                .map(|(ideal, min)| ideal.saturating_sub(*min))
+                .collect();
+            let total_overflow: usize = overflows.iter().sum();
+            if total_overflow == 0 {
+                min_widths
+            } else {
+                min_widths
+                    .iter()
+                    .zip(&overflows)
+                    .map(|(min, overflow)| min + extra * overflow / total_overflow)
+                    .collect()
+            }
         } else {
-            shrink_columns(&natural, budget)
+            // Not even the longest words fit: shrink proportionally; the cell
+            // wrapper breaks words that still exceed their column.
+            let scale = available as f64 / total_min as f64;
+            min_widths
+                .iter()
+                .map(|min| ((*min as f64 * scale).floor() as usize).max(MIN_COLUMN_WIDTH))
+                .collect()
         };
 
-        let header = table_line(&table.header, &widths, &table.align);
-        let separator = widths
+        let header_lines: Vec<Vec<String>> = header
             .iter()
-            .map(|width| "─".repeat(*width))
-            .collect::<Vec<_>>()
-            .join("─┼─");
-        self.rows.push(Row::new(
-            RowStyle::TableHeader,
-            format!("{first_prefix}{header}"),
-        ));
-        self.rows.push(Row::new(
-            RowStyle::TableRow,
-            format!("{continuation}{separator}"),
-        ));
-        for row in &table.rows {
-            let line = table_line(row, &widths, &table.align);
-            self.rows.push(Row::new(
-                RowStyle::TableRow,
-                format!("{continuation}{line}"),
-            ));
+            .zip(&widths)
+            .map(|(cell, width)| wrap_cell(cell, *width))
+            .collect();
+        let body_lines: Vec<Vec<Vec<String>>> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&widths)
+                    .map(|(cell, width)| wrap_cell(cell, *width))
+                    .collect()
+            })
+            .collect();
+        let max_row_lines = header_lines
+            .iter()
+            .map(Vec::len)
+            .chain(body_lines.iter().flatten().map(Vec::len))
+            .max()
+            .unwrap_or(1);
+
+        let grid_width = 1 + columns * 3 + widths.iter().sum::<usize>();
+        if max_row_lines > MAX_ROW_LINES
+            || prefix_width + grid_width > self.width.saturating_sub(TABLE_SAFETY_MARGIN)
+        {
+            self.render_table_vertical(&header, &rows, &first_prefix, &continuation, content_width);
+            return;
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(border_line(&widths, ['┌', '─', '┬', '┐']));
+        push_row_lines(&mut lines, &header_lines, &widths, true, &table.align);
+        lines.push(border_line(&widths, ['├', '─', '┼', '┤']));
+        for (index, row) in body_lines.iter().enumerate() {
+            push_row_lines(&mut lines, row, &widths, false, &table.align);
+            if index + 1 < body_lines.len() {
+                lines.push(border_line(&widths, ['├', '─', '┼', '┤']));
+            }
+        }
+        lines.push(border_line(&widths, ['└', '─', '┴', '┘']));
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let prefix = if index == 0 {
+                &first_prefix
+            } else {
+                &continuation
+            };
+            // The row after the top border is the header.
+            let style = if index == 1 {
+                RowStyle::TableHeader
+            } else {
+                RowStyle::TableRow
+            };
+            self.rows.push(Row::new(style, format!("{prefix}{line}")));
+        }
+    }
+
+    /// Ink's narrow-terminal table form: one `Label: value` block per row,
+    /// separated by a horizontal rule, values wrapped under a two-space indent.
+    fn render_table_vertical(
+        &mut self,
+        header: &[String],
+        rows: &[Vec<String>],
+        first_prefix: &str,
+        continuation: &str,
+        content_width: usize,
+    ) {
+        let mut lines: Vec<String> = Vec::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            if row_index > 0 {
+                lines.push("─".repeat(content_width.saturating_sub(1).min(40)));
+            }
+            for (column, cell) in row.iter().enumerate() {
+                let label = header
+                    .get(column)
+                    .map(|label| label.trim())
+                    .filter(|label| !label.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("Column {}", column + 1));
+                let value = cell.split_whitespace().collect::<Vec<_>>().join(" ");
+                let label_width = display_width(&label);
+                let first_width = content_width.saturating_sub(label_width + 3).max(10);
+                let next_width = content_width.saturating_sub(3).max(10);
+                let mut wrapped = wrap_words(&value, first_width);
+                let first = wrapped.first().cloned().unwrap_or_default();
+                lines.push(format!("{label}: {first}"));
+                let rest = wrapped.drain(1..).collect::<Vec<_>>().join(" ");
+                for line in wrap_words(&rest, next_width) {
+                    let line = line.trim_start();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    lines.push(format!("  {line}"));
+                }
+            }
+        }
+        for (index, line) in lines.into_iter().enumerate() {
+            let prefix = if index == 0 {
+                first_prefix
+            } else {
+                continuation
+            };
+            self.rows
+                .push(Row::new(RowStyle::TableRow, format!("{prefix}{line}")));
         }
     }
 
@@ -435,7 +612,8 @@ impl Renderer {
     /// Both have the same display width (all prefixes are ASCII), so a single
     /// content width can be used for both.
     fn prefixes(&mut self) -> (String, String) {
-        let quote = "> ".repeat(self.quote_depth);
+        // `figures.BLOCKQUOTE_BAR` plus a space per nesting level.
+        let quote = format!("{BLOCKQUOTE_BAR} ").repeat(self.quote_depth);
         let depth = self.lists.len();
         if depth == 0 {
             return (quote.clone(), quote);
@@ -459,7 +637,7 @@ impl Renderer {
         let (first_prefix, continuation) = self.prefixes();
         let prefix_width = first_prefix.chars().count();
         let available = self.width.saturating_sub(prefix_width).max(1);
-        for (index, line) in wrap_text(text, available).into_iter().enumerate() {
+        for (index, line) in wrap_words(text, available).into_iter().enumerate() {
             let prefix = if index == 0 {
                 &first_prefix
             } else {
@@ -510,37 +688,170 @@ fn heading_level(level: HeadingLevel) -> u8 {
     level as u8
 }
 
-/// Gap inserted between table columns.
-const COLUMN_GAP: &str = " │ ";
+/// Blockquote prefix (`figures.BLOCKQUOTE_BAR` plus one space).
+const BLOCKQUOTE_BAR: &str = "▎";
 
-/// Maximum number of characters of a link destination shown in ` (url)`.
-const MAX_URL_CHARS: usize = 60;
+/// Ink's `MIN_COLUMN_WIDTH` for table columns.
+const MIN_COLUMN_WIDTH: usize = 3;
+
+/// Ink's `MAX_ROW_LINES`: taller rows switch the table to vertical form.
+const MAX_ROW_LINES: usize = 4;
+
+/// Ink's `SAFETY_MARGIN` when sizing tables against the terminal width.
+const TABLE_SAFETY_MARGIN: usize = 4;
 
 fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-/// Truncate `text` to at most `width` display cells, ending in `…` when cut.
-fn truncate_to_width(text: &str, width: usize) -> String {
-    if display_width(text) <= width {
-        return text.to_string();
+/// One border line of the box table, e.g. `┌───┬───┐`.
+fn border_line(widths: &[usize], [left, mid, cross, right]: [char; 4]) -> String {
+    let mut line = String::new();
+    line.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        line.push_str(&mid.to_string().repeat(width + 2));
+        line.push(if index + 1 < widths.len() {
+            cross
+        } else {
+            right
+        });
     }
-    if width == 0 {
-        return String::new();
-    }
-    // Reserve one cell for the ellipsis.
-    let budget = width - 1;
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let char_width = ch.width().unwrap_or(0);
-        if used + char_width > budget {
-            break;
+    line
+}
+
+/// Append the wrapped lines of one table row, padding and aligning each cell.
+/// Cells are centred vertically, exactly like `MarkdownTable.tsx`.
+fn push_row_lines(
+    out: &mut Vec<String>,
+    cells: &[Vec<String>],
+    widths: &[usize],
+    header: bool,
+    align: &[Alignment],
+) {
+    let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    for line_index in 0..height {
+        let mut line = String::from("│");
+        for (column, cell) in cells.iter().enumerate() {
+            let offset = (height - cell.len()) / 2;
+            let text = line_index
+                .checked_sub(offset)
+                .and_then(|index| cell.get(index))
+                .map(String::as_str)
+                .unwrap_or("");
+            let width = widths[column];
+            // Headers are always centred; data rows use the column alignment.
+            let alignment = if header {
+                Alignment::Center
+            } else {
+                align.get(column).copied().unwrap_or(Alignment::None)
+            };
+            line.push(' ');
+            line.push_str(&align_cell(text, width, alignment));
+            line.push_str(" │");
         }
-        out.push(ch);
-        used += char_width;
+        out.push(line);
     }
-    out.push('…');
+}
+
+/// Width of the longest word in `text`, at least [`MIN_COLUMN_WIDTH`].
+fn longest_word_width(text: &str) -> usize {
+    text.split_whitespace()
+        .map(display_width)
+        .max()
+        .unwrap_or(0)
+        .max(MIN_COLUMN_WIDTH)
+}
+
+/// Wrap one table cell and drop the empty lines a trailing break may leave.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    let lines: Vec<String> = wrap_words(text, width)
+        .into_iter()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+/// Word-wrap `text` to `width` display columns, preserving explicit newlines.
+///
+/// Breaks prefer spaces (Ink's `wordWrap: true`); a word wider than the line —
+/// or a run without spaces, like CJK — is hard-broken so nothing is dropped.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let expanded = line.replace('\t', "    ");
+        wrap_line(&expanded, width, &mut rows);
+    }
+    rows
+}
+
+fn wrap_line(line: &str, width: usize, rows: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut used = 0usize;
+    for (is_space, chunk) in chunks(line) {
+        let chunk_width = display_width(chunk);
+        if is_space {
+            // Leading spaces of a continuation line are dropped; a space that
+            // would end the line is dropped too (the word starts a new row).
+            if !current.is_empty() && used + chunk_width <= width {
+                current.push_str(chunk);
+                used += chunk_width;
+            }
+            continue;
+        }
+        if !current.is_empty() && used + chunk_width > width {
+            rows.push(std::mem::take(&mut current).trim_end().to_string());
+            used = 0;
+        }
+        if chunk_width <= width {
+            current.push_str(chunk);
+            used += chunk_width;
+            continue;
+        }
+        // Overlong word: hard-break it at the display-width boundary.
+        for ch in chunk.chars() {
+            let char_width = ch.width().unwrap_or(0);
+            if used + char_width > width && used > 0 {
+                rows.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            current.push(ch);
+            used += char_width;
+        }
+    }
+    rows.push(current.trim_end().to_string());
+}
+
+/// Split a line into alternating word / whitespace chunks (space runs only).
+fn chunks(line: &str) -> Vec<(bool, &str)> {
+    let mut out: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0usize;
+    let mut state: Option<bool> = None;
+    for (index, ch) in line.char_indices() {
+        let is_space = ch == ' ';
+        match state {
+            None => {
+                state = Some(is_space);
+                start = index;
+            }
+            Some(previous) if previous != is_space => {
+                out.push((previous, &line[start..index]));
+                state = Some(is_space);
+                start = index;
+            }
+            _ => {}
+        }
+    }
+    if let Some(is_space) = state {
+        out.push((is_space, &line[start..]));
+    }
     out
 }
 
@@ -561,72 +872,6 @@ fn align_cell(text: &str, width: usize, align: Alignment) -> String {
     }
 }
 
-/// Render one logical table line (truncating and padding every cell).
-fn table_line(cells: &[String], widths: &[usize], align: &[Alignment]) -> String {
-    let mut line = String::new();
-    for (index, width) in widths.iter().enumerate() {
-        if index > 0 {
-            line.push_str(COLUMN_GAP);
-        }
-        let cell = cells.get(index).map(String::as_str).unwrap_or("");
-        let text = truncate_to_width(cell, *width);
-        let alignment = align.get(index).copied().unwrap_or(Alignment::None);
-        line.push_str(&align_cell(&text, *width, alignment));
-    }
-    line
-}
-
-/// Scale natural column widths down to `budget`, proportionally, keeping at
-/// least one cell per non-empty column and never exceeding the natural width.
-fn shrink_columns(natural: &[usize], budget: usize) -> Vec<usize> {
-    let mut widths = vec![0usize; natural.len()];
-    let filled = natural.iter().filter(|width| **width > 0).count();
-    if filled == 0 {
-        return widths;
-    }
-    // Reserve one cell per non-empty column, then split the remainder in
-    // proportion to each column's extra width above that reservation.
-    let reserved = filled.min(budget);
-    let mut reserved_left = reserved;
-    for (index, width) in natural.iter().enumerate() {
-        if *width > 0 && reserved_left > 0 {
-            widths[index] = 1;
-            reserved_left -= 1;
-        }
-    }
-    let remaining = budget - reserved;
-    if remaining == 0 {
-        return widths;
-    }
-    let extra: Vec<usize> = natural
-        .iter()
-        .map(|width| width.saturating_sub(1))
-        .collect();
-    let extra_total: usize = extra.iter().sum();
-    if extra_total == 0 {
-        return widths;
-    }
-    let mut share: Vec<usize> = extra
-        .iter()
-        .map(|value| remaining * value / extra_total)
-        .collect();
-    let assigned: usize = share.iter().sum();
-    let leftover = remaining - assigned;
-    let mut order: Vec<(usize, usize)> = (0..natural.len())
-        .filter(|&index| extra[index] > 0)
-        .map(|index| (index, remaining * extra[index] % extra_total))
-        .collect();
-    // Largest remainder first; ties go to the leftmost column.
-    order.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-    for &(index, _) in order.iter().take(leftover) {
-        share[index] += 1;
-    }
-    for (index, width) in widths.iter_mut().enumerate() {
-        *width += share[index];
-    }
-    widths
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,10 +884,11 @@ mod tests {
     #[test]
     fn renders_each_heading_level_with_its_style() {
         let rows = render_markdown("# One\n\n## Two\n\n###### Six", 80);
-        assert_eq!(texts(&rows), ["One", "Two", "Six"]);
+        assert_eq!(texts(&rows), ["One", "", "Two", "", "Six"]);
         assert_eq!(rows[0].style, RowStyle::Heading(1));
-        assert_eq!(rows[1].style, RowStyle::Heading(2));
-        assert_eq!(rows[2].style, RowStyle::Heading(6));
+        assert_eq!(rows[2].style, RowStyle::Heading(2));
+        assert_eq!(rows[4].style, RowStyle::Heading(6));
+        assert!(rows[1].text.is_empty() && rows[3].text.is_empty());
     }
 
     #[test]
@@ -690,6 +936,24 @@ mod tests {
     }
 
     #[test]
+    fn wraps_prose_between_words_like_ink() {
+        let rows = render_markdown("hello world foo", 8);
+        assert_eq!(texts(&rows), ["hello", "world", "foo"]);
+
+        let rows = render_markdown("aaaaa bbbbb", 6);
+        assert_eq!(texts(&rows), ["aaaaa", "bbbbb"]);
+    }
+
+    #[test]
+    fn separates_paragraphs_but_not_list_items() {
+        let rows = render_markdown("one\n\ntwo", 80);
+        assert_eq!(texts(&rows), ["one", "", "two"]);
+
+        let rows = render_markdown("- one\n- two", 80);
+        assert_eq!(texts(&rows), ["- one", "- two"]);
+    }
+
+    #[test]
     fn empty_and_whitespace_only_input_render_no_rows() {
         assert!(render_markdown("", 80).is_empty());
         assert!(render_markdown("   \n\n\t\n", 80).is_empty());
@@ -699,9 +963,18 @@ mod tests {
     #[test]
     fn prefixes_blockquotes_and_renders_rules() {
         let rows = render_markdown("> quoted text\n\n---", 40);
-        assert_eq!(texts(&rows), ["> quoted text", "---"]);
+        // `figures.BLOCKQUOTE_BAR` plus a space, then a blank separator.
+        assert_eq!(texts(&rows), ["▎ quoted text", "", "---"]);
         assert_eq!(rows[0].style, RowStyle::Blockquote);
-        assert_eq!(rows[1].style, RowStyle::Rule);
+        assert_eq!(rows[2].style, RowStyle::Rule);
+    }
+
+    #[test]
+    fn nests_blockquote_bars() {
+        let rows = render_markdown("> outer\n>> inner", 40);
+        assert_eq!(texts(&rows), ["▎ outer", "▎ ▎ inner"]);
+        assert_eq!(rows[0].style, RowStyle::Blockquote);
+        assert_eq!(rows[1].style, RowStyle::Blockquote);
     }
 
     #[test]
@@ -720,20 +993,27 @@ mod tests {
     }
 
     #[test]
-    fn renders_tables_with_aligned_columns() {
+    fn renders_box_tables_with_aligned_columns() {
         let input = "| Name | Qty |\n| :--- | ---: |\n| apple | 3 |\n| banana | 12 |\n";
         let rows = render_markdown(input, 40);
         assert_eq!(
             texts(&rows),
             [
-                "Name   │ Qty",
-                "───────┼────",
-                "apple  │   3",
-                "banana │  12",
+                "┌────────┬─────┐",
+                "│  Name  │ Qty │",
+                "├────────┼─────┤",
+                "│ apple  │   3 │",
+                "├────────┼─────┤",
+                "│ banana │  12 │",
+                "└────────┴─────┘",
             ]
         );
-        assert_eq!(rows[0].style, RowStyle::TableHeader);
-        assert!(rows[1..].iter().all(|row| row.style == RowStyle::TableRow));
+        assert_eq!(rows[1].style, RowStyle::TableHeader);
+        assert!(
+            rows.iter()
+                .filter(|row| row.style != RowStyle::TableHeader)
+                .all(|row| row.style == RowStyle::TableRow)
+        );
         assert!(rows.iter().all(|row| display_width(&row.text) <= 40));
     }
 
@@ -743,7 +1023,13 @@ mod tests {
         let rows = render_markdown(input, 40);
         assert_eq!(
             texts(&rows),
-            ["bold  │ code", "──────┼─────", "plain │   em"]
+            [
+                "┌───────┬──────┐",
+                "│ bold  │ code │",
+                "├───────┼──────┤",
+                "│ plain │   em │",
+                "└───────┴──────┘",
+            ]
         );
     }
 
@@ -751,20 +1037,26 @@ mod tests {
     fn sizes_cjk_table_cells_by_display_width() {
         let input = "| 名 | 数量 |\n| --- | --- |\n| 汉字 | 很多 |\n";
         let rows = render_markdown(input, 40);
-        assert_eq!(texts(&rows), ["名   │ 数量", "─────┼─────", "汉字 │ 很多"]);
+        assert_eq!(
+            texts(&rows),
+            [
+                "┌──────┬──────┐",
+                "│  名  │ 数量 │",
+                "├──────┼──────┤",
+                "│ 汉字 │ 很多 │",
+                "└──────┴──────┘",
+            ]
+        );
         let widths: Vec<usize> = rows.iter().map(|row| display_width(&row.text)).collect();
-        assert_eq!(widths, [11, 11, 11]);
+        assert_eq!(widths, [15, 15, 15, 15, 15]);
     }
 
     #[test]
-    fn shrinks_and_truncates_tables_that_exceed_the_width() {
+    fn narrow_tables_degrade_to_the_vertical_form() {
         let input = "| alpha | beta |\n| --- | ---: |\n| gamma | delta |\n";
         let rows = render_markdown(input, 12);
-        assert_eq!(
-            texts(&rows),
-            ["alpha │ beta", "──────┼─────", "gamma │ del…"]
-        );
-        assert!(rows.iter().any(|row| row.text.contains('…')));
+        assert_eq!(texts(&rows), ["alpha: gamma", "beta: delta"]);
+        assert!(rows.iter().all(|row| row.style == RowStyle::TableRow));
         assert!(
             rows.iter().all(|row| display_width(&row.text) <= 12),
             "row wider than 12: {:?}",
@@ -773,27 +1065,35 @@ mod tests {
     }
 
     #[test]
-    fn links_show_url_suffix_only_when_it_differs_from_text() {
-        let rows = render_markdown("[docs](https://example.com/docs)", 80);
-        assert_eq!(texts(&rows), ["docs (https://example.com/docs)"]);
-
-        let rows = render_markdown("[https://example.com](https://example.com)", 80);
-        assert_eq!(texts(&rows), ["https://example.com"]);
-
-        let long = format!("https://example.com/{}", "a".repeat(60));
-        let rows = render_markdown(&format!("[link]({long})"), 200);
-        let shown: String = long.chars().take(MAX_URL_CHARS).collect();
-        assert_eq!(rows[0].text, format!("link ({shown})"));
-        assert!(!rows[0].text.contains(&"a".repeat(MAX_URL_CHARS)));
+    fn tall_rows_degrade_to_the_vertical_form() {
+        // This cell wraps to five lines at the column width the grid can
+        // afford, past Ink's `MAX_ROW_LINES`.
+        let input = "| key | value |\n| --- | --- |\n| a | one two three four five six |\n";
+        let rows = render_markdown(input, 20);
+        assert!(rows.iter().any(|row| row.text.starts_with("key: ")));
+        assert!(rows.iter().any(|row| row.text.starts_with("value: ")));
+        assert!(rows.iter().all(|row| !row.text.starts_with('│')));
     }
 
     #[test]
-    fn images_render_as_text_placeholders() {
+    fn links_render_their_text_and_mailto_shows_the_address() {
+        let rows = render_markdown("[docs](https://example.com/docs)", 80);
+        assert_eq!(texts(&rows), ["docs"]);
+
+        let rows = render_markdown("[email me](mailto:me@example.com)", 80);
+        assert_eq!(texts(&rows), ["me@example.com"]);
+
+        let rows = render_markdown("[a **bold** link](https://x.y)", 80);
+        assert_eq!(texts(&rows), ["a bold link"]);
+    }
+
+    #[test]
+    fn images_render_as_their_destination() {
         let rows = render_markdown("![a diagram](diagram.png)", 80);
-        assert_eq!(texts(&rows), ["[image: a diagram]"]);
+        assert_eq!(texts(&rows), ["diagram.png"]);
 
         let rows = render_markdown("before ![alt **text**](x.png) after", 80);
-        assert_eq!(texts(&rows), ["before [image: alt text] after"]);
+        assert_eq!(texts(&rows), ["before x.png after"]);
     }
 
     #[test]
@@ -804,10 +1104,14 @@ mod tests {
             texts(&rows),
             [
                 "Intro paragraph.",
-                "A │ B",
-                "──┼──",
-                "1 │ 2",
-                "After the table."
+                "",
+                "┌─────┬─────┐",
+                "│  A  │  B  │",
+                "├─────┼─────┤",
+                "│ 1   │ 2   │",
+                "└─────┴─────┘",
+                "",
+                "After the table.",
             ]
         );
         let styles: Vec<RowStyle> = rows.iter().map(|row| row.style).collect();
@@ -815,9 +1119,13 @@ mod tests {
             styles,
             [
                 RowStyle::Assistant,
+                RowStyle::Assistant,
+                RowStyle::TableRow,
                 RowStyle::TableHeader,
                 RowStyle::TableRow,
                 RowStyle::TableRow,
+                RowStyle::TableRow,
+                RowStyle::Assistant,
                 RowStyle::Assistant,
             ]
         );

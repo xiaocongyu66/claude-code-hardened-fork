@@ -66,4 +66,9 @@ Verified against the Ink app; each row names the source of truth.
 | Diff colours | `theme.ts` `diffAdded`/`diffRemoved` used as **background** | `bg(diff_added_bg/diff_removed_bg)` | ✅ |
 | Palette values | `theme.ts` dark/light tables | exact RGB, line references in `crates/theme` | ✅ |
 | Message spacing | `marginTop={addMargin ? 1 : 0}` (`AssistantTextMessage.tsx:186`) | blank separator rows in both modes | ✅ |
+| Prose wrapping | `wrapAnsi` word wrap (`@anthropic/ink`) | `markdown::wrap_words` (space-first, hard-break overlong words/CJK) | ✅ |
+| Blockquote | `figures.BLOCKQUOTE_BAR` = `▎`, `utils/markdown.ts:64-71` (dim bar + italic text) | `▎ ` per nesting level | 🟡 bar done; italic/`dim` split needs a two-span row, tracked in render |
+| Table layout | `MarkdownTable.tsx` (box grid, wrapped cells, centred headers, vertical fallback) | `markdown::render_table`: `┌─┬┐/├─┼┤/└─┴┘`, `MIN_COLUMN_WIDTH=3`, `MAX_ROW_LINES=4`, `SAFETY_MARGIN=4` | ✅ |
+| Link / image | `utils/markdown.ts:112-142` (`link` → text, `mailto:` → email, `image` → href) | same visible text; OSC 8 hyperlinks left to the painter | ✅ |
+| Block spacing | `markdown.ts` token stream (blank line between blocks) | one empty row between top-level blocks | ✅ (painter skips empty rows in completed messages pending render patch) |
 | Status line | `StatusLine.tsx` | model · session · ctx% · tasks · queue · spinner | 🟡 subset: Ink also shows cache hit rate, rate-limit windows and token budget, which the stream-json engine does not expose (Ink is settings-gated too) |
