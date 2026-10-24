@@ -39,6 +39,8 @@ const DIALOG_ACTIONS: &[Action] = &[
 /// Prompt editing, submission, and history actions.
 const PROMPT_ACTIONS: &[Action] = &[
     Action::PROMPT_SUBMIT,
+    Action::PROMPT_SEND_NOW,
+    Action::PROMPT_QUEUE_SUBMIT,
     Action::PROMPT_NEWLINE,
     Action::PROMPT_ESCAPE,
     Action::PROMPT_UNDO,

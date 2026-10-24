@@ -31,6 +31,10 @@ impl Action {
 
     // Prompt-level actions.
     pub const PROMPT_SUBMIT: Self = Self::new("prompt.submit");
+    /// `Ctrl+Enter`: interrupt a running turn and send the draft immediately.
+    pub const PROMPT_SEND_NOW: Self = Self::new("prompt.send_now");
+    /// `Ctrl+X Enter`: put the draft at the front of the pending queue.
+    pub const PROMPT_QUEUE_SUBMIT: Self = Self::new("prompt.queue_submit");
     pub const PROMPT_NEWLINE: Self = Self::new("prompt.newline");
     pub const PROMPT_ESCAPE: Self = Self::new("prompt.escape");
     pub const PROMPT_UNDO: Self = Self::new("prompt.undo");
