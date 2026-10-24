@@ -86,6 +86,57 @@ The environment variable is the only switch — there is no config-file setting.
   `stage/tui/<triple>/cch-tui[.exe]` standalone binary remains for the
   process-spawning path and is not required by the napi host.
 
+## Smoke test
+
+`scripts/tui-native-smoke.ts` verifies that the packaged payload actually
+loads through the main-package loader — a green `cargo build` alone does not
+prove the `.node` is stageable, loadable, and structurally valid.
+
+Two tiers:
+
+1. **load-only** — used when `CCH_TUI_SMOKE_NO_TTY=1` or stdin is not a TTY.
+   Loads `vendor/tui/<triple>/tui.node` through `loadNativeModule()` (the
+   exact loader behind `loadTuiNative()`), asserts the payload is non-null and
+   passes the five-function structural probe, then asserts `is_supported()`
+   is false. Nothing is started. (`loadTuiNative()` itself returns `null`
+   without a TTY because availability folds in `is_supported()`.)
+2. **tty** — stdin is a TTY (CI runs it under `script`). Calls
+   `loadTuiNative()`, asserts non-null, then
+   `start({fullscreen:true, theme:'dark'})` →
+   `send({"type":"system","subtype":"init"})` → `poll()` ×20 → `stop()`.
+   `stop()` runs even when the round trip throws.
+
+   Fullscreen is used because the inline viewport anchors itself with a
+   cursor-position query (`ESC[6n`), and a bare `script` PTY has no terminal
+   emulator behind it to answer. Fullscreen only needs the terminal-size
+   ioctl, so the same `start/send/poll/stop` surface is exercised without
+   depending on a DSR reply.
+
+Output is a single line, `SMOKE OK mode=load-only|tty`; failures exit 1.
+
+The `package` CI job runs this after dependencies are installed and the
+native artifacts are synced into `vendor/tui/`:
+
+```bash
+script -qec "bun scripts/tui-native-smoke.ts" /dev/null
+```
+
+`script(1)` provides the PTY. If it is unavailable, CI falls back to
+`CCH_TUI_SMOKE_NO_TTY=1 bun scripts/tui-native-smoke.ts` and logs a warning.
+The step is blocking, so a payload that cannot be loaded stops the release.
+
+Locally (requires a staged `vendor/tui/<triple>/tui.node`):
+
+```bash
+bun scripts/tui-native-smoke.ts                          # PTY round trip
+CCH_TUI_SMOKE_NO_TTY=1 bun scripts/tui-native-smoke.ts   # load-only
+```
+
+Limits: this covers the vendor path on the runner's platform only. The
+base64-embedded path inside `bun --compile` binaries is a different artifact
+and is not exercised here; rendering and frame semantics are also out of
+scope (the TUI is started, polled and stopped, with no screen assertions).
+
 ## Fallback
 
 Any of the following keeps the Ink REPL:
