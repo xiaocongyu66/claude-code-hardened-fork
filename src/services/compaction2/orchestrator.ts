@@ -49,8 +49,8 @@ import {
   type CompactionEntryAttachmentMeta,
   type CompactionSessionEntry,
 } from './session/entries.js'
-import { countContextTokens } from './tokens/contextCount.js'
 import { estimateTokens } from './tokens/index.js'
+import { countMessagesForThreshold } from './tokens/messageCount.js'
 import { evaluateIdleTrigger } from './triggers/idle.js'
 import { evaluateIncompleteTrigger } from './triggers/incomplete.js'
 import { evaluateManualTrigger } from './triggers/manual.js'
@@ -932,13 +932,16 @@ export async function runCompactionV2ForQuery(
   }
   const windowTokens = getEffectiveContextWindowSize(request.model)
   const autoCompactThreshold = getAutoCompactThreshold(request.model)
-  // omp-style measurement: the last provider usage block anchors the count and
-  // only the messages after it are tokenized. The caller's `tokenCount` is a
-  // legacy estimate and is deliberately not used on this path. An explicit
-  // override is only for preview runs whose snapshot sits below the threshold.
+  // Prefer an explicit override (preview runs whose snapshot sits below the
+  // threshold); otherwise use the real tokenizer when available and fall back
+  // to the caller's usage-anchored estimate when no tokenizer data resolves.
   const tokenCount =
     request.tokenCountOverride ??
-    countContextTokens(request.messages, request.model).tokens
+    countMessagesForThreshold(
+      request.messages,
+      request.model,
+      request.tokenCount,
+    )
 
   // Remote compaction is opt-in. Build the provider-bound transport lazily so
   // the flag-off path never touches auth, and a missing transport keeps the

@@ -107,6 +107,8 @@ import {
   finalContextTokensFromLastResponse,
   tokenCountWithEstimation,
 } from './utils/tokens.js'
+import { countTokensPreciseForMessages } from './services/tokenEstimation.js'
+import { countMessagesForThreshold } from './services/compaction2/tokens/messageCount.js'
 import { ESCALATED_MAX_TOKENS } from './utils/context.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from './services/analytics/growthbook.js'
 import { SLEEP_TOOL_NAME } from '@claude-code-hardened/builtin-tools/tools/SleepTool/prompt.js'
@@ -1258,9 +1260,17 @@ async function* queryLoop(
         messagesForQuery = compactionV2AppendedMessages
           ? [...v2Result.reducedMessages, ...compactionV2AppendedMessages]
           : v2Result.reducedMessages
-        compactionV2TokenOverride = countV2ContextTokens(
+        // Same counting rule as runCompactionV2ForQuery's threshold pass:
+        // real tokenizer when available, otherwise the precise cl100k estimate.
+        compactionV2TokenOverride = countMessagesForThreshold(
           messagesForQuery,
           toolUseContext.options.mainLoopModel,
+          () =>
+            countTokensPreciseForMessages(
+              messagesForQuery as Parameters<
+                typeof countTokensPreciseForMessages
+              >[0],
+            ),
         )
         compactionV2ContextTokens = compactionV2TokenOverride
         const notice = reducedNoticeFor(v2Result)
