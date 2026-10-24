@@ -10,10 +10,10 @@ const localTty: TuiModeInput = {
 }
 
 describe('resolveTuiMode', () => {
-  test('auto prefers native in a local interactive session', () => {
+  test('auto stays on ink until the native TUI reaches parity', () => {
     expect(resolveTuiMode({ ...localTty })).toEqual({
       requested: 'auto',
-      mode: 'native',
+      mode: 'ink',
     })
   })
 
@@ -133,6 +133,6 @@ describe('resolveTuiMode', () => {
         env: 'gpu',
         legacyEnv: '2',
       }),
-    ).toEqual({ requested: 'auto', mode: 'native' })
+    ).toEqual({ requested: 'auto', mode: 'ink' })
   })
 })

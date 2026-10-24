@@ -1449,7 +1449,7 @@ async function run(): Promise<CommanderCommand> {
     .addOption(
       new Option(
         '--tui <mode>',
-        'Terminal UI renderer: auto (native Rust TUI when available), native, or ink (env CCH_TUI; default: auto)',
+        'Terminal UI renderer: auto (currently Ink; native opt-in until parity), native, or ink (env CCH_TUI; default: auto)',
       ).choices(['auto', 'native', 'ink']),
     )
     .option('--chrome', 'Enable Claude in Chrome integration')

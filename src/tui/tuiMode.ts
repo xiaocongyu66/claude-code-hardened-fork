@@ -2,9 +2,11 @@
  * Renderer mode resolution for the REPL: `auto` | `native` | `ink`.
  *
  * Priority: `--tui` flag > `CCH_TUI` > legacy `CCH_TUI_NATIVE` > `auto`.
- * `auto` prefers the in-process Rust napi TUI for a local interactive session
- * and falls back to Ink everywhere else. `native` does the same but reports a
- * fallback reason when it cannot run. `ink` always keeps the Ink renderer.
+ * `auto` currently keeps the Ink renderer: the Rust TUI is not yet
+ * behaviourally equivalent (welcome screen and several interaction paths are
+ * still missing), so the default must stay on the known-good path. `native`
+ * opts into the Rust TUI explicitly and reports why it fell back. `ink` always
+ * keeps the Ink renderer.
  *
  * Pure: the caller supplies the environment, TTY state, session kind and
  * native-module availability, so the matrix is unit-testable without FFI.
@@ -116,6 +118,15 @@ export function resolveTuiMode(input: TuiModeInput): TuiModeResolution {
           ? 'native TUI module unavailable'
           : undefined
 
+  if (requested === 'auto') {
+    // Parity work is incomplete; auto stays on Ink until the Rust TUI matches
+    // the Ink REPL. `--tui=native` remains the explicit opt-in.
+    return {
+      requested,
+      mode: 'ink',
+      ...(fallbackReason ? { fallbackReason } : {}),
+    }
+  }
   if (fallbackReason) {
     return { requested, mode: 'ink', fallbackReason }
   }
