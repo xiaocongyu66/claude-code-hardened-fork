@@ -12,16 +12,37 @@ The Rust napi TUI is now the **default** renderer for local interactive
 sessions. Selection is `--tui <auto|native|ink>` with precedence
 `--tui` > `CCH_TUI` > legacy `CCH_TUI_NATIVE` > `auto`:
 
-- `auto` (default) — runs the native TUI when stdin/stdout are TTYs, the
-  session is local (no remote/SSH/direct-connect), and the `cch_tui` addon
-  loads; otherwise renders Ink.
+- `auto` (default) — runs the native TUI when stdin/stdout are TTYs the
+  `cch_tui` addon loads, for local, `claude ssh` and `claude connect`
+  (direct-connect) sessions; otherwise renders Ink.
 - `native` — same gates, but logs a one-line stderr reason when it has to
   fall back.
 - `ink` — always renders Ink.
 
 Ink is therefore reachable only explicitly (`--tui=ink`, `CCH_TUI=ink` or
-`CCH_TUI_NATIVE=0`). It stays in the tree on purpose: the component deletion
-lands in a separate commit after the default flip bakes in CI.
+`CCH_TUI_NATIVE=0`), or automatically for the KAIROS `--remote` viewer. It
+stays in the tree on purpose: the component deletion lands in a separate
+commit after the default flip bakes in CI.
+
+### Remote session modes
+
+`src/remote/nativeSession.ts` owns the non-React half of every remote
+transport (connect / send / interrupt / disconnect) and the SDK→frame
+adapter. The Ink hooks and the native host share it, so both renderers run
+the same lifecycle.
+
+| Mode | Renderer | Notes |
+|---|---|---|
+| local | ✅ native (Ink opt-in) | QueryEngine backend in `nativeRepl.ts` |
+| `claude ssh` | ✅ native (Ink opt-in) | stream-json over the SSH child; the bridge injects assistant/stream/system/result frames, filters prompt echoes, and routes `can_use_tool` through the TUI dialog. The first `system/init` is consumed by `waitForInit`, so the SSH session starts without a slash-command palette |
+| `claude connect` | ✅ native (Ink opt-in) | same bridge over the direct-connect WebSocket; duplicate per-turn `system/init` frames are collapsed |
+| `--remote` (KAIROS) | 🟡 Ink | viewer-only echo filtering, 60 s/3 min response timeouts, background-task counters and lazy history still live in `useRemoteSession`; the native renderer is not wired and the launcher keeps the Ink gate |
+
+Interrupt / Esc maps to each transport's cancel (`sendInterrupt` for
+SSH/direct-connect, `cancelSession` for KAIROS). Repeated interrupts and
+disconnects are idempotent; disconnect or a failed send releases a queued
+prompt turn. Permission dialogs are keyed by the transport's `request_id`
+and answered back on that same id.
 
 | Area | Ink reference | Rust TUI | Notes |
 |---|---|---|---|

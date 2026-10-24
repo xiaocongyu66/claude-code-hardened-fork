@@ -32,30 +32,32 @@ export async function launchRepl(
   replProps: REPLProps,
   renderAndRun: (root: Root, element: React.ReactNode) => Promise<void>,
 ): Promise<void> {
-  // Native TUI is the default for local interactive sessions (auto). Ink stays
-  // reachable via --tui=ink and is the fallback whenever the addon is missing
-  // (no vendor/tui/<triple>/tui.node, unsupported platform) or the session is
-  // remote/SSH/direct-connect. Resolution order: flag > CCH_TUI >
-  // CCH_TUI_NATIVE > auto.
+  // Native TUI is the default for local interactive sessions (auto). SSH and
+  // direct-connect sessions are supported too (the native host drives their
+  // transports). Ink stays reachable via --tui=ink and is the fallback
+  // whenever the addon is missing (no vendor/tui/<triple>/tui.node,
+  // unsupported platform). The KAIROS `--remote` viewer still requires Ink.
+  // Resolution order: flag > CCH_TUI > CCH_TUI_NATIVE > auto.
   const stdinIsTTY = Boolean(process.stdin.isTTY);
   const stdoutIsTTY = Boolean(process.stdout.isTTY);
-  const remoteSession = Boolean(replProps.remoteSessionConfig || replProps.sshSession || replProps.directConnectConfig);
+  const unsupportedRemoteSession = Boolean(replProps.remoteSessionConfig);
   // Avoid touching the addon at all when it cannot run (forced Ink, pipes,
-  // remote). `auto`/`native` are still fully resolved by resolveTuiMode().
+  // unsupported remote mode). `auto`/`native` are still fully resolved by
+  // resolveTuiMode().
   const requested = resolveRequestedTuiMode({
     flag: tuiModeOverride,
     env: process.env.CCH_TUI,
     legacyEnv: process.env.CCH_TUI_NATIVE,
   });
   const nativeAvailable =
-    requested !== 'ink' && stdinIsTTY && stdoutIsTTY && !remoteSession && loadTuiNative() !== null;
+    requested !== 'ink' && stdinIsTTY && stdoutIsTTY && !unsupportedRemoteSession && loadTuiNative() !== null;
   const resolution = resolveTuiMode({
     flag: tuiModeOverride,
     env: process.env.CCH_TUI,
     legacyEnv: process.env.CCH_TUI_NATIVE,
     stdinIsTTY,
     stdoutIsTTY,
-    remoteSession,
+    remoteSession: unsupportedRemoteSession,
     nativeAvailable,
   });
 

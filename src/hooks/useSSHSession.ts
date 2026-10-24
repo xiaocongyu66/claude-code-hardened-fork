@@ -13,19 +13,16 @@ import { randomUUID } from 'crypto'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
 import {
-  createSyntheticAssistantMessage,
-  createToolStub,
-} from '../remote/remotePermissionBridge.js'
+  buildPermissionPrompt,
+  SSHSessionTransport,
+} from '../remote/nativeSession.js'
 import {
   convertSDKMessage,
   isSessionEndMessage,
 } from '../remote/sdkMessageAdapter.js'
 import type { SSHSession } from '../ssh/createSSHSession.js'
-import type { SSHSessionManager } from '../ssh/SSHSessionManager.js'
 import type { Tool } from '../Tool.js'
-import { findToolByName } from '../Tool.js'
 import type { Message as MessageType } from '../types/message.js'
-import type { PermissionAskDecision } from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
 import { gracefulShutdown } from '../utils/gracefulShutdown.js'
 import type { RemoteMessageContent } from '../utils/teleport/api.js'
@@ -54,7 +51,7 @@ export function useSSHSession({
 }: UseSSHSessionProps): UseSSHSessionResult {
   const isRemoteMode = !!session
 
-  const managerRef = useRef<SSHSessionManager | null>(null)
+  const managerRef = useRef<SSHSessionTransport | null>(null)
   const hasReceivedInitRef = useRef(false)
   const isConnectedRef = useRef(false)
 
@@ -69,7 +66,7 @@ export function useSSHSession({
     hasReceivedInitRef.current = false
     logForDebugging('[useSSHSession] wiring SSH session manager')
 
-    const manager = session.createManager({
+    const manager = new SSHSessionTransport(session, {
       onMessage: sdkMessage => {
         if (isSessionEndMessage(sdkMessage)) {
           setIsLoading(false)
@@ -93,34 +90,20 @@ export function useSSHSession({
           `[useSSHSession] permission request: ${request.tool_name}`,
         )
 
-        const tool =
-          findToolByName(toolsRef.current, request.tool_name) ??
-          createToolStub(request.tool_name)
-
-        const syntheticMessage = createSyntheticAssistantMessage(
-          request as unknown as Parameters<
-            typeof createSyntheticAssistantMessage
-          >[0],
+        const parts = buildPermissionPrompt(
+          request,
           requestId,
+          toolsRef.current,
         )
 
-        const permissionResult: PermissionAskDecision = {
-          behavior: 'ask',
-          message:
-            request.description ?? `${request.tool_name} requires permission`,
-          suggestions: request.permission_suggestions,
-          blockedPath: request.blocked_path,
-        }
-
         const toolUseConfirm: ToolUseConfirm = {
-          assistantMessage: syntheticMessage,
-          tool,
-          description:
-            request.description ?? `${request.tool_name} requires permission`,
-          input: request.input,
+          assistantMessage: parts.syntheticMessage,
+          tool: parts.tool,
+          description: parts.description,
+          input: parts.input,
           toolUseContext: {} as ToolUseConfirm['toolUseContext'],
-          toolUseID: request.tool_use_id,
-          permissionResult,
+          toolUseID: parts.toolUseID,
+          permissionResult: parts.permissionResult,
           permissionPromptStartTimeMs: Date.now(),
           onUserInteraction() {},
           onAbort() {
@@ -209,8 +192,8 @@ export function useSSHSession({
 
     return () => {
       logForDebugging('[useSSHSession] cleanup')
+      // Also stops the session's auth proxy (see SSHSessionTransport).
       manager.disconnect()
-      session.proxy.stop()
       managerRef.current = null
     }
   }, [session, setMessages, setIsLoading, setToolUseConfirmQueue])

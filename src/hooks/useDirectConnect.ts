@@ -1,25 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
-import type { RemotePermissionResponse } from '../remote/RemoteSessionManager.js'
 import {
-  createSyntheticAssistantMessage,
-  createToolStub,
-} from '../remote/remotePermissionBridge.js'
+  buildPermissionPrompt,
+  DirectConnectTransport,
+} from '../remote/nativeSession.js'
+import type { RemotePermissionResponse } from '../remote/RemoteSessionManager.js'
 import {
   convertSDKMessage,
   isSessionEndMessage,
 } from '../remote/sdkMessageAdapter.js'
-import {
-  type DirectConnectConfig,
-  DirectConnectSessionManager,
-} from '../server/directConnectManager.js'
+import type { DirectConnectConfig } from '../server/directConnectManager.js'
 import type { Tool } from '../Tool.js'
-import { findToolByName } from '../Tool.js'
 import type { Message as MessageType } from '../types/message.js'
-import type {
-  PermissionAskDecision,
-  PermissionUpdate,
-} from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
 import { gracefulShutdown } from '../utils/gracefulShutdown.js'
 import type { RemoteMessageContent } from '../utils/teleport/api.js'
@@ -48,7 +40,7 @@ export function useDirectConnect({
 }: UseDirectConnectProps): UseDirectConnectResult {
   const isRemoteMode = !!config
 
-  const managerRef = useRef<DirectConnectSessionManager | null>(null)
+  const managerRef = useRef<DirectConnectTransport | null>(null)
   const hasReceivedInitRef = useRef(false)
   const isConnectedRef = useRef(false)
 
@@ -66,7 +58,7 @@ export function useDirectConnect({
     hasReceivedInitRef.current = false
     logForDebugging(`[useDirectConnect] Connecting to ${config.wsUrl}`)
 
-    const manager = new DirectConnectSessionManager(config, {
+    const manager = new DirectConnectTransport(config, {
       onMessage: sdkMessage => {
         if (isSessionEndMessage(sdkMessage)) {
           setIsLoading(false)
@@ -92,32 +84,20 @@ export function useDirectConnect({
           `[useDirectConnect] Permission request for tool: ${request.tool_name}`,
         )
 
-        const tool =
-          findToolByName(toolsRef.current, request.tool_name) ??
-          createToolStub(request.tool_name)
-
-        const syntheticMessage = createSyntheticAssistantMessage(
+        const parts = buildPermissionPrompt(
           request,
           requestId,
+          toolsRef.current,
         )
 
-        const permissionResult: PermissionAskDecision = {
-          behavior: 'ask',
-          message:
-            request.description ?? `${request.tool_name} requires permission`,
-          suggestions: request.permission_suggestions as PermissionUpdate[],
-          blockedPath: request.blocked_path,
-        }
-
         const toolUseConfirm: ToolUseConfirm = {
-          assistantMessage: syntheticMessage,
-          tool,
-          description:
-            request.description ?? `${request.tool_name} requires permission`,
-          input: request.input,
+          assistantMessage: parts.syntheticMessage,
+          tool: parts.tool,
+          description: parts.description,
+          input: parts.input,
           toolUseContext: {} as ToolUseConfirm['toolUseContext'],
-          toolUseID: request.tool_use_id,
-          permissionResult,
+          toolUseID: parts.toolUseID,
+          permissionResult: parts.permissionResult,
           permissionPromptStartTimeMs: Date.now(),
           onUserInteraction() {
             // No-op for remote

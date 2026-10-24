@@ -1,6 +1,11 @@
 /**
- * CLI adapter: run the native TUI (default via --tui=auto/native) on top of a
- * QueryEngine.
+ * CLI adapter: run the native TUI (default via --tui=auto/native).
+ *
+ * Backend selection from `replProps`:
+ * - local sessions → QueryEngine (existing path)
+ * - `claude ssh` / `claude connect` → `NativeSessionBridge`, which drives the
+ *   session transport and injects its frames into the same host loop
+ * - KAIROS `--remote` → not supported yet; returns false so Ink keeps it
  *
  * This is the only place that knows about REPL/session assembly. The actual
  * host loop in `nativeHost.ts` stays dependency-injected and unit-testable.
@@ -10,6 +15,12 @@
  */
 
 import { QueryEngine, type QueryEngineConfig } from '../QueryEngine.js'
+import {
+  DirectConnectTransport,
+  NativeMessageAdapter,
+  NativeSessionBridge,
+  SSHSessionTransport,
+} from '../remote/nativeSession.js'
 import type { Props as REPLProps } from '../screens/REPL.js'
 import type { AppState } from '../state/AppStateStore.js'
 import { createStore } from '../state/store.js'
@@ -33,6 +44,42 @@ export interface NativeReplInput {
 }
 
 /**
+ * Remote-style sessions the native TUI can host. SSH and direct-connect speak
+ * plain stream-json, so the bridge injects frames unchanged. The KAIROS
+ * `--remote` viewer (`remoteSessionConfig`) is intentionally not listed yet:
+ * its echo filter, response timeouts, task counters and lazy history live in
+ * the React hook. Returns null for that mode so the caller keeps Ink.
+ */
+function createSessionBridge(replProps: REPLProps): NativeSessionBridge | null {
+  const adapter = new NativeMessageAdapter({
+    // Both transports replay the prompt we just sent; the bridge already
+    // rendered an optimistic bubble. Tool results still need to reach the TUI.
+    userFrames: 'tool-results-only',
+    dedupeInit: true,
+  })
+
+  if (replProps.sshSession) {
+    const session = replProps.sshSession
+    return new NativeSessionBridge({
+      adapter,
+      createTransport: callbacks => new SSHSessionTransport(session, callbacks),
+      describeDisconnect: () => session.getStderrTail(),
+    })
+  }
+
+  if (replProps.directConnectConfig) {
+    const config = replProps.directConnectConfig
+    return new NativeSessionBridge({
+      adapter,
+      createTransport: callbacks =>
+        new DirectConnectTransport(config, callbacks),
+    })
+  }
+
+  return null
+}
+
+/**
  * Returns true when the native TUI ran (and exited). False means the caller
  * should render the Ink REPL as usual.
  */
@@ -43,6 +90,32 @@ export async function tryRunNativeTui({
   const nativeModule = loadTuiNative()
   if (!nativeModule) {
     return false
+  }
+
+  // KAIROS remote viewer: not ported yet, keep the Ink path.
+  if (replProps.remoteSessionConfig) {
+    return false
+  }
+  const sessionBridge = createSessionBridge(replProps)
+
+  const nativeOptions = {
+    fullscreen: isFullscreenEnvEnabled(),
+    theme: getGlobalConfig().theme,
+    vim: getGlobalConfig().editorMode === 'vim',
+  }
+
+  // SSH / direct-connect: the transport owns the conversation. Messages are
+  // injected through the host controls; prompts are written to the transport.
+  if (sessionBridge) {
+    const result = await runNativeTui({
+      nativeModule,
+      options: nativeOptions,
+      submitPrompt: text => sessionBridge.submitPrompt(text),
+      abort: () => sessionBridge.interrupt(),
+      onHostReady: controls => sessionBridge.attach(controls),
+      onStop: () => sessionBridge.disconnect(),
+    })
+    return result.started
   }
 
   const store = createStore(initialState)
@@ -86,11 +159,7 @@ export async function tryRunNativeTui({
 
   const result = await runNativeTui({
     nativeModule,
-    options: {
-      fullscreen: isFullscreenEnvEnabled(),
-      theme: getGlobalConfig().theme,
-      vim: getGlobalConfig().editorMode === 'vim',
-    },
+    options: nativeOptions,
     canUseTool: hasPermissionsToUseTool,
     submitPrompt: (text, canUseTool) => {
       if (!engine) {

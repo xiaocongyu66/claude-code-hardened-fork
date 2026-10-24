@@ -38,11 +38,11 @@ describe('resolveTuiMode', () => {
     })
   })
 
-  test('auto suppresses native for remote/SSH/direct-connect sessions', () => {
+  test('auto suppresses native for unsupported remote (KAIROS) sessions', () => {
     expect(resolveTuiMode({ ...localTty, remoteSession: true })).toEqual({
       requested: 'auto',
       mode: 'ink',
-      fallbackReason: 'remote/SSH/direct-connect sessions are not supported',
+      fallbackReason: 'remote (KAIROS) sessions are not supported yet',
     })
   })
 
@@ -63,13 +63,13 @@ describe('resolveTuiMode', () => {
     })
   })
 
-  test('native still respects the remote-session gate', () => {
+  test('native still respects the unsupported remote gate', () => {
     expect(
       resolveTuiMode({ ...localTty, flag: 'native', remoteSession: true }),
     ).toMatchObject({
       requested: 'native',
       mode: 'ink',
-      fallbackReason: 'remote/SSH/direct-connect sessions are not supported',
+      fallbackReason: 'remote (KAIROS) sessions are not supported yet',
     })
   })
 
