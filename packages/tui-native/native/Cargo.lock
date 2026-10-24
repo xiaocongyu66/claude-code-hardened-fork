@@ -244,8 +244,10 @@ dependencies = [
 name = "cch-tui-napi"
 version = "0.1.0"
 dependencies = [
+ "cch-tui-config",
  "cch-tui-proto",
  "cch-tui-runner",
+ "cch-tui-theme",
  "napi",
  "napi-build",
  "napi-derive",
@@ -314,6 +316,7 @@ dependencies = [
  "cch-tui-proto",
  "cch-tui-render",
  "cch-tui-search",
+ "cch-tui-theme",
  "cch-tui-ui",
  "ratatui",
  "serde_json",

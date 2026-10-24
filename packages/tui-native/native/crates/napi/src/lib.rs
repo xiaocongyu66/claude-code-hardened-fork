@@ -22,11 +22,11 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize)]
 struct StartOptions {
     #[serde(default)]
-    fullscreen: bool,
+    fullscreen: Option<bool>,
     #[serde(default)]
     theme: Option<String>,
     #[serde(default)]
-    vim: bool,
+    vim: Option<bool>,
 }
 
 struct Handle {
@@ -68,15 +68,22 @@ pub fn start(options_json: String) -> Result<()> {
         shutdown_handle(previous)?;
     }
     reset_shutdown();
-    set_vim_default(options.vim);
+    // File config supplies defaults; explicit start options win.
+    let config = cch_tui_config::load(None, &|key| std::env::var(key).ok());
+    for warning in &config.warnings {
+        eprintln!("[cch-tui] {warning}");
+    }
+    let config_theme = config.theme.as_str().to_string();
+    let vim = options.vim.unwrap_or(config.vim);
+    set_vim_default(vim);
 
     let (inbox, events) = mpsc::channel();
     let (commands, outbox) = mpsc::channel();
     let run_options = RunOptions {
         inbox: events,
         outbox: commands,
-        fullscreen: options.fullscreen,
-        theme: options.theme,
+        fullscreen: options.fullscreen.unwrap_or(config.fullscreen),
+        theme: Some(options.theme.unwrap_or(config_theme)),
     };
     let thread = thread::Builder::new()
         .name("cch-tui".into())

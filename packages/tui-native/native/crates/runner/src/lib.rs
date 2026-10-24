@@ -216,7 +216,11 @@ pub fn run_interactive_with_mode(
         fullscreen,
         theme,
     } = options;
-    let theme = theme.or_else(|| std::env::var("CCH_TUI_THEME").ok());
+    let theme = resolve_theme_name(
+        theme
+            .or_else(|| std::env::var("CCH_TUI_THEME").ok())
+            .as_deref(),
+    );
     let started = Instant::now();
     let mut screen = Screen::new(&mode, fullscreen, theme.as_deref())?;
     let mut view = ChatView::new();
@@ -1333,6 +1337,20 @@ fn with_spacing(rows: &[Row], mut previous: Option<(RowStyle, bool)>) -> Vec<Row
     out
 }
 
+/// Resolve a theme setting (`dark`/`light`/`auto`) to a concrete built-in
+/// name. `auto` follows `CCH_THEME`, `COLORFGBG`, then defaults to dark.
+fn resolve_theme_name(raw: Option<&str>) -> Option<String> {
+    use cch_tui_theme::{Theme, ThemeSetting};
+    match ThemeSetting::parse(raw.unwrap_or("auto")) {
+        ThemeSetting::Dark => Some("dark".to_string()),
+        ThemeSetting::Light => Some("light".to_string()),
+        ThemeSetting::Auto => {
+            let env = |key: &str| std::env::var(key).ok();
+            Some(Theme::detect(&env, None).name.to_string())
+        }
+    }
+}
+
 /// Append rows to a fullscreen transcript, inserting the blank separators
 /// that inline rendering adds. Exposed for the benchmark harness.
 pub fn freeze_rows(transcript: &mut TranscriptModel, rows: &[Row]) {
@@ -1493,6 +1511,15 @@ fn to_key(key: &ratatui::crossterm::event::KeyEvent) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_names_resolve_explicit_and_auto() {
+        assert_eq!(resolve_theme_name(Some("light")).as_deref(), Some("light"));
+        assert_eq!(resolve_theme_name(Some("dark")).as_deref(), Some("dark"));
+        // Unknown values fall back through ThemeSetting::parse -> auto.
+        let fallback = resolve_theme_name(Some("bogus"));
+        assert!(matches!(fallback.as_deref(), Some("dark" | "light")));
+    }
 
     #[test]
     fn vim_intent_maps_actions_to_transitions() {

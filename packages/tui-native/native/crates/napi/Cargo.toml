@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 [dependencies]
 cch-tui-proto = { path = "../proto" }
 cch-tui-runner = { path = "../runner" }
+cch-tui-config = { path = "../config" }
+cch-tui-theme = { path = "../theme" }
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 serde = { workspace = true, features = ["derive"] }
