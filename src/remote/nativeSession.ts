@@ -57,6 +57,28 @@ export interface SessionPermissionRequest {
   blocked_path?: string
 }
 
+/**
+ * Normalize the SDK control-request shape onto the transport-agnostic type.
+ * The SDK schema's `setMode` suggestions additionally admit the internal
+ * `auto` mode, so the list is asserted to the dialog-facing
+ * `PermissionUpdate[]` — the same boundary cast the Ink hooks used before the
+ * transport extraction.
+ */
+function fromSDKPermissionRequest(
+  request: SDKControlPermissionRequest,
+): SessionPermissionRequest {
+  return {
+    tool_name: request.tool_name,
+    tool_use_id: request.tool_use_id,
+    input: request.input,
+    description: request.description,
+    permission_suggestions: request.permission_suggestions as
+      | PermissionUpdate[]
+      | undefined,
+    blocked_path: request.blocked_path,
+  }
+}
+
 /** Callbacks every transport can emit. All but `onMessage` are optional. */
 export interface SessionTransportCallbacks {
   onMessage: (message: SDKMessage) => void
@@ -156,7 +178,10 @@ export class DirectConnectTransport implements SessionTransport {
     this.manager = new DirectConnectSessionManager(config, {
       onMessage: message => this.callbacks.onMessage(message),
       onPermissionRequest: (request, requestId) =>
-        this.callbacks.onPermissionRequest(request, requestId),
+        this.callbacks.onPermissionRequest(
+          fromSDKPermissionRequest(request),
+          requestId,
+        ),
       onConnected: () => this.callbacks.onConnected?.(),
       onDisconnected: () => this.callbacks.onDisconnected?.(),
       onError: error => this.callbacks.onError?.(error),
@@ -204,7 +229,10 @@ export class RemoteSessionTransport implements SessionTransport {
     this.manager = new RemoteSessionManager(config, {
       onMessage: message => this.callbacks.onMessage(message),
       onPermissionRequest: (request, requestId) =>
-        this.callbacks.onPermissionRequest(request, requestId),
+        this.callbacks.onPermissionRequest(
+          fromSDKPermissionRequest(request),
+          requestId,
+        ),
       onPermissionCancelled: (requestId, toolUseId) =>
         this.callbacks.onPermissionCancelled?.(requestId, toolUseId),
       onConnected: () => this.callbacks.onConnected?.(),

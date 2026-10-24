@@ -291,7 +291,11 @@ describe('NativeSessionBridge', () => {
     })
     bridge.attach({
       send: frame => frames.push(frame),
-      requestPermission: async () => ({ behavior: 'deny', message: 'denied' }),
+      requestPermission: async () => ({
+        behavior: 'deny',
+        message: 'denied',
+        decisionReason: { type: 'mode', mode: 'default' },
+      }),
     })
 
     const iterator = await bridge.submitPrompt('hello')

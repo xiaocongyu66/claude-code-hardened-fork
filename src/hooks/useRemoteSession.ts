@@ -568,7 +568,7 @@ export function useRemoteSession({
     // Send interrupt signal to CCR. Skip in viewerOnly mode — Ctrl+C
     // should never interrupt the remote agent.
     if (!config?.viewerOnly) {
-      managerRef.current?.cancelSession()
+      managerRef.current?.sendInterrupt()
     }
 
     setIsLoading(false)
