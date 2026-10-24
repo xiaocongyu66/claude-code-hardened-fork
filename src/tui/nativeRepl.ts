@@ -1,5 +1,6 @@
 /**
- * CLI adapter: run the native TUI (CCH_TUI_NATIVE=1) on top of a QueryEngine.
+ * CLI adapter: run the native TUI (default via --tui=auto/native) on top of a
+ * QueryEngine.
  *
  * This is the only place that knows about REPL/session assembly. The actual
  * host loop in `nativeHost.ts` stays dependency-injected and unit-testable.

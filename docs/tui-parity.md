@@ -6,6 +6,23 @@ verified against the original component.
 
 Legend: ✅ done · 🟡 partial · ⬜ not started · ⛔ intentionally deferred
 
+## Default renderer (M5)
+
+The Rust napi TUI is now the **default** renderer for local interactive
+sessions. Selection is `--tui <auto|native|ink>` with precedence
+`--tui` > `CCH_TUI` > legacy `CCH_TUI_NATIVE` > `auto`:
+
+- `auto` (default) — runs the native TUI when stdin/stdout are TTYs, the
+  session is local (no remote/SSH/direct-connect), and the `cch_tui` addon
+  loads; otherwise renders Ink.
+- `native` — same gates, but logs a one-line stderr reason when it has to
+  fall back.
+- `ink` — always renders Ink.
+
+Ink is therefore reachable only explicitly (`--tui=ink`, `CCH_TUI=ink` or
+`CCH_TUI_NATIVE=0`). It stays in the tree on purpose: the component deletion
+lands in a separate commit after the default flip bakes in CI.
+
 | Area | Ink reference | Rust TUI | Notes |
 |---|---|---|---|
 | Transcript rendering | `components/Messages.tsx`, `MessageRow.tsx` | ✅ `crates/ui` | text, tool calls/results, errors, compact boundary, system breadcrumbs (hooks, `api_retry`, rate limits, task notifications) |

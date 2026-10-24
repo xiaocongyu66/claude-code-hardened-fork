@@ -35,7 +35,7 @@ import { init, initializeTelemetryAfterTrust } from './entrypoints/init.js';
 import { addToHistory } from './history.js';
 import { t } from './i18n/index.js';
 import type { Root } from '@anthropic/ink';
-import { launchRepl } from './replLauncher.js';
+import { launchRepl, setTuiModeOverride } from './replLauncher.js';
 import {
   hasGrowthBookEnvOverride,
   initializeGrowthBook,
@@ -1446,6 +1446,12 @@ async function run(): Promise<CommanderCommand> {
       [] as string[],
     )
     .option('--disable-slash-commands', 'Disable all skills', () => true)
+    .addOption(
+      new Option(
+        '--tui <mode>',
+        'Terminal UI renderer: auto (native Rust TUI when available), native, or ink (env CCH_TUI; default: auto)',
+      ).choices(['auto', 'native', 'ink']),
+    )
     .option('--chrome', 'Enable Claude in Chrome integration')
     .option('--no-chrome', 'Disable Claude in Chrome integration')
     .option(
@@ -1461,6 +1467,11 @@ async function run(): Promise<CommanderCommand> {
       if ((options as { bare?: boolean }).bare) {
         process.env.CLAUDE_CODE_SIMPLE = '1';
       }
+
+      // No commander default, so an explicit --tui outranks CCH_TUI. The full
+      // precedence (flag > CCH_TUI > CCH_TUI_NATIVE > auto) is resolved at
+      // launchRepl time; every REPL entry point below shares this override.
+      setTuiModeOverride(options.tui);
 
       // Ignore "code" as a prompt - treat it the same as no prompt
       if (prompt === 'code') {

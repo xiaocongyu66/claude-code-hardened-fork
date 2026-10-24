@@ -99,7 +99,7 @@ console.log(`Copied vendor/audio-capture/ → ${audioCaptureDir}/`)
 // (vendor/<name>/ is populated from workflow artifacts).
 // file-index: 存量漏登修正（搜索链此前只靠 compile 内嵌，bundle 面缺失）。
 // search: search-napi 转正的面（GrepTool/GlobTool 唯一搜索路径）。
-// tui: cch_tui napi 内嵌（CCH_TUI_NATIVE=1 时使用，缺失则回退 Ink）。
+// tui: cch_tui napi 内嵌（--tui auto/native 默认使用，缺失则回退 Ink）。
 for (const name of [
   'token-counter',
   'transcript-parser',
