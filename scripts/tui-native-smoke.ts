@@ -30,6 +30,11 @@
  *   CCH_TUI_SMOKE_NO_TTY=1 bun scripts/tui-native-smoke.ts
  */
 
+import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { loadNativeModule } from '../src/utils/embeddedNative.js'
 import {
   isValidTuiNativeModule,
@@ -37,6 +42,9 @@ import {
   type TuiNativeModule,
   type TuiStartOptions,
 } from '../src/utils/tuiNative.js'
+
+const nodeRequire = createRequire(import.meta.url)
+const scriptDir = dirname(fileURLToPath(import.meta.url))
 
 const POLL_ATTEMPTS = 20
 const POLL_INTERVAL_MS = 10
@@ -54,6 +62,58 @@ function fail(message: string): never {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** Loader triple, mirrored from `src/utils/embeddedNative.ts`. */
+function vendorTriple(): string {
+  const arch = process.arch
+  if (process.platform === 'linux') {
+    return arch === 'arm64'
+      ? 'aarch64-unknown-linux-gnu'
+      : 'x86_64-unknown-linux-gnu'
+  }
+  if (process.platform === 'darwin') {
+    return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin'
+  }
+  if (process.platform === 'win32') return 'x86_64-pc-windows-msvc'
+  return `unsupported(${process.platform}/${arch})`
+}
+
+/**
+ * Explain why `loadTuiNative()` returned null: the loader swallows dlopen and
+ * validation errors, so retry the same vendor file directly and surface them.
+ */
+function diagnoseTuiLoad(): string {
+  const candidate = resolve(
+    scriptDir,
+    '..',
+    'vendor',
+    'tui',
+    vendorTriple(),
+    'tui.node',
+  )
+  if (!existsSync(candidate)) {
+    return `vendor payload missing at ${candidate}`
+  }
+  try {
+    const direct = nodeRequire(candidate) as TuiNativeModule
+    let supported: unknown
+    try {
+      supported =
+        typeof direct.is_supported === 'function'
+          ? direct.is_supported()
+          : 'is_supported missing'
+    } catch (error) {
+      supported = `is_supported threw: ${String(error)}`
+    }
+    return (
+      `vendor payload loaded directly from ${candidate} but the loader ` +
+      `rejected it (is_supported=${String(supported)}, ` +
+      `exports=${Object.keys(direct).join(',')})`
+    )
+  } catch (error) {
+    return `vendor payload failed to dlopen from ${candidate}: ${String(error)}`
+  }
 }
 
 /**
@@ -109,7 +169,9 @@ if (loadOnly) {
 } else {
   const mod = loadTuiNative()
   if (mod === null) {
-    fail('loadTuiNative() returned null even though stdin is a TTY')
+    fail(
+      `loadTuiNative() returned null even though stdin is a TTY — ${diagnoseTuiLoad()}`,
+    )
   }
   if (!mod.is_supported()) {
     fail('is_supported() returned false even though stdin is a TTY')
