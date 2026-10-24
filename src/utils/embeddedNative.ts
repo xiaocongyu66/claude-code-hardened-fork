@@ -45,6 +45,23 @@ export function isCompiledBinary(): boolean {
 type NativeModuleLike = Record<string, unknown>
 
 /**
+ * Resolve the `vendor/` root for a module URL.
+ *
+ * Dist builds live in `dist/<chunk>.js`, so the vendor dir is `dist/vendor`.
+ * Source runs live in `src/utils/*.ts`, two levels below the repo root:
+ * `src/utils` → `src` → root (§ not three — that lands outside the checkout).
+ * Exported for the path regression test.
+ */
+export function vendorRootFor(moduleUrl: string): string {
+  const dir = dirname(fileURLToPath(moduleUrl))
+  const parts = dir.split(sep)
+  const distIdx = parts.lastIndexOf('dist')
+  return distIdx !== -1
+    ? parts.slice(0, distIdx + 1).join(sep) + sep + 'vendor'
+    : resolve(dir, '..', '..', 'vendor')
+}
+
+/**
  * 从内存加载原生模块（零落盘）。
  *
  * Bun 1.4.2 的 process.dlopen 实测（proot/Android，file-index 等 4 模块）：
@@ -178,14 +195,7 @@ export function loadNativeModule<T>(
 
   // 2. dev / 常规构建：从 vendor/ 目录加载
   try {
-    const filePath = fileURLToPath(import.meta.url)
-    const dir = dirname(filePath)
-    const parts = dir.split(sep)
-    const distIdx = parts.lastIndexOf('dist')
-    const vendorRoot =
-      distIdx !== -1
-        ? parts.slice(0, distIdx + 1).join(sep) + sep + 'vendor'
-        : resolve(dir, '..', '..', '..', 'vendor')
+    const vendorRoot = vendorRootFor(import.meta.url)
 
     const arch = process.arch
     const platform = process.platform
