@@ -26,12 +26,18 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+mod clipboard;
 mod legacy;
 
+pub use clipboard::{
+    ClipboardCommand, ClipboardMethod, clipboard_order, command_exists, copy as copy_clipboard,
+    is_ssh, platform_commands,
+};
 pub use legacy::{
-    LEGACY_BUILD_THRESHOLD, LEGACY_ENV, LEGACY_ENV_COMPAT, LEGACY_RESET_INTERVAL,
-    LegacyConsoleMode, LegacyRedraw, detect_build_number, legacy_width, parse_windows_build,
-    should_use_legacy,
+    LEGACY_BUILD_THRESHOLD, LEGACY_ENV, LEGACY_ENV_COMPAT, LEGACY_RESET_ENV,
+    LEGACY_RESET_ENV_COMPAT, LEGACY_RESET_INTERVAL, LegacyConsoleMode, LegacyRedraw,
+    MAX_LEGACY_RESET_MS, MIN_LEGACY_RESET_MS, detect_build_number, legacy_width, parse_reset_ms,
+    parse_windows_build, reset_interval, should_use_legacy,
 };
 
 /// Cells the inline viewport reserves below frozen scrollback.
@@ -108,9 +114,15 @@ impl Overlay {
 /// The first full repaint is deferred by one interval; there is nothing on
 /// screen to self-heal yet when the session is created.
 fn legacy_state(build_number: Option<u32>) -> (bool, LegacyRedraw) {
-    let legacy = should_use_legacy(build_number);
-    let mut redraw = LegacyRedraw::new();
-    if legacy {
+    let mode = LegacyConsoleMode::from_env();
+    let legacy = mode.resolve(cfg!(windows), build_number);
+    let mut redraw = match mode {
+        // `2`/`always`: every draw clears first, matching Ink's
+        // `CLAUDE_CODE_LEGACY_CONSOLE=2`.
+        LegacyConsoleMode::Always => LegacyRedraw::always(),
+        _ => LegacyRedraw::with_interval(legacy::reset_interval()),
+    };
+    if legacy && mode != LegacyConsoleMode::Always {
         redraw.mark(Instant::now());
     }
     (legacy, redraw)
@@ -445,13 +457,13 @@ impl TerminalSession {
         Ok(())
     }
 
-    /// Copy text through the terminal (OSC52). Works over SSH and tmux
-    /// (with `set-clipboard on`); no platform clipboard binary required.
+    /// Copy text through the best available transport: OSC52 first on SSH,
+    /// otherwise a platform program (`pbcopy`/`wl-copy`/`xclip`/`xsel`/`clip`)
+    /// with OSC52 as the fallback. Failures are silent, so a headless or
+    /// unsupported terminal never kills the loop.
     pub fn copy_to_clipboard(&mut self, text: &str) -> io::Result<()> {
-        use std::io::Write as _;
-        let mut stdout = io::stdout();
-        stdout.write_all(osc52_sequence(text).as_bytes())?;
-        stdout.flush()
+        clipboard::copy(text);
+        Ok(())
     }
 
     pub fn is_fullscreen(&self) -> bool {
@@ -596,10 +608,16 @@ pub fn live_lines(view: &ChatView, width: usize, theme: &Theme) -> Vec<Line<'sta
         } else {
             "  ".to_string()
         };
-        lines.push(Line::from(Span::styled(
-            format!("{lead}{}", row.text),
-            row_style(row.style, theme),
-        )));
+        if row.style == RowStyle::Blockquote {
+            let mut spans = vec![Span::raw(lead)];
+            spans.extend(blockquote_spans(&row.text, theme));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("{lead}{}", row.text),
+                row_style(row.style, theme),
+            )));
+        }
         emitted += 1;
     }
     lines
@@ -627,6 +645,32 @@ fn inline_rows(rows: &[Row]) -> Vec<Row> {
         .filter(|row| row.style != RowStyle::MessageMeta)
         .cloned()
         .collect()
+}
+
+/// Split a Markdown blockquote row into Ink's two spans: the `▎ ` bars are
+/// dimmed while the body stays italic at normal brightness
+/// (`utils/markdown.ts:64-71`). Nested quotes repeat the bar/space pair.
+fn blockquote_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    /// `figures.BLOCKQUOTE_BAR`, as emitted by the markdown crate.
+    const BLOCKQUOTE_BAR: &str = "▎";
+    let bar = Style::default().fg(theme.palette.dim);
+    let body = Style::default()
+        .fg(theme.palette.foreground)
+        .add_modifier(Modifier::ITALIC);
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(stripped) = rest.strip_prefix(BLOCKQUOTE_BAR) {
+        spans.push(Span::styled(BLOCKQUOTE_BAR, bar));
+        rest = stripped;
+        if let Some(stripped) = rest.strip_prefix(' ') {
+            spans.push(Span::styled(" ", bar));
+            rest = stripped;
+        }
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), body));
+    }
+    spans
 }
 
 /// Convert domain rows into wrapped, styled terminal lines.
@@ -764,6 +808,28 @@ fn rows_to_lines(rows: &[Row], width: usize, theme: &Theme, spacing: bool) -> Ve
                     theme,
                 ));
                 tool_call_offset += styled.text.chars().count();
+                emitted += 1;
+                line_index += 1;
+                continue;
+            }
+            // Ink dims only the quote bar; the body stays italic at normal
+            // brightness (`utils/markdown.ts:64-71`).
+            if styled.style == RowStyle::Blockquote {
+                let lead = if emitted == 0 {
+                    if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{prefix} ")
+                    }
+                } else {
+                    cont.to_string()
+                };
+                let mut spans = Vec::with_capacity(4);
+                if !lead.is_empty() {
+                    spans.push(Span::raw(lead));
+                }
+                spans.extend(blockquote_spans(&styled.text, theme));
+                lines.push(Line::from(spans));
                 emitted += 1;
                 line_index += 1;
                 continue;
@@ -1658,6 +1724,55 @@ mod tests {
         let quote = row_style(RowStyle::Blockquote, &theme);
         assert!(quote.add_modifier.contains(Modifier::ITALIC));
         assert_eq!(quote.fg, Some(theme.palette.foreground));
+    }
+
+    #[test]
+    fn blockquote_bar_is_dim_while_the_body_stays_italic() {
+        let theme = Theme::dark();
+        let rows = vec![Row::new(RowStyle::Assistant, "> quoted text")];
+        let lines = rows_to_lines(&rows, 40, &theme, false);
+        let line = lines
+            .iter()
+            .find(|line| line.to_string().contains("quoted"))
+            .expect("quote line");
+        let bar = line
+            .spans
+            .iter()
+            .find(|span| span.content == "▎")
+            .expect("bar span");
+        assert_eq!(bar.style.fg, Some(theme.palette.dim), "{line:?}");
+        assert!(
+            !bar.style.add_modifier.contains(Modifier::ITALIC),
+            "the bar itself is not italic: {line:?}"
+        );
+        let body = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("quoted"))
+            .expect("body span");
+        assert!(
+            body.style.add_modifier.contains(Modifier::ITALIC),
+            "quote text is italic: {line:?}"
+        );
+        assert_eq!(body.style.fg, Some(theme.palette.foreground));
+
+        // Nested quotes repeat the bar; every bar is dimmed.
+        let rows = vec![Row::new(RowStyle::Assistant, "> > inner")];
+        let lines = rows_to_lines(&rows, 40, &theme, false);
+        let line = lines
+            .iter()
+            .find(|line| line.to_string().contains("inner"))
+            .expect("nested quote line");
+        let bars = line.spans.iter().filter(|span| span.content == "▎").count();
+        assert_eq!(bars, 2, "{line:?}");
+        assert!(
+            line.spans
+                .iter()
+                .filter(|span| span.content == "▎")
+                .all(|span| span.style.fg == Some(theme.palette.dim)),
+            "{line:?}"
+        );
+        assert_eq!(line.to_string(), format!("{} ▎ ▎ inner", message_bullet()));
     }
 
     #[test]

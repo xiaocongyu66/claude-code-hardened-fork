@@ -325,7 +325,9 @@ pub fn run_interactive_with_mode(
                             ));
                         }
                         EngineEvent::ControlResponse { response } => {
-                            let mut consumed = false;
+                            // Responses answer TUI-initiated requests (context
+                            // usage); they never resolve a permission dialog,
+                            // which is engine-initiated. Keep the dialog open.
                             if let cch_tui_proto::ControlResponse::Success {
                                 request_id,
                                 response: Some(payload),
@@ -338,17 +340,20 @@ pub fn run_interactive_with_mode(
                                     view.context_percent = Some(percent);
                                 }
                                 pending_context_request = None;
-                                consumed = true;
-                            }
-                            if !consumed {
-                                dialog = None;
                             }
                         }
-                        EngineEvent::ControlCancelRequest { .. } => {
-                            if let Some(open) = dialog.as_mut() {
-                                open.cancel_from_engine();
+                        EngineEvent::ControlCancelRequest { request_id } => {
+                            // Only the matching request may close the dialog;
+                            // a late/bogus id must not strand the user.
+                            let matches = dialog
+                                .as_ref()
+                                .is_some_and(|open| open.request_id() == request_id);
+                            if matches {
+                                if let Some(open) = dialog.as_mut() {
+                                    open.cancel_from_engine();
+                                }
+                                dialog = None;
                             }
-                            dialog = None;
                         }
                         _ => {}
                     }

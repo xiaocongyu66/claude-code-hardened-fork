@@ -427,6 +427,97 @@ mod tests {
         );
     }
 
+    fn plan_request() -> ControlRequest {
+        ControlRequest::CanUseTool(Box::new(CanUseToolRequest {
+            tool_name: "ExitPlanMode".into(),
+            input: Extra::from_iter([("plan".into(), json!("# Plan\n\n1. Ship it"))]),
+            tool_use_id: "tool-plan".into(),
+            permission_suggestions: Some(vec![json!({
+                "type": "setMode",
+                "mode": "acceptEdits",
+                "destination": "session",
+            })]),
+            blocked_path: None,
+            decision_reason: None,
+            title: None,
+            display_name: None,
+            agent_id: None,
+            description: None,
+        }))
+    }
+
+    #[test]
+    fn plan_approval_maps_each_row_to_an_engine_response() {
+        // Row 0: approve and switch to acceptEdits.
+        let mut state = InteractionState::new();
+        state.start_turn();
+        assert!(state.permission_request("plan-1", &plan_request()));
+        let allow = state.resolve_permission().expect("auto-accept decision");
+        assert!(allow.is_allow());
+        let response = allow.to_response();
+        assert_eq!(
+            response.get("updatedPermissions"),
+            Some(&json!([{
+                "type": "setMode",
+                "mode": "acceptEdits",
+                "destination": "session",
+            }]))
+        );
+        assert_eq!(state.phase(), InteractionPhase::Streaming);
+
+        // Row 1: approve without a mode change.
+        let mut manual = InteractionState::new();
+        manual.start_turn();
+        manual.permission_request("plan-2", &plan_request());
+        manual.select_next_permission();
+        let allow = manual.resolve_permission().expect("manual approve");
+        assert!(allow.is_allow());
+        assert_eq!(allow.to_response().get("updatedPermissions"), None);
+        assert_eq!(manual.phase(), InteractionPhase::Streaming);
+
+        // Row 2: reject and stay in plan mode.
+        let mut keep = InteractionState::new();
+        keep.start_turn();
+        keep.permission_request("plan-3", &plan_request());
+        keep.select_next_permission();
+        keep.select_next_permission();
+        let deny = keep.resolve_permission().expect("keep planning");
+        assert!(!deny.is_allow());
+        assert_eq!(
+            deny.to_response(),
+            json!({
+                "behavior": "deny",
+                "message": "User rejected the plan and kept planning",
+            })
+        );
+        assert_eq!(keep.phase(), InteractionPhase::Streaming);
+    }
+
+    #[test]
+    fn plan_escape_and_engine_cancel_do_not_hang() {
+        // Esc produces one deny and restores the underlying phase.
+        let mut state = InteractionState::new();
+        state.start_turn();
+        state.permission_request("plan-1", &plan_request());
+        assert_eq!(
+            state.cancel_permission(),
+            Some(PermissionDecision::deny("Denied by user"))
+        );
+        assert_eq!(state.phase(), InteractionPhase::Streaming);
+        assert_eq!(state.resolve_permission(), None);
+        assert_eq!(state.cancel_permission(), None);
+
+        // The engine cancelling the request closes the dialog without a
+        // decision; a late Enter is rejected.
+        let mut cancelled = InteractionState::new();
+        cancelled.start_turn();
+        cancelled.permission_request("plan-2", &plan_request());
+        assert!(cancelled.cancel_request("plan-2"));
+        assert_eq!(cancelled.phase(), InteractionPhase::Streaming);
+        assert_eq!(cancelled.resolve_permission(), None);
+        assert!(!cancelled.cancel_request("plan-2"));
+    }
+
     #[test]
     fn non_permission_control_requests_do_not_open_a_dialog() {
         let mut state = InteractionState::new();
