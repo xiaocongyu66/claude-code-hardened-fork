@@ -3445,7 +3445,11 @@ async function run(): Promise<CommanderCommand> {
         if (!isBareMode()) {
           startDeferredPrefetches();
           void import('./utils/backgroundHousekeeping.js').then(m => m.startBackgroundHousekeeping());
-          if (process.env.USER_TYPE === 'ant') {
+          // Auto heap dump: ant-only by default, but opt-in for everyone via
+          // CLAUDE_CODE_AUTO_HEAP_DUMP=1 so long-session RSS growth can be
+          // captured (snapshot + diagnostics) at the 1.5GB threshold without
+          // having to notice and run /heapdump before the process is killed.
+          if (process.env.USER_TYPE === 'ant' || isEnvTruthy(process.env.CLAUDE_CODE_AUTO_HEAP_DUMP)) {
             void import('./utils/sdkHeapDumpMonitor.js').then(m => m.startSdkMemoryMonitor());
           }
         }

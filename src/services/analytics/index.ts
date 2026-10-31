@@ -77,8 +77,29 @@ export type AnalyticsSink = {
   ) => Promise<void>
 }
 
-// Event queue for events logged before sink is attached
+// Event queue for events logged before sink is attached.
+//
+// Bounded: every event carries its metadata object, and a long-lived process
+// that never attaches a sink (headless/embedded entry, killed sink) would
+// otherwise grow this without limit. Oldest events are dropped first — losing
+// pre-init analytics is preferable to an unbounded leak.
+const MAX_QUEUED_EVENTS = 5_000
 const eventQueue: QueuedEvent[] = []
+
+function enqueueEvent(event: QueuedEvent): void {
+  if (eventQueue.length >= MAX_QUEUED_EVENTS) {
+    eventQueue.splice(0, eventQueue.length - MAX_QUEUED_EVENTS + 1)
+  }
+  eventQueue.push(event)
+}
+
+/** Test-only: current queue length. */
+export function __getEventQueueLengthForTesting(): number {
+  return eventQueue.length
+}
+
+/** Test-only: maximum queued events before the oldest are dropped. */
+export const __MAX_QUEUED_EVENTS_FOR_TESTING = MAX_QUEUED_EVENTS
 
 // Sink - initialized during app startup
 let sink: AnalyticsSink | null = null
@@ -137,7 +158,7 @@ export function logEvent(
   metadata: LogEventMetadata,
 ): void {
   if (sink === null) {
-    eventQueue.push({ eventName, metadata, async: false })
+    enqueueEvent({ eventName, metadata, async: false })
     return
   }
   sink.logEvent(eventName, metadata)
@@ -157,7 +178,7 @@ export async function logEventAsync(
   metadata: LogEventMetadata,
 ): Promise<void> {
   if (sink === null) {
-    eventQueue.push({ eventName, metadata, async: true })
+    enqueueEvent({ eventName, metadata, async: true })
     return
   }
   await sink.logEventAsync(eventName, metadata)
