@@ -427,6 +427,7 @@ export async function* queryModelOpenAI(
     // captured here and torn down explicitly by the guard.
     let slotRelease: (() => void) | undefined
     let inFlightWatchdog: StreamWatchdog | undefined
+    let disposeResponses: (() => void) | undefined
     // Establishment-retry notices (official g0 payloads) buffered during the
     // awaited retry loops (both paths), replayed into the message stream once
     // the stream is secured.
@@ -446,34 +447,34 @@ export async function* queryModelOpenAI(
           'openai',
           async release => {
             slotRelease = release
-            const stream: AsyncIterable<Record<string, unknown>> =
-              await withConnectionRetry(
-                () =>
-                  createChatGPTResponsesStream({
-                    request: buildResponsesRequest({
-                      model: openaiModel,
-                      messages: openaiMessages,
-                      tools: openaiTools,
-                      toolChoice: openaiToolChoice,
-                      reasoningEffort,
-                      promptCacheKey: sessionPromptCacheKey,
-                    }),
-                    signal,
-                    fetchOverride:
-                      options.fetchOverride as unknown as typeof fetch,
+            const stream = await withConnectionRetry(
+              () =>
+                createChatGPTResponsesStream({
+                  request: buildResponsesRequest({
+                    model: openaiModel,
+                    messages: openaiMessages,
+                    tools: openaiTools,
+                    toolChoice: openaiToolChoice,
+                    reasoningEffort,
+                    promptCacheKey: sessionPromptCacheKey,
                   }),
-                {
                   signal,
-                  source: options.querySource,
-                  onRetryStatus: collectRetryStatus(retryNotices),
-                  // W2.11 per-request usedTokenCache 标记（0032:706 shouldRetry
-                  // 401 门）：codex establishment 面每次经 getValidChatGPTAuth()
-                  // 从 ChatGPT 凭据缓存取 token → 恒置位；401 刷新前走
-                  // invalidate 面（丢 cached codex client，凭据键重读）。
-                  usedTokenCache: () => true,
-                  invalidateTokenCache: invalidateCachedCodexClient,
-                },
-              )
+                  fetchOverride:
+                    options.fetchOverride as unknown as typeof fetch,
+                }),
+              {
+                signal,
+                source: options.querySource,
+                onRetryStatus: collectRetryStatus(retryNotices),
+                // W2.11 per-request usedTokenCache 标记（0032:706 shouldRetry
+                // 401 门）：codex establishment 面每次经 getValidChatGPTAuth()
+                // 从 ChatGPT 凭据缓存取 token → 恒置位；401 刷新前走
+                // invalidate 面（丢 cached codex client，凭据键重读）。
+                usedTokenCache: () => true,
+                invalidateTokenCache: invalidateCachedCodexClient,
+              },
+            )
+            disposeResponses = stream.dispose
             return releaseOnStreamEnd(
               adaptResponsesStreamToAnthropic(stream, openaiModel),
               release,
@@ -586,15 +587,15 @@ export async function* queryModelOpenAI(
     // and a later releaseOnStreamEnd unwinding compose safely. The fire and
     // forget adaptedStream.return() stays as a belt-and-braces close for any
     // already-started chain; a second return() on a settled generator is a
-    // no-op. Codex-path note: its watchdog lives inside responsesAdapter and
-    // is not captured here — on abandonment its first-byte/idle window still
-    // bounds the connection; the slot is freed by slotRelease either way.
+    // no-op. Codex exposes its watchdog teardown through an explicit dispose
+    // handle: markEstablished has already disarmed its first-byte timer.
     let replayed = false
     try {
       for (const notice of retryNotices) yield notice
       replayed = true
     } finally {
       if (!replayed) {
+        disposeResponses?.()
         inFlightWatchdog?.abort(
           new Error(
             'OpenAI stream abandoned before consumption (replay-window teardown)',

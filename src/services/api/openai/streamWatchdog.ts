@@ -29,6 +29,7 @@
  */
 
 import { randomUUID } from 'crypto'
+import { readUntilAbort } from '../streamRead.js'
 import { logForDebugging } from '../../../utils/debug.js'
 import { isEnvTruthy } from '../../../utils/envUtils.js'
 
@@ -248,14 +249,7 @@ export function createStreamWatchdog(params: {
   let idleFired = false
   let idleTimer: ReturnType<typeof setTimeout> | null = null
 
-  // Gate the consumption race on any abort (idle or external link).
-  let resolveGate = () => {}
-  const idleGate = new Promise<'gate'>(resolve => {
-    resolveGate = () => resolve('gate')
-  })
-
   const controller = new AbortController()
-  controller.signal.addEventListener('abort', () => resolveGate())
   const externalSignal = params.externalSignal
   const onExternalAbort = () => {
     controller.abort(externalSignal?.reason)
@@ -381,17 +375,8 @@ export function createStreamWatchdog(params: {
         // so a just-narrowed window cannot false-trip a healthy slow start.
         activeWindowMs = idleTimeoutMs
         armTimer()
-        const nextPromise = iterator.next()
-        const raced = await Promise.race([
-          nextPromise.then(result => ({ kind: 'next' as const, result })),
-          idleGate.then(() => ({ kind: 'gate' as const })),
-        ])
-        if (raced.kind === 'gate') {
-          // Abandoned next(): swallow its eventual rejection so the aborted
-          // body read cannot surface as an unhandled rejection later.
-          nextPromise.catch(() => {})
-          throw watchdogAbortError()
-        }
+        const raced = await readUntilAbort(iterator, controller.signal)
+        if (raced.kind === 'gate') throw watchdogAbortError()
         if (raced.result.done === true) {
           exhausted = true
           return

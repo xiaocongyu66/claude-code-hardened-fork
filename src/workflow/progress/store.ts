@@ -43,14 +43,48 @@ export type ProgressStore = {
   get(runId: string): RunProgress | undefined
   /** Directly inject a run read from disk (bypassing bus); skips existing runId - in-memory takes priority. */
   hydrate(run: RunProgress): void
+  /** Acknowledge only the exact generation successfully written to disk. */
+  markPersisted(run: RunProgress): void
+  /** Refuse admission rather than dropping unpersisted terminal results. */
+  assertLaunchCapacity(resumeRunId?: string): void
   /** For useSyncExternalStore: returns a stable reference, the same array when no change. */
   subscribe(listener: () => void): () => void
   getSnapshot(): RunProgress[]
 }
 
 /** Build a reactive store from the bus: subscribe to the bus, reduce events, notify React subscribers. */
-export function createProgressStoreFromBus(bus: ProgressBus): ProgressStore {
+export function createProgressStoreFromBus(
+  bus: ProgressBus,
+  limits: { maxTerminalRuns?: number; maxTerminalBytes?: number } = {},
+): ProgressStore {
+  const maxRuns = limits.maxTerminalRuns ?? 20
+  const maxBytes = limits.maxTerminalBytes ?? 16 * 1024 * 1024
   const byId = new Map<string, RunProgress>()
+  const terminal = new Map<RunProgress, { bytes: number; persisted: boolean }>()
+  const rememberTerminal = (run: RunProgress, persisted: boolean): void => {
+    let bytes = Number.POSITIVE_INFINITY
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(run), 'utf8')
+    } catch {
+      // Unserializable results remain in memory and block further admission.
+    }
+    terminal.set(run, { bytes, persisted })
+  }
+  const trim = (): void => {
+    let count = terminal.size
+    let bytes = 0
+    for (const entry of terminal.values()) bytes += entry.bytes
+    for (const [run, entry] of terminal) {
+      if (count <= maxRuns && bytes <= maxBytes) break
+      if (!entry.persisted) continue
+      terminal.delete(run)
+      byId.delete(run.runId)
+      count--
+      // Recompute if an unserializable result made the sum infinite.
+      bytes = 0
+      for (const remaining of terminal.values()) bytes += remaining.bytes
+    }
+  }
   let snapshot: RunProgress[] = []
   const listeners = new Set<() => void>()
 
@@ -83,6 +117,17 @@ export function createProgressStoreFromBus(bus: ProgressBus): ProgressStore {
     // log produces no visible state change (panel has no log view): early exit to avoid pointless snapshot rebuild and React re-render
     if (event.type === 'log') return
     const runId = event.runId
+    if (event.type === 'run_started') {
+      const previous = byId.get(runId)
+      if (previous) terminal.delete(previous)
+      byId.delete(runId)
+    } else if (event.type === 'run_done') {
+      const previous = byId.get(runId)
+      if (previous) {
+        terminal.delete(previous)
+        byId.set(runId, { ...previous })
+      }
+    }
     const p = ensure(
       runId,
       'workflowName' in event ? event.workflowName : 'workflow',
@@ -176,6 +221,8 @@ export function createProgressStoreFromBus(bus: ProgressBus): ProgressStore {
         p.status = event.status
         if (event.returnValue !== undefined) p.returnValue = event.returnValue
         if (event.error !== undefined) p.error = event.error
+        rememberTerminal(p, false)
+        // Do not evict here: all subscribers must observe the terminal transition.
         break
     }
     notify()
@@ -189,7 +236,37 @@ export function createProgressStoreFromBus(bus: ProgressBus): ProgressStore {
     hydrate(run) {
       if (byId.has(run.runId)) return
       byId.set(run.runId, run)
+      if (run.status !== 'running') rememberTerminal(run, true)
+      trim()
       notify()
+    },
+    markPersisted(run) {
+      if (byId.get(run.runId) !== run || run.status === 'running') return
+      const entry = terminal.get(run)
+      if (!entry) return
+      entry.persisted = true
+      trim()
+      notify()
+    },
+    assertLaunchCapacity(resumeRunId) {
+      const previous = resumeRunId ? byId.get(resumeRunId) : undefined
+      if (previous && terminal.get(previous)?.persisted === false) {
+        throw new Error(
+          `Workflow ${resumeRunId} has an unpersisted result; resume would overwrite it`,
+        )
+      }
+      let count = 0
+      let bytes = 0
+      for (const entry of terminal.values()) {
+        if (entry.persisted) continue
+        count++
+        bytes += entry.bytes
+      }
+      if (count >= maxRuns || bytes >= maxBytes) {
+        throw new Error(
+          'Workflow result retention budget exhausted; unpersisted results are retained. Resolve persistence before launching more runs.',
+        )
+      }
     },
     subscribe: fn => {
       listeners.add(fn)

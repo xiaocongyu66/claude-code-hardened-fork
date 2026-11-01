@@ -80,6 +80,135 @@ afterEach(() => {
   delete process.env[IDLE_ENV]
 })
 
+describe('bounded stream read lifecycle', () => {
+  for (const provider of ['openai', 'gemini'] as const) {
+    test(`${provider}: 100000 chunks do not accumulate reactions on one promise`, async () => {
+      const { createStreamWatchdog } = (await import(
+        `../../${provider}/streamWatchdog.js`
+      )) as StreamWatchdogModule
+      const watchdog = createStreamWatchdog({ url: 'test', model: 'test' })
+      const originalThen = Promise.prototype.then
+      const counts = new WeakMap<Promise<unknown>, number>()
+      let maximum = 0
+      // biome-ignore lint/suspicious/noThenProperty: instrument native reactions for the retention regression
+      Promise.prototype.then = function (this: Promise<unknown>, ...args) {
+        const count = (counts.get(this) ?? 0) + 1
+        counts.set(this, count)
+        maximum = Math.max(maximum, count)
+        return originalThen.apply(this, args)
+      } as typeof originalThen
+      let received = 0
+      try {
+        async function* chunks() {
+          for (let i = 0; i < 100000; i++) yield i
+        }
+        for await (const _chunk of watchdog.wrap(chunks())) received++
+      } finally {
+        // biome-ignore lint/suspicious/noThenProperty: restore the instrumented native method
+        Promise.prototype.then = originalThen
+        watchdog.abort()
+      }
+      expect(received).toBe(100000)
+      expect(maximum).toBeLessThanOrEqual(4)
+    })
+
+    test(`${provider}: synchronous next failure closes without awaiting return`, async () => {
+      const { createStreamWatchdog, getInFlightApiRequests } = (await import(
+        `../../${provider}/streamWatchdog.js`
+      )) as StreamWatchdogModule
+      const watchdog = createStreamWatchdog({ url: 'test', model: 'test' })
+      let closed = false
+      const failure = new Error('sync next')
+      const stream = watchdog.wrap({
+        [Symbol.asyncIterator]: () => ({
+          next() {
+            throw failure
+          },
+          return() {
+            closed = true
+            return new Promise<IteratorResult<never>>(() => {})
+          },
+        }),
+      })
+      await expect(stream.next()).rejects.toBe(failure)
+      expect(closed).toBe(true)
+      expect(
+        getInFlightApiRequests().some(r => r.requestId === watchdog.requestId),
+      ).toBe(false)
+    })
+
+    test(`${provider}: paused consumers retain the idle deadline`, async () => {
+      process.env[IDLE_ENV] = '10'
+      const { createStreamWatchdog, StreamIdleTimeoutError } = (await import(
+        `../../${provider}/streamWatchdog.js`
+      )) as StreamWatchdogModule
+      const watchdog = createStreamWatchdog({ url: 'test', model: 'test' })
+      async function* chunks() {
+        yield 1
+        yield 2
+      }
+      const stream = watchdog.wrap(chunks())
+      expect((await stream.next()).value).toBe(1)
+      await Bun.sleep(30)
+      expect(watchdog.signal.aborted).toBe(true)
+      await expect(stream.next()).rejects.toBeInstanceOf(StreamIdleTimeoutError)
+    })
+
+    test(`${provider}: abort settles a read whose next just resolved`, async () => {
+      const { createStreamWatchdog } = (await import(
+        `../../${provider}/streamWatchdog.js`
+      )) as StreamWatchdogModule
+      const controller = new AbortController()
+      const watchdog = createStreamWatchdog({
+        url: 'test',
+        model: 'test',
+        externalSignal: controller.signal,
+      })
+      let resolveRead!: (result: IteratorResult<number>) => void
+      const stream = watchdog.wrap({
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            new Promise<IteratorResult<number>>(resolve => {
+              resolveRead = resolve
+            }),
+        }),
+      })
+      const pending = stream.next()
+      resolveRead({ done: false, value: 1 })
+      const reason = new Error('abort before read continuation')
+      controller.abort(reason)
+      await expect(pending).rejects.toBe(reason)
+    })
+
+    test(`${provider}: late next rejection after abort is handled`, async () => {
+      const { createStreamWatchdog } = (await import(
+        `../../${provider}/streamWatchdog.js`
+      )) as StreamWatchdogModule
+      const controller = new AbortController()
+      const watchdog = createStreamWatchdog({
+        url: 'test',
+        model: 'test',
+        externalSignal: controller.signal,
+      })
+      let rejectRead!: (error: Error) => void
+      const stream = watchdog.wrap({
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            new Promise<IteratorResult<never>>((_, reject) => {
+              rejectRead = reject
+            }),
+        }),
+      })
+      const pending = stream.next()
+      const reason = new Error('external abort')
+      controller.abort(reason)
+      await expect(pending).rejects.toBe(reason)
+      rejectRead(new Error('late read rejection'))
+      await Promise.resolve()
+    })
+  }
+})
+
 describe('getStreamIdleTimeoutMs (env face)', () => {
   test('defaults to 300000ms when the env var is unset', async () => {
     const { getStreamIdleTimeoutMs } = await loadModule()

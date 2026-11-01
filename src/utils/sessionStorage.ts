@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { UUID } from 'crypto'
 import type { Dirent } from 'fs'
 // Sync fs primitives for readFileTailSync — separate from fs/promises
@@ -485,18 +486,7 @@ function getProject(): Project {
         // fields — if enough messages are appended after a /rename, the
         // custom-title entry gets pushed outside the window and --resume
         // shows the auto-generated firstPrompt instead.
-        await project?.flush()
-        try {
-          project?.reAppendSessionMetadata()
-        } catch {
-          // Best-effort — don't let metadata re-append crash the cleanup
-        }
-        // Shutdown seal (official anchor: `sealTranscriptAppendsForShutdown`
-        // in docs/reverse-284). After the exit flush + metadata re-append,
-        // no further transcript append may enqueue — late fire-and-forget
-        // appendEntry callers resolve/no-op instead of writing bytes after
-        // the final drain that nothing would ever flush.
-        project?.sealAppendsForShutdown()
+        await project?.shutdown()
       })
       cleanupRegistered = true
     }
@@ -521,8 +511,10 @@ export function resetProjectForTesting(): void {
   project = null
 }
 
-export function setSessionFileForTesting(path: string): void {
-  getProject().sessionFile = path
+export function setSessionFileForTesting(path: string) {
+  const writer = getProject()
+  writer.sessionFile = path
+  return writer
 }
 
 type InternalEventWriter = (
@@ -577,6 +569,24 @@ const QUEUE_HIGH_WATER_MARK = 1000
 // in long-running daemon / swarm sessions that spawn many sub-agents.
 const MAX_CACHED_SESSION_FILES = 200
 
+// Admission is only a shutdown capability, never an ordering identity.
+type ProducerAdmission = object
+
+type WriteProducer = {
+  sequence: number
+  parent: WriteProducer | undefined
+  admission: ProducerAdmission
+  live: boolean
+  done: Promise<void>
+  complete: () => void
+  waitingFor?: Set<WriteProducer>
+}
+
+type TombstoneBarrier = {
+  sequence: number
+  earlier: Set<WriteProducer>
+}
+
 class Project {
   // Minimal cache for current session only (not all sessions)
   currentSessionTag: string | undefined
@@ -605,32 +615,42 @@ class Project {
   private internalSubagentEventReader: InternalEventReader | null = null
   private pendingWriteCount: number = 0
   private flushResolvers: Array<() => void> = []
-  // Per-file write queues. Each entry carries a resolve callback so
-  // callers of enqueueWrite can optionally await their specific write.
+  // Serialize at admission: queued items no longer retain message graphs.
+  // These byte counters describe payloads, not a global admission/memory cap.
   private writeQueues = new Map<
     string,
-    Array<{ entry: Entry; resolve: () => void }>
+    Array<{
+      data: string
+      sequence: number
+      producer: WriteProducer | undefined
+      bytes: number
+      resolve: () => void
+      reject: (error: Error) => void
+    }>
   >()
+  private writeSequence = 0
+  private tombstoneBarriers = new Set<TombstoneBarrier>()
+  private queuedBytes = 0
+  private inflightBytes = 0
+  private writerError: Error | null = null
   private flushTimer: ReturnType<typeof setTimeout> | null = null
+  // Tail of the SINGLE writer domain, including tombstone mutations.
   private activeDrain: Promise<void> | null = null
+  private openTranscriptFile = fsOpen
   private FLUSH_INTERVAL_MS = 100
-  private readonly MAX_CHUNK_BYTES = 100 * 1024 * 1024
-  // Shutdown seal — official anchor (docs/reverse-284 full-source/_ALL.js,
-  // transcript writer class `_7t`): `enqueueWrite` short-circuits when
-  // `appendsSealedForShutdown` is set, `shouldSkipPersistence()` folds the
-  // seal, and `sealTranscriptAppendsForShutdown()` arms it at shutdown so
-  // late fire-and-forget appends cannot re-dirty the transcript after the
-  // exit flush. Previous CCH state: seal missing entirely.
+  private readonly MAX_CHUNK_BYTES = 1024 * 1024
   private appendsSealedForShutdown = false
-  // Backpressure telemetry: armed once per sustained crossing of
-  // QUEUE_HIGH_WATER_MARK. Nothing is ever dropped (see enqueueWrite).
+  private closing = false
+  private shutdownPromise: Promise<void> | null = null
+  // Nested producer calls inherit admission, even after shutdown starts.
+  // The live flag prevents detached descendants from inheriting expired admission.
+  private producerContext = new AsyncLocalStorage<WriteProducer>()
+  private producers = new Set<WriteProducer>()
   private queueBackpressureWarned = false
-  // True while removeMessageByUuid's read-truncate-reappend sequence is in
-  // flight. The debounced batch writer must not start a drain inside this
-  // window: an appendFile landing between `truncate(lineStart)` and the
-  // positional re-append of the trailing lines would be overwritten by that
-  // positional write (bytes lost before they were ever readable).
-  private tombstoneWindow = false
+
+  getWriteBufferStats() {
+    return { queuedBytes: this.queuedBytes, inflightBytes: this.inflightBytes }
+  }
 
   constructor() {}
 
@@ -645,21 +665,29 @@ class Project {
     this.existingSessionFiles = new Map()
     this.appendsSealedForShutdown = false
     this.queueBackpressureWarned = false
-    this.tombstoneWindow = false
+    this.queuedBytes = 0
+    this.inflightBytes = 0
+    this.writeSequence = 0
+    this.tombstoneBarriers.clear()
+    this.producers.clear()
+    this.writerError = null
+    this.closing = false
+    this.shutdownPromise = null
   }
 
-  /**
-   * Seal all transcript appends for shutdown.
-   *
-   * Official anchor (docs/reverse-284 full-source/_ALL.js):
-   * `sealAppendsForShutdown(){this.appendsSealedForShutdown=!0}` /
-   * `shouldSkipPersistence(){return Ea()||this.appendsSealedForShutdown}` /
-   * `enqueueWrite` refusing to queue once sealed. After the exit flush has
-   * run, late fire-and-forget `appendEntry` callers (in-flight promises,
-   * async hooks) must not re-enqueue writes nothing will ever drain.
-   */
-  sealAppendsForShutdown(): void {
-    this.appendsSealedForShutdown = true
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.closing = true
+    this.shutdownPromise = this.flush()
+      .then(() => this.reAppendSessionMetadata())
+      .catch(error => {
+        throw this.failWriter(error)
+      })
+      .finally(() => {
+        // Shutdown is terminal even when the final metadata write fails.
+        this.appendsSealedForShutdown = true
+      })
+    return this.shutdownPromise
   }
 
   private incrementPendingWrites(): void {
@@ -677,23 +705,96 @@ class Project {
     }
   }
 
-  private async trackWrite<T>(fn: () => Promise<T>): Promise<T> {
+  async trackWrite<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.writerError) throw this.writerError
+    const stored = this.producerContext.getStore()
+    const parent = stored?.live ? stored : undefined
+    if (!parent && this.closing) {
+      throw new Error('Transcript writer is shutting down')
+    }
+    let complete!: () => void
+    const done = new Promise<void>(resolve => {
+      complete = resolve
+    })
+    const producer: WriteProducer = {
+      sequence: ++this.writeSequence,
+      parent,
+      admission: parent?.admission ?? {},
+      live: true,
+      done,
+      complete,
+    }
+    this.producers.add(producer)
     this.incrementPendingWrites()
     try {
-      return await fn()
+      return await this.producerContext.run(producer, fn)
     } finally {
+      producer.live = false
+      this.producers.delete(producer)
+      producer.complete()
       this.decrementPendingWrites()
     }
   }
 
-  private enqueueWrite(filePath: string, entry: Entry): Promise<void> {
-    // Shutdown seal: resolve without queueing (official anchor,
-    // docs/reverse-284 full-source/_ALL.js — `enqueueWrite` returns
-    // `Promise.resolve()` once `appendsSealedForShutdown` is set).
-    if (this.appendsSealedForShutdown) {
-      return Promise.resolve()
+  private failWriter(cause: unknown): Error {
+    if (!this.writerError) {
+      this.writerError =
+        cause instanceof Error ? cause : new Error(String(cause))
+      logError(this.writerError)
     }
-    return new Promise<void>(resolve => {
+    if (this.flushTimer) clearTimeout(this.flushTimer)
+    this.flushTimer = null
+    for (const queue of this.writeQueues.values()) {
+      for (const item of queue) item.reject(this.writerError)
+      queue.length = 0
+    }
+    this.writeQueues.clear()
+    this.queuedBytes = 0
+    return this.writerError
+  }
+
+  private runWriter(operation: () => Promise<void>): Promise<void> {
+    const previous = this.activeDrain ?? Promise.resolve()
+    const current = previous
+      .then(async () => {
+        if (this.writerError) throw this.writerError
+        await operation()
+      })
+      .catch(error => {
+        throw this.failWriter(error)
+      })
+    this.activeDrain = current
+    // Observe timer errors here as well as returning them to explicit callers.
+    void current.then(
+      () => {
+        if (this.activeDrain === current) {
+          this.activeDrain = null
+          if (this.writeQueues.size) this.scheduleDrain()
+        }
+      },
+      () => {
+        if (this.activeDrain === current) this.activeDrain = null
+      },
+    )
+    return current
+  }
+
+  private enqueueWrite(filePath: string, entry: Entry): Promise<void> {
+    if (this.writerError) return Promise.reject(this.writerError)
+    if (
+      this.appendsSealedForShutdown ||
+      (this.closing && !this.producerContext.getStore()?.live)
+    ) {
+      return Promise.reject(new Error('Transcript writer is shutting down'))
+    }
+    let data: string
+    try {
+      data = jsonStringify(entry) + '\n'
+    } catch (error) {
+      return Promise.reject(this.failWriter(error))
+    }
+    const bytes = Buffer.byteLength(data, 'utf8')
+    return new Promise<void>((resolve, reject) => {
       let queue = this.writeQueues.get(filePath)
       if (!queue) {
         queue = []
@@ -717,95 +818,97 @@ class Project {
           ),
         )
       }
-      queue.push({ entry, resolve })
+      const context = this.producerContext.getStore()
+      const producer = context?.live ? context : undefined
+      // Enqueue time matters independently of producer start time: ancestors
+      // excluded from a nested deletion may already have queued rows.
+      const sequence = ++this.writeSequence
+      queue.push({ data, bytes, sequence, producer, resolve, reject })
+      this.queuedBytes += bytes
       this.scheduleDrain()
     })
   }
 
   private scheduleDrain(): void {
-    // Tombstone window inhibit: removeMessageByUuid drained the queues and
-    // is mutating the file via truncate + positional re-append. A batch
-    // append landing inside that window would be cut/overwritten by the
-    // positional write. It re-arms the drain itself in its `finally`.
-    if (this.flushTimer || this.tombstoneWindow) {
-      return
-    }
-    this.flushTimer = setTimeout(async () => {
+    if (this.flushTimer || this.activeDrain || this.writerError) return
+    this.flushTimer = setTimeout(() => {
       this.flushTimer = null
-      // Re-check the tombstone window: a timer scheduled *before*
-      // removeMessageByUuid opened the window can fire mid-truncate and cut
-      // the positional re-append. The window opener re-arms the drain in its
-      // `finally`, so silently skipping here is order-safe.
-      if (this.tombstoneWindow) {
-        return
-      }
-      this.activeDrain = this.drainWriteQueue()
-      await this.activeDrain
-      this.activeDrain = null
-      // If more items arrived during drain, schedule again
-      if (this.writeQueues.size > 0) {
-        this.scheduleDrain()
-      }
+      void this.runWriter(() => this.drainWriteQueue())
     }, this.FLUSH_INTERVAL_MS)
   }
 
   private async appendToFile(filePath: string, data: string): Promise<void> {
-    try {
-      await fsAppendFile(filePath, data, { mode: 0o600 })
-    } catch {
-      // Directory may not exist — some NFS-like filesystems return
-      // unexpected error codes, so don't discriminate on code.
-      await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
-      await fsAppendFile(filePath, data, { mode: 0o600 })
+    await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
+    // An append error may follow a partial write. Never retry the payload.
+    await fsAppendFile(filePath, data, { mode: 0o600 })
+  }
+
+  private belongsTo(
+    producer: WriteProducer | undefined,
+    roots: Set<WriteProducer>,
+  ): boolean {
+    for (let current = producer; current; current = current.parent) {
+      if (roots.has(current)) return true
     }
+    return false
   }
 
   private async drainWriteQueue(): Promise<void> {
     for (const [filePath, queue] of this.writeQueues) {
-      if (queue.length === 0) {
-        continue
-      }
-      const batch = queue.splice(0)
-
-      let content = ''
-      const resolvers: Array<() => void> = []
-
-      for (const { entry, resolve } of batch) {
-        const line = jsonStringify(entry) + '\n'
-
-        if (content.length + line.length >= this.MAX_CHUNK_BYTES) {
-          // Flush chunk and resolve its entries before starting a new one
-          await this.appendToFile(filePath, content)
-          for (const r of resolvers) {
-            r()
+      while (queue.length) {
+        if (this.writerError) throw this.writerError
+        const batch: typeof queue = []
+        let bytes = 0
+        // A held later row must not hide a delayed earlier producer's row.
+        // Test each barrier separately: sharing shutdown admission does not
+        // let a later sibling cross a nested deletion's boundary.
+        let index = 0
+        let retained = 0
+        const barriers = [...this.tombstoneBarriers]
+        for (; index < queue.length; ) {
+          const next = queue[index]!
+          const blocked = barriers.some(
+            barrier =>
+              next.sequence > barrier.sequence &&
+              !this.belongsTo(next.producer, barrier.earlier),
+          )
+          if (blocked) {
+            queue[retained++] = next
+            index++
+            continue
           }
-          resolvers.length = 0
+          if (batch.length > 0 && bytes + next.bytes > this.MAX_CHUNK_BYTES)
+            break
+          bytes += next.bytes
+          batch.push(next)
+          index++
+          if (bytes >= this.MAX_CHUNK_BYTES) break
+        }
+        // Compact the scanned prefix once, rather than splicing per row.
+        queue.splice(retained, index - retained)
+        if (batch.length === 0) break
+        this.queuedBytes -= bytes
+        this.inflightBytes = bytes
+        let content = batch.map(item => item.data).join('')
+        // The joined payload is now the only batch text retained during I/O.
+        for (const item of batch) item.data = ''
+        try {
+          await this.appendToFile(filePath, content)
+          for (const item of batch) item.resolve()
+        } catch (cause) {
+          const error = this.failWriter(cause)
+          for (const item of batch) item.reject(error)
+          // appendFile may have written a prefix: never retry this batch.
+          throw error
+        } finally {
           content = ''
-        }
-
-        content += line
-        resolvers.push(resolve)
-      }
-
-      if (content.length > 0) {
-        await this.appendToFile(filePath, content)
-        for (const r of resolvers) {
-          r()
+          batch.length = 0
+          this.inflightBytes = 0
         }
       }
+      if (queue.length === 0) this.writeQueues.delete(filePath)
     }
-
-    // Clean up empty queues
-    for (const [filePath, queue] of this.writeQueues) {
-      if (queue.length === 0) {
-        this.writeQueues.delete(filePath)
-      }
-    }
-    // Queues caught up — re-arm the backpressure diagnostic for the next
-    // sustained crossing.
-    if (this.writeQueues.size === 0) {
-      this.queueBackpressureWarned = false
-    }
+    if (this.writeQueues.size === 0) this.queueBackpressureWarned = false
   }
 
   resetSessionFile(): void {
@@ -970,25 +1073,21 @@ class Project {
   }
 
   async flush(): Promise<void> {
-    // Cancel pending timer
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer)
+    // Producers can enqueue after any await. Reach a fixed point, rather
+    // than draining once and then returning when the producer counter falls.
+    do {
+      if (this.flushTimer) clearTimeout(this.flushTimer)
       this.flushTimer = null
-    }
-    // Wait for any in-flight drain to finish
-    if (this.activeDrain) {
-      await this.activeDrain
-    }
-    // Drain anything remaining in the queues
-    await this.drainWriteQueue()
-
-    // Wait for non-queue tracked operations (e.g. removeMessageByUuid)
-    if (this.pendingWriteCount === 0) {
-      return
-    }
-    return new Promise<void>(resolve => {
-      this.flushResolvers.push(resolve)
-    })
+      await this.runWriter(() => this.drainWriteQueue())
+      if (this.pendingWriteCount > 0) {
+        await new Promise<void>(resolve => this.flushResolvers.push(resolve))
+      }
+      if (this.writerError) throw this.writerError
+    } while (
+      this.pendingWriteCount > 0 ||
+      this.writeQueues.size > 0 ||
+      this.activeDrain
+    )
   }
 
   /**
@@ -1001,115 +1100,133 @@ class Project {
    */
   async removeMessageByUuid(targetUuid: UUID): Promise<void> {
     return this.trackWrite(async () => {
-      if (this.sessionFile === null) return
-
-      // Mutual exclusion with the debounced batch writer. The tombstone
-      // does a positional truncate + re-append; a queued batch appendFile
-      // landing between the two would be cut off (truncate) or overwritten
-      // (positional write). Cancel the pending timer, absorb any in-flight
-      // drain, then synchronously empty the queues so every already
-      // enqueued append hits the file BEFORE the tombstone touches bytes.
-      // Flush() cannot be reused here — it awaits pendingWriteCount reaching
-      // 0, which the surrounding trackWrite already incremented (deadlock).
-      if (this.flushTimer) {
-        clearTimeout(this.flushTimer)
-        this.flushTimer = null
+      const self = this.producerContext.getStore()!
+      const ancestors = new Set<WriteProducer>()
+      for (
+        let current: WriteProducer | undefined = self;
+        current;
+        current = current.parent
+      ) {
+        ancestors.add(current)
       }
-      if (this.activeDrain) {
-        await this.activeDrain
-      }
-      await this.drainWriteQueue()
-
-      // Open the window: enqueues arriving from here on are held (no timed
-      // drain) and flushed synchronously in the finally below, right after
-      // the tombstone completes — preserving append order.
-      this.tombstoneWindow = true
+      // An older deletion can itself be waiting for our ancestor. It must run
+      // after us, not become a back-edge in the producer dependency graph.
+      const dependsOnAncestor = (producer: WriteProducer): boolean =>
+        ancestors.has(producer) ||
+        [...(producer.waitingFor ?? [])].some(dependsOnAncestor)
+      const earlier = new Set(
+        [...this.producers].filter(
+          producer =>
+            producer.sequence < self.sequence && !dependsOnAncestor(producer),
+        ),
+      )
+      self.waitingFor = earlier
+      const barrier: TombstoneBarrier = { sequence: self.sequence, earlier }
+      this.tombstoneBarriers.add(barrier)
       try {
-        let fileSize = 0
-        const fh = await fsOpen(this.sessionFile, 'r+')
-        try {
-          const { size } = await fh.stat()
-          fileSize = size
-          if (size === 0) return
-
-          const chunkLen = Math.min(size, LITE_READ_BUF_SIZE)
-          const tailStart = size - chunkLen
-          const buf = Buffer.allocUnsafe(chunkLen)
-          const { bytesRead } = await fh.read(buf, 0, chunkLen, tailStart)
-          const tail = buf.subarray(0, bytesRead)
-
-          // Entries are serialized via JSON.stringify (no key-value
-          // whitespace). Search for the full `"uuid":"..."` pattern, not
-          // just the bare UUID, so we do not match the same value sitting
-          // in `parentUuid` of a child entry. UUIDs are pure ASCII so a
-          // byte-level search is correct.
-          const needle = `"uuid":"${targetUuid}"`
-          const matchIdx = tail.lastIndexOf(needle)
-
-          if (matchIdx >= 0) {
-            // 0x0a never appears inside a UTF-8 multi-byte sequence, so
-            // byte-scanning for line boundaries is safe even if the chunk
-            // starts mid-character.
-            const prevNl = tail.lastIndexOf(0x0a, matchIdx)
-            // If the preceding newline is outside our chunk and we did not
-            // read from the start of the file, the line is longer than the
-            // window - fall through to the slow path.
-            if (prevNl >= 0 || tailStart === 0) {
-              const lineStart = prevNl + 1 // 0 when prevNl === -1
-              const nextNl = tail.indexOf(0x0a, matchIdx + needle.length)
-              const lineEnd = nextNl >= 0 ? nextNl + 1 : bytesRead
-
-              const absLineStart = tailStart + lineStart
-              const afterLen = bytesRead - lineEnd
-              // Truncate first, then re-append the trailing lines. In the
-              // common case (target is the last entry) afterLen is 0 and
-              // this is a single ftruncate.
-              await fh.truncate(absLineStart)
-              if (afterLen > 0) {
-                await fh.write(tail, lineEnd, afterLen, absLineStart)
-              }
-              return
-            }
-          }
-        } finally {
-          await fh.close()
-        }
-
-        // Slow path: target was not in the last 64KB. Rare - requires many
-        // large entries to have landed between the write and the tombstone.
-        if (fileSize > MAX_TOMBSTONE_REWRITE_BYTES) {
-          logForDebugging(
-            `Skipping tombstone removal: session file too large (${formatFileSize(fileSize)})`,
-            { level: 'warn' },
+        // Outside the writer domain: producers can await disk commits. Include
+        // detached descendants created during the wait, but not later siblings.
+        let pending = [...earlier]
+        while (pending.length) {
+          await Promise.all(pending.map(producer => producer.done))
+          pending = [...this.producers].filter(producer =>
+            this.belongsTo(producer, earlier),
           )
-          return
         }
-        const content = await readFile(this.sessionFile, { encoding: 'utf-8' })
-        const lines = content.split('\n').filter((line: string) => {
-          if (!line.trim()) return true
+        return await this.runWriter(async () => {
           try {
-            const entry = jsonParse(line)
-            return entry.uuid !== targetUuid
-          } catch {
-            return true // Keep malformed lines
+            if (this.sessionFile === null) return
+            if (this.flushTimer) clearTimeout(this.flushTimer)
+            this.flushTimer = null
+            await this.drainWriteQueue()
+            try {
+              let fileSize = 0
+              const fh = await this.openTranscriptFile(this.sessionFile, 'r+')
+              try {
+                const { size } = await fh.stat()
+                fileSize = size
+                if (size === 0) return
+
+                const chunkLen = Math.min(size, LITE_READ_BUF_SIZE)
+                const tailStart = size - chunkLen
+                const buf = Buffer.allocUnsafe(chunkLen)
+                const { bytesRead } = await fh.read(buf, 0, chunkLen, tailStart)
+                const tail = buf.subarray(0, bytesRead)
+
+                // Entries are serialized via JSON.stringify (no key-value
+                // whitespace). Search for the full `"uuid":"..."` pattern, not
+                // just the bare UUID, so we do not match the same value sitting
+                // in `parentUuid` of a child entry. UUIDs are pure ASCII so a
+                // byte-level search is correct.
+                const needle = `"uuid":"${targetUuid}"`
+                const matchIdx = tail.lastIndexOf(needle)
+
+                if (matchIdx >= 0) {
+                  // 0x0a never appears inside a UTF-8 multi-byte sequence, so
+                  // byte-scanning for line boundaries is safe even if the chunk
+                  // starts mid-character.
+                  const prevNl = tail.lastIndexOf(0x0a, matchIdx)
+                  // If the preceding newline is outside our chunk and we did not
+                  // read from the start of the file, the line is longer than the
+                  // window - fall through to the slow path.
+                  if (prevNl >= 0 || tailStart === 0) {
+                    const lineStart = prevNl + 1 // 0 when prevNl === -1
+                    const nextNl = tail.indexOf(0x0a, matchIdx + needle.length)
+                    const lineEnd = nextNl >= 0 ? nextNl + 1 : bytesRead
+
+                    const absLineStart = tailStart + lineStart
+                    const afterLen = bytesRead - lineEnd
+                    // Truncate first, then re-append the trailing lines. In the
+                    // common case (target is the last entry) afterLen is 0 and
+                    // this is a single ftruncate.
+                    await fh.truncate(absLineStart)
+                    if (afterLen > 0) {
+                      await fh.write(tail, lineEnd, afterLen, absLineStart)
+                    }
+                    return
+                  }
+                }
+              } finally {
+                await fh.close()
+              }
+
+              // Slow path: target was not in the last 64KB. Rare - requires many
+              // large entries to have landed between the write and the tombstone.
+              if (fileSize > MAX_TOMBSTONE_REWRITE_BYTES) {
+                logForDebugging(
+                  `Skipping tombstone removal: session file too large (${formatFileSize(fileSize)})`,
+                  { level: 'warn' },
+                )
+                return
+              }
+              const content = await readFile(this.sessionFile, {
+                encoding: 'utf-8',
+              })
+              const lines = content.split('\n').filter((line: string) => {
+                if (!line.trim()) return true
+                try {
+                  const entry = jsonParse(line)
+                  return entry.uuid !== targetUuid
+                } catch {
+                  return true // Keep malformed lines
+                }
+              })
+              await writeFile(this.sessionFile, lines.join('\n'), {
+                encoding: 'utf8',
+              })
+            } catch (error) {
+              // A not-yet-materialized file is harmless. Other errors can follow
+              // a partial mutation and must poison the writer, never be retried.
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                throw error
+            }
+          } finally {
+            this.tombstoneBarriers.delete(barrier)
           }
         })
-        await writeFile(this.sessionFile, lines.join('\n'), {
-          encoding: 'utf8',
-        })
-      } catch {
-        // Silently ignore errors - the file might not exist yet
       } finally {
-        this.tombstoneWindow = false
-        // Writes enqueued inside the window were held back by
-        // scheduleDrain's inhibit — flush them now, after the tombstone's
-        // truncate/re-append is complete, so ordering is preserved.
-        const hasHeldWrites = [...this.writeQueues.values()].some(
-          queue => queue.length > 0,
-        )
-        if (hasHeldWrites) {
-          await this.drainWriteQueue()
-        }
+        this.tombstoneBarriers.delete(barrier)
+        self.waitingFor = undefined
       }
     })
   }
@@ -1296,7 +1413,22 @@ class Project {
     })
   }
 
+  // Resolves on admission, not disk commit. flush() is the commit/error
+  // barrier for fire-and-forget producers; failures remain sticky there.
   async appendEntry(entry: Entry, sessionId: UUID = getSessionId() as UUID) {
+    return this.trackWrite(() => this.appendEntryImpl(entry, sessionId))
+  }
+
+  private queueEntry(filePath: string, entry: Entry): void {
+    // enqueueWrite has a commit promise. Observe it here: callers of this
+    // admission API do not own that promise, but flush must still fail.
+    void this.enqueueWrite(filePath, entry).catch(error =>
+      this.failWriter(error),
+    )
+    if (this.writerError) throw this.writerError
+  }
+
+  private async appendEntryImpl(entry: Entry, sessionId: UUID) {
     if (this.shouldSkipPersistence()) {
       return
     }
@@ -1330,49 +1462,49 @@ class Project {
       // COMPACTION_V2 journal row. Not a chain participant and never
       // deduped against message UUIDs — it is a standalone append-only
       // record consumed by session/rebuild.ts on resume.
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'summary') {
       // Summaries can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'custom-title') {
       // Custom titles can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'ai-title') {
       // AI titles can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'last-prompt') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'task-summary') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'tag') {
       // Tags can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'agent-name') {
       // Agent names can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'agent-color') {
       // Agent colors can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'agent-setting') {
       // Agent settings can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'pr-link') {
       // PR links can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'file-history-snapshot') {
       // File history snapshots can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'attribution-snapshot') {
       // Attribution snapshots can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'speculation-accept') {
       // Speculation accept entries can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'mode') {
       // Mode entries can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'worktree-state') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'content-replacement') {
       // Content replacement records can always be appended. Subagent records
       // go to the sidechain file (for AgentTool resume); main-thread
@@ -1380,24 +1512,24 @@ class Project {
       const targetFile = entry.agentId
         ? getAgentTranscriptPath(entry.agentId)
         : sessionFile
-      void this.enqueueWrite(targetFile, entry)
+      this.queueEntry(targetFile, entry)
     } else if (entry.type === 'marble-origami-commit') {
       // Always append. Commit order matters for restore (later commits may
       // reference earlier commits' summary messages), so these must be
       // written in the order received and read back sequentially.
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'marble-origami-snapshot') {
       // Always append. Last-wins on restore — later entries supersede.
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'goal') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else if (entry.type === 'goal-cleared') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.queueEntry(sessionFile, entry)
     } else {
       const messageSet = await getSessionMessages(sessionId)
       if (entry.type === 'queue-operation') {
         // Queue operations are always appended to the session file
-        void this.enqueueWrite(sessionFile, entry)
+        this.queueEntry(sessionFile, entry)
       } else {
         // At this point, entry must be a TranscriptMessage (user/assistant/attachment/system)
         // All other entry types have been handled above
@@ -1421,8 +1553,8 @@ class Project {
         // exhausts retries → gracefulShutdownSync(1). See inc-4718.
         const isNewUuid = !messageSet.has(entry.uuid)
         if (isAgentSidechain || isNewUuid) {
-          // Enqueue write — appendToFile handles ENOENT by creating directories
-          void this.enqueueWrite(targetFile, entry)
+          // Enqueue write — appendToFile creates directories before appending
+          this.queueEntry(targetFile, entry)
 
           if (!isAgentSidechain) {
             // messageSet is main-file-authoritative. Sidechain entries go to a
@@ -1601,41 +1733,46 @@ export async function recordTranscript(
   startingParentUuidHint?: UUID,
   allMessages?: readonly Message[],
 ): Promise<UUID | null> {
-  const cleanedMessages = cleanMessagesForLogging(messages, allMessages)
-  const sessionId = getSessionId() as UUID
-  const messageSet = await getSessionMessages(sessionId)
-  const newMessages: typeof cleanedMessages = []
-  let startingParentUuid: UUID | undefined = startingParentUuidHint
-  let seenNewMessage = false
-  for (const m of cleanedMessages) {
-    if (messageSet.has(m.uuid as UUID)) {
-      // Only track skipped messages that form a prefix. After compaction,
-      // messagesToKeep appear AFTER new CB/summary, so this skips them.
-      if (!seenNewMessage && isChainParticipant(m)) {
-        startingParentUuid = m.uuid as UUID
+  const writer = getProject()
+  return writer.trackWrite(async () => {
+    const cleanedMessages = cleanMessagesForLogging(messages, allMessages)
+    const sessionId = getSessionId() as UUID
+    const messageSet = await getSessionMessages(sessionId)
+    const newMessages: typeof cleanedMessages = []
+    let startingParentUuid: UUID | undefined = startingParentUuidHint
+    let seenNewMessage = false
+    for (const m of cleanedMessages) {
+      if (messageSet.has(m.uuid as UUID)) {
+        // Only track skipped messages that form a prefix. After compaction,
+        // messagesToKeep appear AFTER new CB/summary, so this skips them.
+        if (!seenNewMessage && isChainParticipant(m)) {
+          startingParentUuid = m.uuid as UUID
+        }
+      } else {
+        newMessages.push(m)
+        seenNewMessage = true
       }
-    } else {
-      newMessages.push(m)
-      seenNewMessage = true
     }
-  }
-  if (newMessages.length > 0) {
-    await getProject().insertMessageChain(
-      newMessages,
-      false,
-      undefined,
-      startingParentUuid,
-      teamInfo,
+    if (newMessages.length > 0) {
+      await writer.insertMessageChain(
+        newMessages,
+        false,
+        undefined,
+        startingParentUuid,
+        teamInfo,
+      )
+    }
+    // Return the last ACTUALLY recorded chain-participant's UUID, OR the
+    // prefix-tracked UUID if no new chain participants were recorded. This lets
+    // callers (useLogMessages) maintain the correct parent chain even when the
+    // slice is all-recorded (rewind, /resume scenarios where every message is
+    // already in messageSet). Progress is skipped — it's written to the JSONL
+    // but nothing chains TO it (see isChainParticipant).
+    const lastRecorded = newMessages.findLast(isChainParticipant)
+    return (
+      (lastRecorded?.uuid as UUID | undefined) ?? startingParentUuid ?? null
     )
-  }
-  // Return the last ACTUALLY recorded chain-participant's UUID, OR the
-  // prefix-tracked UUID if no new chain participants were recorded. This lets
-  // callers (useLogMessages) maintain the correct parent chain even when the
-  // slice is all-recorded (rewind, /resume scenarios where every message is
-  // already in messageSet). Progress is skipped — it's written to the JSONL
-  // but nothing chains TO it (see isChainParticipant).
-  const lastRecorded = newMessages.findLast(isChainParticipant)
-  return (lastRecorded?.uuid as UUID | undefined) ?? startingParentUuid ?? null
+  })
 }
 
 export async function recordSidechainTranscript(
@@ -2780,12 +2917,9 @@ function appendEntryToFile(
 ): void {
   const fs = getFsImplementation()
   const line = jsonStringify(entry) + '\n'
-  try {
-    fs.appendFileSync(fullPath, line, { mode: 0o600 })
-  } catch {
-    fs.mkdirSync(dirname(fullPath), { mode: 0o700 })
-    fs.appendFileSync(fullPath, line, { mode: 0o600 })
-  }
+  fs.mkdirSync(dirname(fullPath), { mode: 0o700 })
+  // Like the async writer, this must not retry a potentially partial append.
+  fs.appendFileSync(fullPath, line, { mode: 0o600 })
 }
 
 /**

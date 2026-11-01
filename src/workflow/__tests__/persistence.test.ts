@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cleanupOldRuns,
+  claimRunDirectory,
   getRunsDir,
   listPersistedRuns,
   readRunState,
@@ -193,6 +194,75 @@ test('writeRunState writes full AgentProgress (no output content, includes label
   }
 })
 
+test('failed writes reject and snapshot is captured before IO', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wf-'))
+  try {
+    await fsWriteFile(join(dir, 'blocker'), 'file')
+    await expect(
+      writeRunState(join(dir, 'blocker'), makeRun()),
+    ).rejects.toThrow()
+    const run = makeRun({ returnValue: { value: 'original' } })
+    const pending = writeRunState(dir, run)
+    ;(run.returnValue as { value: string }).value = 'mutated'
+    run.status = 'running'
+    await pending
+    expect((await readRunState(dir, 'r1'))?.returnValue).toEqual({
+      value: 'original',
+    })
+    expect((await readRunState(dir, 'r1'))?.status).toBe('completed')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('GC protects resumed and persisting directories with old terminal state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wf-'))
+  try {
+    await writeRunState(dir, makeRun())
+    const release = claimRunDirectory(dir, 'r1')
+    expect(() => claimRunDirectory(dir, 'r1')).toThrow()
+    expect(await cleanupOldRuns(dir, 0)).toBe(0)
+    release()
+    const write = writeRunState(dir, makeRun({ returnValue: 'new' }))
+    expect(() => claimRunDirectory(dir, 'r1')).toThrow('persisting')
+    await write
+    const releaseAgain = claimRunDirectory(dir, 'r1')
+    expect((await readRunState(dir, 'r1'))?.returnValue).toBe('new')
+    releaseAgain()
+    expect(await cleanupOldRuns(dir, 0)).toBe(1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('GC abandons a stale scan after a complete ownership cycle', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wf-'))
+  try {
+    await writeRunState(dir, makeRun())
+    const sweep = cleanupOldRuns(dir, 0)
+    // Acquire and release before the scan resumes: active-only checks miss this.
+    const release = claimRunDirectory(dir, 'r1')
+    release()
+    expect(await sweep).toBe(0)
+    expect(await readRunState(dir, 'r1')).not.toBeNull()
+    // A fresh scan can still collect the directory.
+    expect(await cleanupOldRuns(dir, 0)).toBe(1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('cleanup preserves running state even when over budget', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wf-'))
+  try {
+    await writeRunState(dir, makeRun({ status: 'running' }))
+    expect(await cleanupOldRuns(dir, 0)).toBe(0)
+    expect((await readRunState(dir, 'r1'))?.status).toBe('running')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('getRunsDir returns <projectRoot>/.claude/workflow-runs shape', () => {
   const dir = getRunsDir()
   // do not hard-code projectRoot (differs across machines), only check suffix structure
@@ -248,7 +318,7 @@ test('cleanupOldRuns keeps the newest keepMax runs and removes the rest', async 
   }
 })
 
-test('cleanupOldRuns prunes orphan dirs (no state.json) first', async () => {
+test('cleanupOldRuns preserves directories without terminal state', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'wf-'))
   try {
     await writeRunState(dir, makeRun({ runId: 'r1', updatedAt: 1000 }))
@@ -257,9 +327,9 @@ test('cleanupOldRuns prunes orphan dirs (no state.json) first', async () => {
     await mkdir(join(dir, 'orphan'), { recursive: true })
 
     const removed = await cleanupOldRuns(dir, 2)
-    expect(removed).toBe(1)
+    expect(removed).toBe(0)
     const entries = await readdir(dir)
-    expect(entries).not.toContain('orphan')
+    expect(entries).toContain('orphan')
     expect(entries).toContain('r1')
     expect(entries).toContain('r2')
   } finally {

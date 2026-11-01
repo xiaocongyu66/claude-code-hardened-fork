@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { describe, expect, mock, spyOn, test } from 'bun:test'
 import { debugMock } from '../../../../tests/mocks/debug.js'
 
 // logForDebugging writes are irrelevant to these semantics tests; mock the
@@ -19,6 +19,63 @@ function restoreEnv(key: string, previous: string | undefined): void {
   if (previous === undefined) delete process.env[key]
   else process.env[key] = previous
 }
+
+test('abort clears the default retry timer', async () => {
+  const controller = new AbortController()
+  const set = spyOn(globalThis, 'setTimeout')
+  const clear = spyOn(globalThis, 'clearTimeout')
+  const failure = Object.assign(new Error('socket reset'), {
+    code: 'ECONNRESET',
+  })
+  try {
+    await expect(
+      withConnectionRetry(
+        async () => {
+          throw failure
+        },
+        {
+          signal: controller.signal,
+          maxRetries: 1,
+          onRetryStatus: () => {
+            queueMicrotask(() => controller.abort())
+          },
+        },
+      ),
+    ).rejects.toBe(failure)
+    const retryIndex = set.mock.calls.findIndex(args => Number(args[1]) > 0)
+    expect(retryIndex).toBeGreaterThanOrEqual(0)
+    const timer = set.mock.results[retryIndex]!.value
+    expect(clear).toHaveBeenCalledWith(timer)
+    expect(timer.hasRef()).toBe(false)
+  } finally {
+    set.mockRestore()
+    clear.mockRestore()
+  }
+})
+
+test('rejected injected sleep removes its abort listener', async () => {
+  const controller = new AbortController()
+  const add = spyOn(controller.signal, 'addEventListener')
+  const remove = spyOn(controller.signal, 'removeEventListener')
+  const failure = new Error('sleep failed')
+  await expect(
+    withConnectionRetry(
+      async () => {
+        throw Object.assign(new Error('reset'), { code: 'ECONNRESET' })
+      },
+      {
+        signal: controller.signal,
+        maxRetries: 1,
+        sleep: async () => {
+          throw failure
+        },
+      },
+    ),
+  ).rejects.toBe(failure)
+  expect(remove).toHaveBeenCalledWith('abort', add.mock.calls[0]![1])
+  add.mockRestore()
+  remove.mockRestore()
+})
 
 describe('isProviderConnectionRetryable', () => {
   test('user abort (signal aborted) is never retryable', () => {

@@ -99,13 +99,13 @@ test('run_done killed → writes status=killed to disk', async () => {
   }
 })
 
-test('writeRunState internal IO exception is swallowed: attachRunStatePersistence does not propagate, bus emit does not break', async () => {
+test('persistence rejection keeps results and blocks admission without breaking bus emit', async () => {
   const blockerDir = await mkdtemp(join(tmpdir(), 'wf-persist-'))
-  // first create a same-named file, so subdir mkdir fails → writeRunState internal catch swallows it
+  // first create a same-named file, so subdir mkdir fails → the persistence listener handles rejection
   await writeFile(join(blockerDir, 'not-a-dir.txt'), 'blocker', 'utf-8')
   try {
     const bus = createProgressBus()
-    const store = createProgressStoreFromBus(bus)
+    const store = createProgressStoreFromBus(bus, { maxTerminalRuns: 1 })
     // runsDir points to a dir whose parent path is a file: mkdir recursive fails
     attachRunStatePersistence(bus, store, () =>
       join(blockerDir, 'not-a-dir.txt'),
@@ -115,7 +115,7 @@ test('writeRunState internal IO exception is swallowed: attachRunStatePersistenc
     let otherNotified = 0
     bus.subscribe(() => otherNotified++)
 
-    // bus.emit should not throw — writeRunState swallows the exception internally
+    // bus.emit should not throw — the detached listener handles rejection
     expect(() => {
       bus.emit({
         type: 'run_started',
@@ -131,12 +131,14 @@ test('writeRunState internal IO exception is swallowed: attachRunStatePersistenc
       })
     }).not.toThrow()
 
-    // let writeRunState's microtask complete (exception swallowed internally)
+    // Let the listener observe the rejected write without acknowledging persistence
     await new Promise(r => setTimeout(r, 50))
 
     // this store subscriber still works normally (received both run_started + run_done events)
     expect(otherNotified).toBeGreaterThanOrEqual(2)
     expect(store.get('rErr')?.status).toBe('completed')
+    expect(store.get('rErr')?.returnValue).toBe('x')
+    expect(() => store.assertLaunchCapacity()).toThrow('unpersisted')
   } finally {
     await rm(blockerDir, { recursive: true, force: true })
   }

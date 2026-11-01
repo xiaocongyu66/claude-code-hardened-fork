@@ -565,7 +565,7 @@ export async function createChatGPTResponsesStream(params: {
   request: ResponsesRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
-}): Promise<AsyncIterable<Record<string, unknown>>> {
+}): Promise<AsyncIterable<Record<string, unknown>> & { dispose(): void }> {
   const auth = await getValidChatGPTAuth()
   const watchdog = createStreamWatchdog({
     url: CHATGPT_RESPONSES_URL,
@@ -605,9 +605,12 @@ export async function createChatGPTResponsesStream(params: {
     // Establishment succeeded — disarm the first-byte window before the
     // consumption loop re-arms the idle window.
     watchdog.markEstablished()
-    return watchdog.wrap(
+    const stream = watchdog.wrap(
       created as unknown as AsyncIterable<Record<string, unknown>>,
     )
+    // Explicit ownership for callers that abandon before the generator starts.
+    // Generator.return() alone cannot run a suspendedStart generator's finally.
+    return Object.assign(stream, { dispose: () => watchdog.abort() })
   } catch (error) {
     // The wrapped stream was never handed out — nothing will settle the
     // in-flight registry entry on our behalf.

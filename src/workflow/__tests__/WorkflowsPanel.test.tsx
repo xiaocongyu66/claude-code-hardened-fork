@@ -126,6 +126,52 @@ test('panelCall wraps WorkflowsPanel in SentryErrorBoundary (fix M regression)',
   expect(typeof child.props.onDone).toBe('function');
 });
 
+test('panelCall reads a historical result by runId without mounting the live panel', async () => {
+  __resetWorkflowServiceForTests();
+  const svc = getWorkflowService();
+  const original = svc.getRunAsync;
+  const seen: string[] = [];
+  svc.getRunAsync = async id => {
+    seen.push(id);
+    return { runId: id, status: 'completed', returnValue: { answer: 'full result' } } as RunProgress;
+  };
+  try {
+    let output = '';
+    const node = await panelCall(
+      message => {
+        output = message ?? '';
+      },
+      {} as never,
+      ' historic-1 ',
+    );
+    expect(node).toBeNull();
+    expect(seen).toEqual(['historic-1']);
+    expect(output).toContain('full result');
+    expect(output).toContain('completed');
+    await panelCall(
+      message => {
+        output = message ?? '';
+      },
+      {} as never,
+      '../outside',
+    );
+    expect(output).toContain('Usage:');
+    expect(seen).toEqual(['historic-1']);
+    svc.getRunAsync = async () => undefined;
+    await panelCall(
+      message => {
+        output = message ?? '';
+      },
+      {} as never,
+      'missing',
+    );
+    expect(output).toContain('not found');
+  } finally {
+    svc.getRunAsync = original;
+    __resetWorkflowServiceForTests();
+  }
+});
+
 // ---- Task 6: panel mount triggers loadPersistedRuns once ----
 // Verify that WorkflowsPanel mount calls svc.loadPersistedRuns() exactly once.
 // The persistedLoaded flag inside service guards idempotency; re-render / re-mount does not repeat the call.

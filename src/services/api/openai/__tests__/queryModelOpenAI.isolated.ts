@@ -214,6 +214,7 @@ let _inFlightAtCreate: Array<Record<string, any>> = []
  * the adapted stream exists when the replay yields start).
  */
 let _createFailuresRemaining = 0
+let _useCodex = false
 
 mock.module('@ant/model-provider', () => ({
   resolveOpenAIModel: (m: string) => m,
@@ -286,8 +287,8 @@ mock.module('../../../../services/analytics/growthbook.js', () => ({
 // Avoid partial mocks of bootstrap/state and envUtils — incomplete surfaces
 // break transitive named imports when this file is run alone.
 mock.module('../chatgptAuth.js', () => ({
-  isChatGPTAuthEnabled: () => false,
-  getValidChatGPTAuth: async () => null,
+  isChatGPTAuthEnabled: () => _useCodex,
+  getValidChatGPTAuth: async () => ({ accessToken: 'test-token' }),
   // W2.4 invalidate 面：responsesAdapter 的 invalidateCachedCodexClient
   // 依赖该绑定（真实 responsesAdapter 与本 mock 链接）；本文件强制走
   // Chat Completions 路径，空实现。
@@ -806,80 +807,104 @@ describe('queryModelOpenAI — deferred MCP tool visibility', () => {
 // chain on that path.
 
 describe('queryModelOpenAI — replay-window teardown guard (#31 orphan window)', () => {
-  test('consumer .return() during the retry-notice replay releases the provider slot and settles the watchdog', async () => {
-    const { getProviderConcurrencyState, resetProviderConcurrencyForTest } =
-      await import('../../../../services/api/providerConcurrency.js')
-    const { getInFlightApiRequests } = await import('../streamWatchdog.js')
-    resetProviderConcurrencyForTest()
+  for (const codex of [false, true]) {
+    test(`consumer .return() during retry-notice replay cleans up (codex=${codex})`, async () => {
+      _useCodex = codex
+      let transportSignal: AbortSignal | undefined
+      const { getProviderConcurrencyState, resetProviderConcurrencyForTest } =
+        await import('../../../../services/api/providerConcurrency.js')
+      const { getInFlightApiRequests } = await import('../streamWatchdog.js')
+      resetProviderConcurrencyForTest()
 
-    const inFlightBefore = getInFlightApiRequests().length
+      const inFlightBefore = getInFlightApiRequests().length
 
-    // Attempt 1 fails with a retryable connection error (buffers one g0
-    // "Retrying in Xs" row); attempt 2 succeeds — the adapted stream exists
-    // while the buffered rows are replayed.
-    _createFailuresRemaining = 1
-    _nextEvents = []
+      // Attempt 1 fails with a retryable connection error (buffers one g0
+      // "Retrying in Xs" row); attempt 2 succeeds — the adapted stream exists
+      // while the buffered rows are replayed.
+      _createFailuresRemaining = 1
+      _nextEvents = []
 
-    try {
-      const { queryModelOpenAI } = await import('../index.js')
-      const options: any = {
-        model: 'test-model',
-        tools: [],
-        agents: [],
-        querySource: 'main_loop',
-        getToolPermissionContext: async () => ({
-          alwaysAllow: [],
-          alwaysDeny: [],
-          needsPermission: [],
-          mode: 'default',
-          isBypassingPermissions: false,
-        }),
-      }
-
-      const gen = queryModelOpenAI(
-        [],
-        { type: 'text', text: '' } as any,
-        [],
-        new AbortController().signal,
-        options,
-      )
-
-      // First pull lands on a replayed retry notice — the generator is now
-      // suspended at the hazard point (adaptedStream exists, for-await not
-      // started, no enclosing finally in the pre-fix code).
-      const first = await gen.next()
-      expect(first.done).toBe(false)
-      const notice = first.value as any
-      expect(notice.type).toBe('system')
-      expect(notice.subtype).toBe('api_error')
-      expect(notice.retryAttempt).toBe(1)
-
-      // The request is in flight and holds its slot at this point.
-      expect(getProviderConcurrencyState('openai')?.active).toBe(1)
-      expect(getInFlightApiRequests().length).toBe(inFlightBefore + 1)
-
-      // Abandon mid-replay — the exact pre-fix leak path.
-      await gen.return(undefined)
-
-      // Teardown travels through fire-and-forget microtask chains
-      // (return() → releaseOnStreamEnd finally → watchdog settle) — poll
-      // briefly instead of asserting synchronously.
-      for (let i = 0; i < 200; i++) {
-        const state = getProviderConcurrencyState('openai')
-        if (
-          (state?.active ?? 1) === 0 &&
-          getInFlightApiRequests().length === inFlightBefore
-        ) {
-          break
+      try {
+        const { queryModelOpenAI } = await import('../index.js')
+        const options: any = {
+          model: 'test-model',
+          tools: [],
+          agents: [],
+          querySource: 'main_loop',
+          getToolPermissionContext: async () => ({
+            alwaysAllow: [],
+            alwaysDeny: [],
+            needsPermission: [],
+            mode: 'default',
+            isBypassingPermissions: false,
+          }),
         }
-        await Bun.sleep(5)
+
+        if (codex)
+          options.fetchOverride = async (_url: unknown, init: RequestInit) => {
+            if (_createFailuresRemaining-- > 0)
+              throw new Error('connection refused')
+            transportSignal = init.signal ?? undefined
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(
+                    new TextEncoder().encode(
+                      'data: {"type":"response.created"}\n\n',
+                    ),
+                  )
+                },
+              }),
+              { headers: { 'content-type': 'text/event-stream' } },
+            )
+          }
+        const gen = queryModelOpenAI(
+          [],
+          { type: 'text', text: '' } as any,
+          [],
+          new AbortController().signal,
+          options,
+        )
+
+        // First pull lands on a replayed retry notice — the generator is now
+        // suspended at the hazard point (adaptedStream exists, for-await not
+        // started, no enclosing finally in the pre-fix code).
+        const first = await gen.next()
+        expect(first.done).toBe(false)
+        const notice = first.value as any
+        expect(notice.type).toBe('system')
+        expect(notice.subtype).toBe('api_error')
+        expect(notice.retryAttempt).toBe(1)
+
+        // The request is in flight and holds its slot at this point.
+        expect(getProviderConcurrencyState('openai')?.active).toBe(1)
+        expect(getInFlightApiRequests().length).toBe(inFlightBefore + 1)
+
+        // Abandon mid-replay — the exact pre-fix leak path.
+        await gen.return(undefined)
+
+        // Teardown travels through fire-and-forget microtask chains
+        // (return() → releaseOnStreamEnd finally → watchdog settle) — poll
+        // briefly instead of asserting synchronously.
+        for (let i = 0; i < 200; i++) {
+          const state = getProviderConcurrencyState('openai')
+          if (
+            (state?.active ?? 1) === 0 &&
+            getInFlightApiRequests().length === inFlightBefore
+          ) {
+            break
+          }
+          await Bun.sleep(5)
+        }
+        expect(getProviderConcurrencyState('openai')?.active).toBe(0)
+        expect(getInFlightApiRequests().length).toBe(inFlightBefore)
+        if (codex) expect(transportSignal?.aborted).toBe(true)
+      } finally {
+        _useCodex = false
+        _createFailuresRemaining = 0
       }
-      expect(getProviderConcurrencyState('openai')?.active).toBe(0)
-      expect(getInFlightApiRequests().length).toBe(inFlightBefore)
-    } finally {
-      _createFailuresRemaining = 0
-    }
-  })
+    })
+  }
 
   test('replay followed by normal consumption still streams fully (guard must not close early)', async () => {
     const { getProviderConcurrencyState, resetProviderConcurrencyForTest } =

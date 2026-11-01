@@ -13,6 +13,34 @@ import { getProjectRoot } from '../../bootstrap/state.js'
 import type { SetAppState } from '../../Task.js'
 import type { AppState } from '../../state/AppState.tsx'
 
+test('registrar rejects duplicate resume, including killed but unsettled runs', () => {
+  const bus = createProgressBus()
+  const store = createProgressStoreFromBus(bus)
+  const ports = createWorkflowPorts({ bus, store })
+  const state = { tasks: {} } as unknown as AppState
+  const setAppState: SetAppState = f => {
+    Object.assign(state, f(state))
+  }
+  const host = ports.hostFactory({
+    context: { setAppState },
+    canUseTool: (() => {}) as never,
+    parentMessage: {} as never,
+  })
+  const opts = { runId: 'duplicate-resume', workflowName: 'w' }
+  ports.taskRegistrar.register(opts, host.handle)
+  expect(() => ports.taskRegistrar.register(opts, host.handle)).toThrow()
+  bus.emit({
+    type: 'run_started',
+    runId: opts.runId,
+    workflowName: 'w',
+    meta: null,
+  })
+  ports.taskRegistrar.kill(opts.runId)
+  expect(() => ports.taskRegistrar.register(opts, host.handle)).toThrow()
+  bus.emit({ type: 'run_done', runId: opts.runId, status: 'killed' })
+  ports.taskRegistrar.kill(opts.runId)
+})
+
 test('buildRegistry registers claude-code as default and resolve hits', () => {
   const reg = buildRegistry()
   expect(reg.has('claude-code')).toBe(true)

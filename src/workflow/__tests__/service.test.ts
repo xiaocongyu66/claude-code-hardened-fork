@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeService, __resetWorkflowServiceForTests } from '../service.js'
 import { createProgressBus } from '../progress/bus.js'
+import { writeRunState } from '../persistence.js'
 import {
   createProgressStoreFromBus,
   type RunProgress,
@@ -179,6 +180,75 @@ const stubCanUseTool = (() => Promise.resolve({ behavior: 'allow' })) as never
 async function settle(): Promise<void> {
   await new Promise(r => setTimeout(r, 60))
 }
+
+test('historical lookup reads the full evicted result without hydrating the store', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wf-history-'))
+  try {
+    const { ports } = fakePorts()
+    const store = createProgressStoreFromBus(createProgressBus(), {
+      maxTerminalRuns: 0,
+    })
+    const svc = makeService(ports, store, undefined, () => dir)
+    store.apply({
+      type: 'run_started',
+      runId: 'history',
+      workflowName: 'w',
+      meta: null,
+    })
+    const returnValue = { text: '完整结果'.repeat(1000) }
+    store.apply({
+      type: 'run_done',
+      runId: 'history',
+      status: 'completed',
+      returnValue,
+    })
+    const run = store.get('history')!
+    await writeRunState(dir, run)
+    store.markPersisted(run)
+    expect(svc.getRun('history')).toBeUndefined()
+    expect((await svc.getRunAsync('history'))?.returnValue).toEqual(returnValue)
+    expect(svc.listRuns()).toEqual([])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('getRunAsync rechecks memory after a disk miss races a new run', async () => {
+  const { ports, store } = fakePorts()
+  const svc = makeService(
+    ports,
+    store,
+    undefined,
+    () => '/nonexistent/workflow-history',
+  )
+  const lookup = svc.getRunAsync('new-generation')
+  store.apply({
+    type: 'run_started',
+    runId: 'new-generation',
+    workflowName: 'new',
+    meta: null,
+  })
+  expect(await lookup).toBe(store.get('new-generation'))
+})
+
+test('concurrent resumes reject before asynchronous source resolution finishes', async () => {
+  const { ports, store } = fakePorts()
+  const svc = makeService(ports, store)
+  const input = {
+    scriptPath: '/nonexistent/workflow-concurrent-resume.mjs',
+    resumeFromRunId: 'same',
+  }
+  const first = svc.launch(input, stubTUC, stubCanUseTool)
+  const firstRejected = expect(first).rejects.toThrow()
+  await expect(svc.launch(input, stubTUC, stubCanUseTool)).rejects.toThrow(
+    'still active',
+  )
+  await firstRejected
+  // Failure releases the reservation; subsequent attempts fail on IO, not a leaked lock.
+  await expect(svc.launch(input, stubTUC, stubCanUseTool)).rejects.toThrow(
+    'ENOENT',
+  )
+})
 
 test('launch → completed; store shows this run', async () => {
   __resetWorkflowServiceForTests()

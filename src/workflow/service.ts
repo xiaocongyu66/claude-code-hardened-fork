@@ -19,6 +19,7 @@ import { installWorkflowNotifications } from './notifications.js'
 import {
   attachRunStatePersistence,
   getRunsDir,
+  isRunDirectoryActive,
   listPersistedRuns,
   readRunState,
 } from './persistence.js'
@@ -184,79 +185,103 @@ export function makeService(
   // Process-singleton flag for loadPersistedRuns: set to true on first call, subsequent calls return immediately.
   // Reset on scan failure to allow next retry. Each makeService call has its own closure variable (reset when tests build a new service).
   let persistedLoaded = false
+  const activeLaunches = new Set<string>()
 
   return {
     ports,
 
     async launch(input, toolUseContext, canUseTool) {
       profileCheckpoint('workflow_launch_start')
-      const { script, workflowFile, workflowName } = await resolveSource(input)
+      store.assertLaunchCapacity(input.resumeFromRunId)
+      const resumeId = input.resumeFromRunId
+      if (
+        resumeId &&
+        (activeLaunches.has(resumeId) ||
+          store.get(resumeId)?.status === 'running')
+      ) {
+        throw new Error(`Workflow ${resumeId} is still active`)
+      }
+      if (resumeId) activeLaunches.add(resumeId)
+      let launched = false
       try {
-        parseScript(script)
-      } catch (e) {
-        throw new Error(`Script validation failed: ${(e as Error).message}`)
-      }
-
-      const host = buildHost(toolUseContext, canUseTool)
-      const { runId, signal } = ports.taskRegistrar.register(
-        {
-          workflowName,
-          ...(workflowFile ? { workflowFile } : {}),
-          ...(input.description ? { summary: input.description } : {}),
-          ...(host.toolUseId ? { toolUseId: host.toolUseId } : {}),
-          ...(input.resumeFromRunId ? { runId: input.resumeFromRunId } : {}),
-        },
-        host.handle,
-      )
-
-      // Inline entry: persist script to the run directory (symmetric with WorkflowTool), return a reusable path.
-      // Degrade on write failure (log), do not block the run (script is already in memory).
-      let persistedScriptPath: string | undefined
-      if (!workflowFile && input.script) {
+        const { script, workflowFile, workflowName } =
+          await resolveSource(input)
         try {
-          persistedScriptPath = await persistInlineScript(
-            input.script,
-            runId,
-            host.cwd,
-          )
+          parseScript(script)
         } catch (e) {
-          logForDebugging(
-            `workflow inline script persist failed: ${(e as Error).message}`,
-          )
+          throw new Error(`Script validation failed: ${(e as Error).message}`)
         }
-      }
 
-      // detached: do not await, let the caller get runId immediately; on completion route to the registrar.
-      void runWorkflow({
-        script,
-        ...(input.args !== undefined ? { args: input.args } : {}),
-        runId,
-        workflowName,
-        ports,
-        host: host.handle,
-        signal,
-        cwd: host.cwd,
-        budgetTotal: host.budgetTotal,
-        ...(input.maxConcurrency !== undefined
-          ? { maxConcurrency: input.maxConcurrency }
-          : {}),
-        ...(input.resumeFromRunId ? { resume: true } : {}),
-      })
-        .then(result => {
-          if (result.status === 'completed') {
-            ports.taskRegistrar.complete(runId)
-          } else if (result.status === 'failed') {
-            ports.taskRegistrar.fail(runId, result.error ?? 'failed')
-          } else {
-            ports.taskRegistrar.kill(runId)
+        store.assertLaunchCapacity(input.resumeFromRunId)
+        const host = buildHost(toolUseContext, canUseTool)
+        const { runId, signal } = ports.taskRegistrar.register(
+          {
+            workflowName,
+            ...(workflowFile ? { workflowFile } : {}),
+            ...(input.description ? { summary: input.description } : {}),
+            ...(host.toolUseId ? { toolUseId: host.toolUseId } : {}),
+            ...(input.resumeFromRunId ? { runId: input.resumeFromRunId } : {}),
+          },
+          host.handle,
+        )
+
+        activeLaunches.add(runId)
+        // Inline entry: persist script to the run directory (symmetric with WorkflowTool), return a reusable path.
+        // Degrade on write failure (log), do not block the run (script is already in memory).
+        let persistedScriptPath: string | undefined
+        if (!workflowFile && input.script) {
+          try {
+            persistedScriptPath = await persistInlineScript(
+              input.script,
+              runId,
+              host.cwd,
+            )
+          } catch (e) {
+            logForDebugging(
+              `workflow inline script persist failed: ${(e as Error).message}`,
+            )
           }
-        })
-        .catch(e => ports.taskRegistrar.fail(runId, (e as Error).message))
+        }
 
-      logForDebugging(`workflow launched: ${runId} (${workflowName})`)
-      return {
-        runId,
-        ...(persistedScriptPath ? { scriptPath: persistedScriptPath } : {}),
+        // detached: do not await, let the caller get runId immediately; on completion route to the registrar.
+        void runWorkflow({
+          script,
+          ...(input.args !== undefined ? { args: input.args } : {}),
+          runId,
+          workflowName,
+          ports,
+          host: host.handle,
+          signal,
+          cwd: host.cwd,
+          budgetTotal: host.budgetTotal,
+          ...(input.maxConcurrency !== undefined
+            ? { maxConcurrency: input.maxConcurrency }
+            : {}),
+          ...(input.resumeFromRunId ? { resume: true } : {}),
+        })
+          .then(result => {
+            if (result.status === 'completed') {
+              ports.taskRegistrar.complete(runId)
+            } else if (result.status === 'failed') {
+              ports.taskRegistrar.fail(runId, result.error ?? 'failed')
+            } else {
+              ports.taskRegistrar.kill(runId)
+            }
+          })
+          .catch(e => ports.taskRegistrar.fail(runId, (e as Error).message))
+          .finally(() => {
+            activeLaunches.delete(runId)
+            if (resumeId) activeLaunches.delete(resumeId)
+          })
+
+        launched = true
+        logForDebugging(`workflow launched: ${runId} (${workflowName})`)
+        return {
+          runId,
+          ...(persistedScriptPath ? { scriptPath: persistedScriptPath } : {}),
+        }
+      } finally {
+        if (!launched && resumeId) activeLaunches.delete(resumeId)
       }
     },
 
@@ -287,9 +312,17 @@ export function makeService(
     listRuns: () => store.list(),
     getRun: id => store.get(id),
     async getRunAsync(id) {
+      const dir = runsDirProvider()
       const mem = store.get(id)
       if (mem) return mem
-      return (await readRunState(runsDirProvider(), id)) ?? undefined
+      const disk = await readRunState(dir, id)
+      // A resume may have started while disk IO was pending (including the tool path).
+      return (
+        store.get(id) ??
+        (activeLaunches.has(id) || isRunDirectoryActive(dir, id)
+          ? undefined
+          : (disk ?? undefined))
+      )
     },
     async loadPersistedRuns() {
       if (persistedLoaded) return

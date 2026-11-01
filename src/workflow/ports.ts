@@ -5,7 +5,7 @@ import {
 } from '@claude-code-hardened/workflow-engine'
 import { logForDebugging } from '../utils/debug.js'
 import { getProjectRoot } from '../bootstrap/state.js'
-import { getRunsDir } from './persistence.js'
+import { claimRunDirectory, getRunsDir } from './persistence.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -34,6 +34,8 @@ type RunBinding = {
   setAppState: SetAppState
   abortController: AbortController
   workflowName: string
+  terminal: boolean
+  releaseDirectory: () => void
   /** agentId → AbortController. Registered when backend starts an agent; killAgent uses it for precise abort. */
   agentAbortControllers: Map<number, AbortController>
 }
@@ -80,6 +82,8 @@ export function createWorkflowPorts(opts: {
   // and runId is a string — use the brand cast provided by the analytics module (verified non-code/path) to pass it through.
   opts.bus.subscribe((e: ProgressEvent) => {
     if (e.type === 'run_done') {
+      const binding = bindings.get(e.runId)
+      if (binding) binding.terminal = true
       logEvent('tengu_workflow_done', {
         status: e.status === 'completed' ? 0 : e.status === 'failed' ? 1 : 2,
         runId:
@@ -90,46 +94,72 @@ export function createWorkflowPorts(opts: {
 
   const taskRegistrar: WorkflowPorts['taskRegistrar'] = {
     register(regOpts, host) {
-      const bundle = readHostBundle(host)
-      const setAppState =
-        bundle.toolUseContext.setAppStateForTasks ??
-        bundle.toolUseContext.setAppState
-      const abortController = new AbortController()
-      const taskId = registerLocalWorkflowTask(setAppState, {
-        description: regOpts.summary ?? regOpts.workflowName,
-        workflowName: regOpts.workflowName,
-        workflowFile: regOpts.workflowFile ?? '',
-        summary: regOpts.summary,
-        ...(regOpts.toolUseId ? { toolUseId: regOpts.toolUseId } : {}),
-        abortController,
-      })
-      const runId = regOpts.runId ?? taskId
-      bindings.set(runId, {
-        runId,
-        taskId,
-        setAppState,
-        abortController,
-        workflowName: regOpts.workflowName,
-        agentAbortControllers: new Map(),
-      })
-      logForDebugging(
-        `workflow task registered: ${runId} (${regOpts.workflowName})`,
-      )
-      return { runId, signal: abortController.signal }
+      opts.store.assertLaunchCapacity(regOpts.runId)
+      if (
+        regOpts.runId &&
+        (bindings.has(regOpts.runId) ||
+          opts.store.get(regOpts.runId)?.status === 'running')
+      ) {
+        throw new Error(`Workflow ${regOpts.runId} is still active`)
+      }
+      // Claim resumed IDs before registration can invoke host callbacks.
+      let releaseDirectory = regOpts.runId
+        ? claimRunDirectory(runsDir, regOpts.runId)
+        : undefined
+      try {
+        const bundle = readHostBundle(host)
+        const setAppState =
+          bundle.toolUseContext.setAppStateForTasks ??
+          bundle.toolUseContext.setAppState
+        const abortController = new AbortController()
+        const taskId = registerLocalWorkflowTask(setAppState, {
+          description: regOpts.summary ?? regOpts.workflowName,
+          workflowName: regOpts.workflowName,
+          workflowFile: regOpts.workflowFile ?? '',
+          summary: regOpts.summary,
+          ...(regOpts.toolUseId ? { toolUseId: regOpts.toolUseId } : {}),
+          abortController,
+        })
+        const runId = regOpts.runId ?? taskId
+        releaseDirectory ??= claimRunDirectory(runsDir, runId)
+        bindings.set(runId, {
+          runId,
+          taskId,
+          setAppState,
+          abortController,
+          workflowName: regOpts.workflowName,
+          releaseDirectory,
+          terminal: false,
+          agentAbortControllers: new Map(),
+        })
+        logForDebugging(
+          `workflow task registered: ${runId} (${regOpts.workflowName})`,
+        )
+        return { runId, signal: abortController.signal }
+      } catch (error) {
+        releaseDirectory?.()
+        throw error
+      }
     },
     complete(runId, summary) {
       const b = bindings.get(runId)
       if (!b) return
       completeWorkflowTask(b.taskId, b.setAppState)
       logForDebugging(`workflow ${runId} completed: ${summary ?? ''}`)
-      bindings.delete(runId)
+      if (bindings.get(runId) === b) {
+        bindings.delete(runId)
+        b.releaseDirectory()
+      }
     },
     fail(runId, error) {
       const b = bindings.get(runId)
       if (!b) return
       failWorkflowTask(b.taskId, b.setAppState, error)
       logForDebugging(`workflow ${runId} failed: ${error}`)
-      bindings.delete(runId)
+      if (bindings.get(runId) === b) {
+        bindings.delete(runId)
+        b.releaseDirectory()
+      }
     },
     kill(runId) {
       const b = bindings.get(runId)
@@ -144,7 +174,13 @@ export function createWorkflowPorts(opts: {
         }
       }
       b.agentAbortControllers.clear()
-      bindings.delete(runId)
+      // Abort is not completion: the engine may still be unwinding/journaling.
+      // Its terminal callback will call kill again after run_done.
+      if (!b.terminal) return
+      if (bindings.get(runId) === b) {
+        bindings.delete(runId)
+        b.releaseDirectory()
+      }
     },
     registerAgentAbort(runId, agentId, ac) {
       const b = bindings.get(runId)

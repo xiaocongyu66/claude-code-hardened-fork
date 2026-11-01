@@ -17,6 +17,90 @@ function newStore() {
   return { bus, store: createProgressStoreFromBus(bus) }
 }
 
+test('resuming replaces the previous generation and clears stale result/error', () => {
+  const { bus, store } = newStore()
+  bus.emit({
+    type: 'run_done',
+    runId: 'r1',
+    status: 'failed',
+    error: 'old',
+    returnValue: 'old',
+  })
+  const old = store.get('r1')!
+  bus.emit({
+    type: 'run_started',
+    runId: 'r1',
+    workflowName: 'new',
+    meta: null,
+  })
+  expect(store.get('r1')).not.toBe(old)
+  expect(store.get('r1')?.error).toBeUndefined()
+  expect(store.get('r1')?.returnValue).toBeUndefined()
+  expect(old.status).toBe('failed')
+})
+
+test('late persistence acknowledgement cannot evict a newer generation', () => {
+  const { bus, store } = newStore()
+  bus.emit({
+    type: 'run_done',
+    runId: 'r1',
+    status: 'completed',
+    returnValue: 'old',
+  })
+  const old = store.get('r1')!
+  bus.emit({
+    type: 'run_started',
+    runId: 'r1',
+    workflowName: 'new',
+    meta: null,
+  })
+  bus.emit({
+    type: 'run_done',
+    runId: 'r1',
+    status: 'completed',
+    returnValue: 'new',
+  })
+  store.markPersisted(old)
+  expect(() => store.assertLaunchCapacity('r1')).toThrow('unpersisted')
+  expect(store.get('r1')?.returnValue).toBe('new')
+})
+
+test('terminal retention evicts only acknowledged snapshots by count and bytes', () => {
+  const bus = createProgressBus()
+  const store = createProgressStoreFromBus(bus, {
+    maxTerminalRuns: 2,
+    maxTerminalBytes: 1500,
+  })
+  bus.emit({
+    type: 'run_done',
+    runId: 'unsaved',
+    status: 'completed',
+    returnValue: 'keep',
+  })
+  for (let i = 0; i < 100; i++) {
+    const runId = `saved-${i}`
+    bus.emit({
+      type: 'run_done',
+      runId,
+      status: 'completed',
+      returnValue: 'x'.repeat(800),
+    })
+    store.markPersisted(store.get(runId)!)
+    expect(store.list().length).toBeLessThanOrEqual(2)
+  }
+  expect(store.get('unsaved')?.returnValue).toBe('keep')
+  bus.emit({
+    type: 'run_done',
+    runId: 'large-unsaved',
+    status: 'completed',
+    returnValue: 'x'.repeat(2000),
+  })
+  expect(() => store.assertLaunchCapacity()).toThrow('persist')
+  expect(store.get('large-unsaved')?.returnValue).toBe('x'.repeat(2000))
+  store.markPersisted(store.get('large-unsaved')!)
+  expect(() => store.assertLaunchCapacity()).not.toThrow()
+})
+
 test('run_started creates entry; phase_started/done updates phases', () => {
   const { bus, store } = newStore()
   bus.emit({ type: 'run_started', runId: 'r1', workflowName: 'w', meta: null })

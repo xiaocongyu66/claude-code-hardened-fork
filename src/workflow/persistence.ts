@@ -6,7 +6,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { getProjectRoot } from '../bootstrap/state.js'
 import { logForDebugging } from '../utils/debug.js'
 import type { ProgressBus } from './progress/bus.js'
@@ -38,10 +38,46 @@ type StateFile = {
   run: RunProgress
 }
 
+// Process-local ownership includes pre-start/resume IO and terminal writes. GC claims a
+// directory before issuing rm, so registration cannot race an already-dispatched removal.
+const activeDirectories = new Set<string>()
+const deletingDirectories = new Set<string>()
+const pendingWrites = new Map<string, Promise<void>>()
+// Invalidate stale scans even after a claim/write has finished. A single revision
+// avoids retaining an unbounded generation index for historical run IDs.
+let directoryRevision = 0
+
+export function isRunDirectoryActive(runsDir: string, runId: string): boolean {
+  return activeDirectories.has(resolve(runsDir, runId))
+}
+
+export function claimRunDirectory(runsDir: string, runId: string): () => void {
+  const key = resolve(runsDir, runId)
+  if (
+    activeDirectories.has(key) ||
+    pendingWrites.has(key) ||
+    deletingDirectories.has(key)
+  ) {
+    throw new Error(
+      `Workflow ${runId} is active, persisting, or being cleaned up`,
+    )
+  }
+  directoryRevision++
+  activeDirectories.add(key)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    directoryRevision++
+    activeDirectories.delete(key)
+  }
+}
+
 /**
  * Atomically overwrite the terminal RunProgress to <runsDir>/<runId>/state.json.
  * Atomicity: writeFile(tmp) → rename(tmp, target), rename is atomic; worst case leaves tmp, next write overwrites it.
- * Failure is best-effort: IO exceptions only log a warn, do not throw (workflow already succeeded; persistence failure only means it cannot be retrieved after restart).
+ * Rejects on failure: callers must not treat a failed write as permission to evict.
+ * Serialize before any IO, then queue per directory to avoid overlapping tmp writes.
  */
 export async function writeRunState(
   runsDir: string,
@@ -51,14 +87,25 @@ export async function writeRunState(
   const target = join(dir, STATE_FILE)
   const tmp = join(dir, STATE_TMP)
   const payload: StateFile = { schemaVersion: SCHEMA_VERSION, run }
+  const serialized = JSON.stringify(payload)
+  const key = resolve(dir)
+  if (deletingDirectories.has(key))
+    throw new Error(`Workflow ${run.runId} is being cleaned up`)
+  const previous = pendingWrites.get(key) ?? Promise.resolve()
+  const pending = previous
+    .catch(() => {})
+    .then(async () => {
+      await mkdir(dir, { recursive: true })
+      await writeFile(tmp, serialized, 'utf-8')
+      await rename(tmp, target)
+    })
+  directoryRevision++
+  pendingWrites.set(key, pending)
   try {
-    await mkdir(dir, { recursive: true })
-    await writeFile(tmp, JSON.stringify(payload), 'utf-8')
-    await rename(tmp, target)
-  } catch (e) {
-    logForDebugging(
-      `[workflow warn] writeRunState failed for ${run.runId}: ${(e as Error).message}`,
-    )
+    await pending
+  } finally {
+    directoryRevision++
+    if (pendingWrites.get(key) === pending) pendingWrites.delete(key)
   }
 }
 
@@ -124,9 +171,9 @@ export async function listPersistedRuns(
 
 /**
  * Garbage-collect stale run directories: sort subdirs of runsDir by their state.json.updatedAt
- * (newest first), then recursively remove everything past keepMax. Subdirs without state.json are
- * treated as oldest (they're orphans — half-written, killed-mid-write, or pre-schema leftovers) so
- * they get pruned first.
+ * (newest first), then remove terminal history past keepMax. Unknown/running directories
+ * are not evidence of abandoned runs and must not be pruned. Process-owned directories
+ * are protected even when their state.json still describes an earlier terminal generation.
  *
  * Best-effort: per-dir failures only log, do not abort the sweep. Safe to call repeatedly
  * (idempotent — once under the cap, it's a no-op).
@@ -137,6 +184,7 @@ export async function cleanupOldRuns(
   runsDir: string,
   keepMax: number = KEEP_MAX_RUNS,
 ): Promise<number> {
+  const scanRevision = directoryRevision
   let entries: string[]
   try {
     entries = await readdir(runsDir)
@@ -147,10 +195,11 @@ export async function cleanupOldRuns(
   const candidates: Candidate[] = []
   for (const name of entries) {
     const run = await readRunState(runsDir, name)
-    // updatedAt=0 → orphan dir without parseable state.json; sorts first → pruned first.
-    candidates.push({ name, updatedAt: run?.updatedAt ?? 0 })
+    if (!run || !['completed', 'failed', 'killed'].includes(run.status))
+      continue
+    candidates.push({ name, updatedAt: run.updatedAt })
   }
-  // Newest first; orphans (updatedAt=0) sink to the tail and get pruned first.
+  // Newest terminal history first.
   candidates.sort((a, b) => b.updatedAt - a.updatedAt)
   // Guard against negative keepMax: slice(-N) would invert semantics and keep N newest instead of
   // pruning them, which contradicts the contract. Clamp to 0 so a bad caller at worst wipes everything.
@@ -158,6 +207,17 @@ export async function cleanupOldRuns(
   const victims = candidates.slice(cap)
   let removed = 0
   for (const v of victims) {
+    // Claims/writes during any await invalidate the ordering and generation.
+    // Defer collection to a fresh sweep rather than deleting from stale evidence.
+    if (directoryRevision !== scanRevision) break
+    const key = resolve(runsDir, v.name)
+    if (
+      activeDirectories.has(key) ||
+      pendingWrites.has(key) ||
+      deletingDirectories.has(key)
+    )
+      continue
+    deletingDirectories.add(key)
     try {
       await rm(join(runsDir, v.name), { recursive: true, force: true })
       removed++
@@ -165,6 +225,8 @@ export async function cleanupOldRuns(
       logForDebugging(
         `[workflow warn] cleanupOldRuns failed to remove ${v.name}: ${(e as Error).message}`,
       )
+    } finally {
+      deletingDirectories.delete(key)
     }
   }
   return removed
@@ -176,8 +238,8 @@ export async function cleanupOldRuns(
  * The store registers to the bus before this subscription, so when the listener runs store.get(runId) is already terminal.
  * Returns an unsubscribe function (for test cleanup).
  *
- * Disk write is best-effort: writeRunState swallows IO exceptions and only logs, does not propagate —
- * so other bus subscribers (store, etc.) are not affected by persistence failures.
+ * The listener handles rejection without interrupting other subscribers. Only a successful
+ * write acknowledges the exact store generation as safe to evict.
  *
  * Also fires-and-forgets cleanupOldRuns so the runs directory stays bounded across long-lived
  * sessions (KEEP_MAX_RUNS). The cleanup runs *after* the new state is written, guaranteeing the
@@ -197,14 +259,15 @@ export function attachRunStatePersistence(
     const run = store.get(event.runId)
     if (!run) return
     const dir = runsDirProvider()
-    void writeRunState(dir, run).then(() => {
-      // Sweep only after the new state lands on disk — avoids a race where the just-finished run
-      // itself gets pruned because its state.json wasn't counted yet.
-      void cleanupOldRuns(dir).catch(e => {
+    void writeRunState(dir, run)
+      .then(() => {
+        store.markPersisted(run)
+        return cleanupOldRuns(dir)
+      })
+      .catch(e => {
         logForDebugging(
-          `[workflow warn] cleanupOldRuns after run_done threw: ${(e as Error).message}`,
+          `[workflow warn] terminal persistence for ${run.runId} failed: ${(e as Error).message}`,
         )
       })
-    })
   })
 }

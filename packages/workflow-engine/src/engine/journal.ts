@@ -44,7 +44,7 @@ export function createFileJournalStore(runsDir: string): JournalStore {
       await appendFile(pathOf(runId), JSON.stringify(entry) + '\n', 'utf-8')
     },
     async truncate(runId) {
-      await rm(join(runsDir, runId), { recursive: true, force: true })
+      await rm(pathOf(runId), { force: true })
     },
   }
 }

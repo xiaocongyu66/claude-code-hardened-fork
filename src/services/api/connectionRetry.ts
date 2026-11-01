@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { sleep as cancellableSleep } from 'src/utils/sleep.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { errorMessage } from 'src/utils/errors.js'
 import type { SystemAPIErrorMessage } from 'src/types/message.js'
@@ -335,15 +336,8 @@ const RETRY_AFTER_TOO_LONG_MS = 60_000
 
 // unref'd: a long retry-after cap (30s) must not pin the event loop alive
 // after every other handle is gone (e.g. abort threw past the sleep).
-const defaultSleep = (ms: number): Promise<void> => {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const promise = new Promise<void>(resolve => {
-    timer = setTimeout(resolve, ms)
-  })
-  const unref = (timer as unknown as { unref?: () => void } | undefined)?.unref
-  if (unref) unref.call(timer)
-  return promise
-}
+const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  cancellableSleep(ms, signal, { unref: true })
 
 export interface ConnectionRetryStatus {
   /** The attempt number that just failed (1-based). */
@@ -579,6 +573,10 @@ export async function withConnectionRetry<T>(
   // sleep-win path too (the session signal outlives this loop). Returns
   // false when the abort won the race (caller rethrows).
   const sleepBeforeRetry = async (ms: number): Promise<boolean> => {
+    if (!options.sleep) {
+      await defaultSleep(ms, options.signal)
+      return !options.signal?.aborted
+    }
     if (!options.signal) {
       await sleep(ms)
       return true
@@ -594,12 +592,15 @@ export async function withConnectionRetry<T>(
       removeAbortListener = () =>
         options.signal!.removeEventListener('abort', onAbort)
     })
-    const winner = await Promise.race([
-      sleep(ms).then(() => 'sleep'),
-      abortPromise,
-    ])
-    removeAbortListener()
-    return winner === 'sleep'
+    try {
+      const winner = await Promise.race([
+        sleep(ms).then(() => 'sleep'),
+        abortPromise,
+      ])
+      return winner === 'sleep'
+    } finally {
+      removeAbortListener()
+    }
   }
   let attempt = 0
   let authRefreshRetrySpent = false

@@ -46,6 +46,10 @@ export function installWorkflowNotifications(
 
   const unsubscribe = service.subscribe(() => {
     const runs = service.listRuns()
+    const retained = new Set(runs.map(run => run.runId))
+    for (const id of prevStatus.keys()) {
+      if (!retained.has(id)) prevStatus.delete(id)
+    }
     for (const run of runs) {
       const prev = prevStatus.get(run.runId)
       // First time seeing this run: just record the current status without notifying
