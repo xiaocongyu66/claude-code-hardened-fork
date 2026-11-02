@@ -126,6 +126,147 @@ jobs:
         if: always()
         run: git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
 
+  cross-platform-binding:
+    name: Native loading (${{ matrix.platform }} ${{ matrix.arch }}, Node and Bun)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: darwin
+            arch: arm64
+            rust-host: aarch64-apple-darwin
+          - os: windows-2022
+            platform: win32
+            arch: x64
+            rust-host: x86_64-pc-windows-msvc
+    env:
+      EXPECTED_PLATFORM: ${{ matrix.platform }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      EXPECTED_RUST_HOST: ${{ matrix.rust-host }}
+    # 仅验收本机原生加载；不涵盖两平台的 Bun compile 或 PTY。
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Require committed locks and clean baseline (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          git ls-files --error-unmatch bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+          git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+      - name: Require committed locks and clean baseline (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          git ls-files --error-unmatch bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.99.1'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.3'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Assert native runtime architecture and Rust host (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          node -e 'const a = require("node:assert/strict"); a.equal(process.platform, process.env.EXPECTED_PLATFORM); a.equal(process.arch, process.env.EXPECTED_ARCH); console.log(process.version, process.platform, process.arch)'
+          bun -e 'const a = require("node:assert/strict"); a.equal(process.platform, process.env.EXPECTED_PLATFORM); a.equal(process.arch, process.env.EXPECTED_ARCH); console.log(Bun.version, process.platform, process.arch)'
+          rust_info="$(rustc -vV)"
+          printf '%s\n' "$rust_info"
+          [[ "$rust_info" == *$'\nhost: '"$EXPECTED_RUST_HOST"$'\n'* ]]
+      - name: Assert native runtime architecture and Rust host (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          node -e 'const a = require("node:assert/strict"); a.equal(process.platform, process.env.EXPECTED_PLATFORM); a.equal(process.arch, process.env.EXPECTED_ARCH); console.log(process.version, process.platform, process.arch)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun -e 'const a = require("node:assert/strict"); a.equal(process.platform, process.env.EXPECTED_PLATFORM); a.equal(process.arch, process.env.EXPECTED_ARCH); console.log(Bun.version, process.platform, process.arch)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rustInfo = rustc -vV
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rustInfo
+          $hostLines = @($rustInfo | Where-Object { $_ -clike 'host:*' })
+          if ($hostLines.Count -ne 1 -or $hostLines[0] -cne "host: $env:EXPECTED_RUST_HOST") { throw 'Unexpected Rust host' }
+      - name: Install locked dependencies without lifecycle scripts (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install locked dependencies without lifecycle scripts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: NAPI tests and native release build (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          cargo test --manifest-path packages/ink-rust/native/napi/Cargo.toml --locked
+          cargo build --manifest-path packages/ink-rust/native/napi/Cargo.toml --release --locked
+          cp packages/ink-rust/native/napi/target/release/libink_rust_napi.dylib "$RUNNER_TEMP/ink-rust-napi.node"
+      - name: NAPI tests and native release build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          cargo test --manifest-path packages/ink-rust/native/napi/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --manifest-path packages/ink-rust/native/napi/Cargo.toml --release --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $library = (Resolve-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packages/ink-rust/native/napi/target/release/ink_rust_napi.dll')).Path
+          Copy-Item -LiteralPath $library -Destination (Join-Path $env:RUNNER_TEMP 'ink-rust-napi.node') -ErrorAction Stop
+      - name: Node ESM and Bun TS native smoke (macOS, no fallback)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          bun build packages/ink-rust/tests/native-smoke.ts --target=node --format=esm --outfile=packages/ink-rust/tests/native-smoke.node.mjs
+          node "$GITHUB_WORKSPACE/packages/ink-rust/tests/native-smoke.node.mjs" "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+          bun "$GITHUB_WORKSPACE/packages/ink-rust/tests/native-smoke.ts" "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+      - name: Node ESM and Bun TS native smoke (Windows, no fallback)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $source = (Resolve-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packages/ink-rust/tests/native-smoke.ts')).Path
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'packages/ink-rust/tests/native-smoke.node.mjs'
+          $artifact = (Resolve-Path -LiteralPath (Join-Path $env:RUNNER_TEMP 'ink-rust-napi.node')).Path
+          $fixture = (Resolve-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packages/ink-rust/fixtures/session-v1.json')).Path
+          bun build "$source" --target=node --format=esm "--outfile=$bundle"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node "$bundle" "$artifact" "$fixture"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun "$source" "$artifact" "$fixture"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify locks unchanged (macOS)
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 2
+        run: git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+      - name: Verify locks unchanged (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   core:
     runs-on: ubuntu-latest
     timeout-minutes: 15
