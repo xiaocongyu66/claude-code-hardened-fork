@@ -52,7 +52,11 @@ function replay(chunks: readonly (string | null)[]) {
   return { events, batches, states }
 }
 
-const normal = { mode: 'NORMAL', incomplete: '', pasteBuffer: '' }
+const normal: Omit<KeyParseState, '_tokenizer'> = {
+  mode: 'NORMAL',
+  incomplete: '',
+  pasteBuffer: '',
+}
 const start = '\x1b[200~'
 const end = '\x1b[201~'
 const pasteContent =

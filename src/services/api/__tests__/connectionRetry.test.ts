@@ -46,6 +46,14 @@ test('abort clears the default retry timer', async () => {
     expect(retryIndex).toBeGreaterThanOrEqual(0)
     const timer = set.mock.results[retryIndex]!.value
     expect(clear).toHaveBeenCalledWith(timer)
+    if (
+      typeof timer !== 'object' ||
+      timer === null ||
+      !('hasRef' in timer) ||
+      typeof timer.hasRef !== 'function'
+    ) {
+      throw new Error('Retry timer must expose hasRef()')
+    }
     expect(timer.hasRef()).toBe(false)
   } finally {
     set.mockRestore()
