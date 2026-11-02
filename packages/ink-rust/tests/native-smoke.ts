@@ -286,8 +286,8 @@ assert.deepEqual(
     ]),
   ],
   [
-    73, 82, 85, 73, 1, 1, 120, 86, 52, 18, 1, 0, 2, 9, 0, 0, 0, 1, 7, 0, 0, 0, 2,
-    0, 0, 0, 195, 169,
+    73, 82, 85, 73, 1, 1, 120, 86, 52, 18, 1, 0, 2, 9, 0, 0, 0, 1, 7, 0, 0, 0,
+    2, 0, 0, 0, 195, 169,
   ],
 )
 const raw = new (loadNativePackets(artifact).Session)()
@@ -296,7 +296,12 @@ const rawInspect = () => {
   const rootSnapshot = raw.inspect(encodeInspect([rawRoot]))[0]!
   return raw.inspect(encodeInspect([rawRoot, ...rootSnapshot.children]))
 }
-function badPacket(packet: unknown, code: string, index?: number, inspect = false) {
+function badPacket(
+  packet: unknown,
+  code: string,
+  index?: number,
+  inspect = false,
+) {
   const stats = raw.stats()
   const tree = rawInspect()
   fails(
@@ -399,7 +404,8 @@ const inspectTrailing = new Uint8Array(inspectPacket.length + 1)
 inspectTrailing.set(inspectPacket)
 badPacket(inspectTrailing, 'Input', undefined, true)
 assert.equal(
-  raw.inspect(encodeInspect(Array.from({ length: 4096 }, () => rawRoot))).length,
+  raw.inspect(encodeInspect(Array.from({ length: 4096 }, () => rawRoot)))
+    .length,
   4096,
 )
 const padded = new Uint8Array(valid.length + 2)
@@ -470,7 +476,9 @@ const nullOp = Object.assign(Object.create(null), {
   node: Object.assign(Object.create(null), { id: root }),
 })
 nullOp.node.id = Object.assign(Object.create(null), text)
-Object.defineProperty(nullOp, 'text', { value: encodeText('own nonenumerable') })
+Object.defineProperty(nullOp, 'text', {
+  value: encodeText('own nonenumerable'),
+})
 submit([nullOp])
 assert.equal(s.inspect([text])[0]!.text, 'own nonenumerable')
 const backing = new Uint8Array([255, 65, 66, 255])
