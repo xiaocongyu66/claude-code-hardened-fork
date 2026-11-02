@@ -9,6 +9,7 @@ import useStdin from '../../hooks/use-stdin.js';
 import instances from '../instances.js';
 import reconciler from '../reconciler.js';
 import { createRoot } from '../root.js';
+import { getYogaCounters } from '../yoga-layout/index.js';
 
 class InputStream extends EventEmitter {
   isTTY = true;
@@ -112,6 +113,54 @@ describe('raw input ownership with the real React reconciler', () => {
       expectInput(input, false);
     } finally {
       root.unmount();
+    }
+  });
+
+  test('50 create/render/toggle/unmount cycles return input and live resources to baseline', async () => {
+    const { input, options } = terminal();
+    reconciler.flushPassiveEffects();
+    const baselineLive = getYogaCounters().live;
+    const baselineInstances = instances.size;
+    expectInput(input, false);
+    expect(instances.has(options.stdout)).toBe(false);
+
+    // Reuse the streams so a leaked reader cannot hide on an abandoned terminal.
+    for (let cycle = 0; cycle < 50; cycle++) {
+      const received: string[] = [];
+      const root = await createRoot(options);
+      const exited = root.waitUntilExit();
+      try {
+        expect(instances.has(options.stdout)).toBe(true);
+        expect(instances.size).toBe(baselineInstances + 1);
+        for (const active of [true, false, true]) {
+          root.render(<Owner id={`cycle${cycle}`} active={active} received={received} />);
+          expectInput(input, active);
+          reconciler.flushPassiveEffects();
+          expectInput(input, active);
+          expect(getYogaCounters().live).toBeGreaterThan(baselineLive);
+          received.length = 0;
+          if (active) input.send('x');
+          expect(received).toEqual(active ? [`cycle${cycle}:x`] : []);
+        }
+        root.unmount();
+        expectInput(input, false);
+        reconciler.flushPassiveEffects();
+        await exited;
+        expect(instances.has(options.stdout)).toBe(false);
+        expect(instances.size).toBe(baselineInstances);
+        expect(getYogaCounters().live).toBe(baselineLive);
+        const calls = [...input.calls];
+        root.unmount();
+        reconciler.flushPassiveEffects();
+        expect(input.calls).toEqual(calls);
+      } finally {
+        root.unmount();
+        reconciler.flushPassiveEffects();
+      }
+      expectInput(input, false);
+      expect(instances.has(options.stdout)).toBe(false);
+      expect(instances.size).toBe(baselineInstances);
+      expect(getYogaCounters().live).toBe(baselineLive);
     }
   });
 
