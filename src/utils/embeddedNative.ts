@@ -191,7 +191,13 @@ export function loadNativeModule<T>(
     } else if (platform === 'darwin') {
       triple = arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin'
     } else if (platform === 'win32') {
-      triple = 'x86_64-pc-windows-msvc'
+      if (arch === 'arm64') {
+        triple = 'aarch64-pc-windows-msvc'
+      } else if (arch === 'x64') {
+        triple = 'x86_64-pc-windows-msvc'
+      } else {
+        return null
+      }
     } else {
       return null
     }
