@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { BunPlugin } from 'bun'
-import { createEmbeddedNativesPlugin } from '../../../scripts/embeddedNativesPlugin.ts'
+import { createEmbeddedNativesPlugin } from '../../../scripts/embeddedNativesPlugin.js'
 
 const [payloadPath, outputDir, evidenceDir] = process.argv.slice(2)
 assert.ok(payloadPath && isAbsolute(payloadPath))
