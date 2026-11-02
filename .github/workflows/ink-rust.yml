@@ -1,4 +1,4 @@
-name: Ink Rust core
+name: Ink Rust core and binding
 
 on:
   push:
@@ -6,10 +6,14 @@ on:
     paths:
       - 'packages/ink-rust/**'
       - '.github/workflows/ink-rust.yml'
+      - 'bun.lock'
+      - 'package.json'
   pull_request:
     paths:
       - 'packages/ink-rust/**'
       - '.github/workflows/ink-rust.yml'
+      - 'bun.lock'
+      - 'package.json'
   workflow_dispatch:
     inputs:
       bootstrap_lock:
@@ -25,6 +29,7 @@ jobs:
     name: NAPI lock bootstrap (NOT acceptance)
     if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_lock
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -47,8 +52,58 @@ jobs:
           path: ${{ runner.temp }}/ink-rust-napi-lock/
           if-no-files-found: error
 
+  binding:
+    name: Linux NAPI binding (Node and Bun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Require committed locks and clean baseline
+        run: |
+          git ls-files --error-unmatch bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+          git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.99.1'
+          components: rustfmt, clippy
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.3'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Record toolchains
+        run: rustc --version && cargo --version && bun --version && node --version
+      - name: Install locked dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Strict package typecheck
+        run: bun node_modules/typescript/bin/tsc -p packages/ink-rust/tsconfig.json
+      - name: NAPI format (check only)
+        run: cargo fmt --manifest-path packages/ink-rust/native/napi/Cargo.toml --all -- --check
+      - name: NAPI clippy
+        run: cargo clippy --manifest-path packages/ink-rust/native/napi/Cargo.toml --locked --all-targets -- -D warnings
+      - name: NAPI tests
+        run: cargo test --manifest-path packages/ink-rust/native/napi/Cargo.toml --locked
+      - name: Build native binding
+        run: |
+          cargo build --manifest-path packages/ink-rust/native/napi/Cargo.toml --release --locked
+          cp packages/ink-rust/native/napi/target/release/libink_rust_napi.so "$RUNNER_TEMP/ink-rust-napi.node"
+      - name: Compile smoke for Node ESM
+        # Keep the tests directory as the module URL base; fixture and native paths
+        # are absolute argv values, never resolved relative to a relocated bundle.
+        run: bun build packages/ink-rust/tests/native-smoke.ts --target=node --format=esm --outfile=packages/ink-rust/tests/native-smoke.node.mjs
+      - name: Node native smoke (no fallback)
+        run: node packages/ink-rust/tests/native-smoke.node.mjs "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+      - name: Bun native smoke (no fallback)
+        run: bun packages/ink-rust/tests/native-smoke.ts "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+      - name: Verify locks unchanged
+        if: always()
+        run: git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
+
   core:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: packages/ink-rust/native
@@ -61,7 +116,7 @@ jobs:
           components: rustfmt, clippy
       - name: Binding acceptance status
         run: |
-          echo 'NAPI binding is NOT validated by this core job. Bootstrap preparation only; formal --locked binding CI must be added with the generated lock.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Core-only gate; NAPI acceptance is enforced independently by the Linux binding job.' >> "$GITHUB_STEP_SUMMARY"
       - name: Record toolchain
         run: rustc --version && cargo --version
       - name: Format

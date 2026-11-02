@@ -61,6 +61,24 @@ assert.equal(original.text, fixture.initialText)
 assert.equal(s.inspect([text])[0]!.text, fixture.updatedText)
 assert.deepEqual(names(s.inspect([root])[0]!.children), fixture.afterReparent)
 assert.deepEqual(names(s.inspect([box])[0]!.children), fixture.boxChildren)
+// Fail in native after create has allocated a slot, not during TS encoding.
+const rollback = new native.Session()
+const rollbackRoot = rollback.stats().root
+const rollbackStats = rollback.stats()
+const rollbackTree = rollback.inspect([rollbackRoot])
+fails(() => rollback.applyBatch(rollbackStats.revision, [
+  { op: 'create', temp: 0, parent: { id: rollbackRoot }, kind: 'box' },
+  { op: 'delete', node: { id: rollbackRoot } },
+]), 'Tree', 1)
+assert.deepEqual(rollback.stats(), rollbackStats)
+assert.deepEqual(rollback.inspect([rollbackRoot]), rollbackTree)
+const afterRollback = rollback.applyBatch(rollbackStats.revision, [
+  { op: 'create', temp: 0, parent: { id: rollbackRoot }, kind: 'box' },
+]).created[0]!.id
+assert.equal(afterRollback.slot, rollbackStats.slots)
+assert.equal(afterRollback.generation, rollbackRoot.generation)
+rollback.close()
+
 const before = s.stats()
 const snapshot = s.inspect([root, box, text])
 fails(() => submit([
@@ -256,6 +274,7 @@ if (typeof structuredClone === 'function') {
   const detached = new Uint8Array([65])
   structuredClone(detached.buffer, { transfer: [detached.buffer] })
   rejectShape({ op: 'updateText', node: { id: text }, text: detached })
+  console.log('covered: detached ArrayBuffer rejection')
 } else {
   console.log('not-covered: detached ArrayBuffer (structuredClone unavailable)')
 }
@@ -273,6 +292,7 @@ if ('resize' in ArrayBuffer.prototype) {
   buffer.resize(1)
   submit([{ op: 'updateText', node: { id: text }, text: view }])
   assert.equal(s.inspect([text])[0]!.text, '')
+  console.log('covered: resizable ArrayBuffer shrink and empty view')
 } else {
   console.log('not-covered: resizable ArrayBuffer (resize unavailable)')
 }
@@ -298,4 +318,8 @@ assert.equal(s.stats().closed, true)
 assert.equal(s.stats().liveNodes, 0)
 fails(() => s.applyBatch(s.stats().revision, []), 'Closed')
 fails(() => s.inspect([]), 'Closed')
-console.log('ink-rust native protocol 1 smoke passed', artifact)
+console.log('ink-rust native protocol 1 smoke passed', {
+  artifact,
+  fixturePath,
+  runtime: process.versions,
+})
