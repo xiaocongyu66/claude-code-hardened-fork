@@ -10,7 +10,7 @@ import {
   MAX_INSPECT_BYTES,
   type NodeId,
   type Op,
-} from '../src/index.ts'
+} from '../src/index.js'
 
 const artifact = process.argv[2]
 const fixturePath = process.argv[3]
