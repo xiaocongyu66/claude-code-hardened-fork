@@ -1,34 +1,30 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
-import {
-  __getEventQueueLengthForTesting,
-  __MAX_QUEUED_EVENTS_FOR_TESTING,
-  _resetForTesting,
-  logEvent,
-  logEventAsync,
-} from '../index.js'
+import { describe, expect, test } from 'bun:test'
+import { relative, resolve } from 'node:path'
 
+const PROJECT_ROOT = resolve(__dirname, '..', '..', '..', '..')
+const RUNNER_ABS = resolve(__dirname, 'queue-cap.runner.ts')
+const RUNNER_REL = './' + relative(PROJECT_ROOT, RUNNER_ABS).replace(/\\/g, '/')
+
+// Other suites mock analytics process-wide, including logEvent and reset but
+// retaining the real queue getter. Only a fresh process tests the real module.
 describe('analytics event queue cap', () => {
-  beforeEach(() => {
-    _resetForTesting()
-  })
-
-  test('drops the oldest events once the cap is exceeded', () => {
-    const overflow = 25
-    for (let i = 0; i < __MAX_QUEUED_EVENTS_FOR_TESTING + overflow; i += 1) {
-      logEvent('test_event', { i })
+  test('runs real queue regressions in an isolated process', async () => {
+    const proc = Bun.spawn([process.execPath, 'test', RUNNER_REL], {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, USER_TYPE: '' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    if (code !== 0) {
+      throw new Error(
+        `analytics queue tests failed (exit ${code}):\n${stderr}\n${stdout}`,
+      )
     }
-    expect(__getEventQueueLengthForTesting()).toBe(
-      __MAX_QUEUED_EVENTS_FOR_TESTING,
-    )
-  })
-
-  test('async events share the same bounded queue', async () => {
-    const overflow = 10
-    for (let i = 0; i < __MAX_QUEUED_EVENTS_FOR_TESTING + overflow; i += 1) {
-      await logEventAsync('test_event_async', { i })
-    }
-    expect(__getEventQueueLengthForTesting()).toBe(
-      __MAX_QUEUED_EVENTS_FOR_TESTING,
-    )
-  })
+    expect(code).toBe(0)
+  }, 60_000)
 })

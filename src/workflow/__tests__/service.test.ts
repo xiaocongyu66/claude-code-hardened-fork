@@ -1,9 +1,10 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 // DI pattern: do not use mock.module (process-global, last-write-wins, would pollute other tests in the same process such as
 // autonomy.test.ts). Instead hand-construct FAKE WorkflowPorts: registry.run returns a fixed ok
 // result, taskRegistrar maintains abort bindings, journalStore is an in-memory empty impl. The real runWorkflow
 // thus runs to completion without needing LLM or mocks.
 
+import * as fsPromises from 'node:fs/promises'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -238,16 +239,51 @@ test('concurrent resumes reject before asynchronous source resolution finishes',
     scriptPath: '/nonexistent/workflow-concurrent-resume.mjs',
     resumeFromRunId: 'same',
   }
-  const first = svc.launch(input, stubTUC, stubCanUseTool)
-  const firstRejected = expect(first).rejects.toThrow()
-  await expect(svc.launch(input, stubTUC, stubCanUseTool)).rejects.toThrow(
-    'still active',
+  let releaseRead!: () => void
+  const readGate = new Promise<void>(resolve => {
+    releaseRead = resolve
+  })
+  const readError = Object.assign(new Error('controlled source read failure'), {
+    code: 'ENOENT',
+  })
+  const originalReadFile = fsPromises.readFile
+  let sourceReads = 0
+  const readSpy = spyOn(fsPromises, 'readFile').mockImplementation(
+    ((...args: Parameters<typeof fsPromises.readFile>) => {
+      if (args[0] !== input.scriptPath) return originalReadFile(...args)
+      sourceReads++
+      return readGate.then(() => {
+        throw readError
+      })
+    }) as typeof fsPromises.readFile,
   )
-  await firstRejected
-  // Failure releases the reservation; subsequent attempts fail on IO, not a leaked lock.
-  await expect(svc.launch(input, stubTUC, stubCanUseTool)).rejects.toThrow(
-    'ENOENT',
-  )
+  const launches: Promise<unknown>[] = []
+  try {
+    // Bun's .rejects matcher waits for the promise even without `await`.
+    // Attach ordinary rejection handlers instead, keeping source IO gated
+    // until both real launch calls have entered the service.
+    const first = svc.launch(input, stubTUC, stubCanUseTool).catch(e => e)
+    launches.push(first)
+    expect(sourceReads).toBe(1)
+    const second = svc.launch(input, stubTUC, stubCanUseTool).catch(e => e)
+    launches.push(second)
+    expect(sourceReads).toBe(1)
+    releaseRead()
+
+    expect(await second).toEqual(new Error('Workflow same is still active'))
+    expect(await first).toBe(readError)
+    // Failure releases the reservation: a retry reaches source IO again.
+    const retry = svc.launch(input, stubTUC, stubCanUseTool).catch(e => e)
+    launches.push(retry)
+    expect(await retry).toBe(readError)
+    expect(sourceReads).toBe(2)
+  } finally {
+    // Drain failed launches even if an assertion fails, then restore the
+    // exact previous export (which may belong to another suite's mock).
+    releaseRead()
+    await Promise.allSettled(launches)
+    readSpy.mockRestore()
+  }
 })
 
 test('launch → completed; store shows this run', async () => {
