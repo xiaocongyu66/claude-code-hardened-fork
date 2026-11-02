@@ -97,6 +97,31 @@ jobs:
         run: node packages/ink-rust/tests/native-smoke.node.mjs "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
       - name: Bun native smoke (no fallback)
         run: bun packages/ink-rust/tests/native-smoke.ts "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+      - name: Build Bun-target ESM smoke bundle
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/ink-rust-bun-bundle"
+          bun build packages/ink-rust/tests/native-smoke.ts --target=bun --format=esm --outfile="$RUNNER_TEMP/ink-rust-bun-bundle/native-smoke.mjs"
+      - name: Bun bundle native smoke (external artifact, no fallback)
+        timeout-minutes: 3
+        # 独立 cwd 排除仓库相对路径依赖；复用外置 .node 与绝对 fixture 路径。
+        run: |
+          smoke_cwd="$(mktemp -d "$RUNNER_TEMP/ink-rust-bundle-cwd.XXXXXX")"
+          cd "$smoke_cwd"
+          bun "$RUNNER_TEMP/ink-rust-bun-bundle/native-smoke.mjs" "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+      - name: Compile Bun native smoke executable
+        timeout-minutes: 5
+        # 使用本机 Linux 目标；此处不内嵌 .node，不代表独立单文件发布验收。
+        run: |
+          mkdir -p "$RUNNER_TEMP/ink-rust-bun-compile"
+          bun build packages/ink-rust/tests/native-smoke.ts --compile --format=esm --outfile="$RUNNER_TEMP/ink-rust-bun-compile/native-smoke"
+      - name: Bun compiled native smoke (external artifact, no fallback)
+        timeout-minutes: 3
+        # 同一 smoke 验证 argv[2]/argv[3]、虚拟模块路径加载及 missing artifact 断言。
+        run: |
+          smoke_cwd="$(mktemp -d "$RUNNER_TEMP/ink-rust-compile-cwd.XXXXXX")"
+          cd "$smoke_cwd"
+          "$RUNNER_TEMP/ink-rust-bun-compile/native-smoke" "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
       - name: Verify locks unchanged
         if: always()
         run: git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock
