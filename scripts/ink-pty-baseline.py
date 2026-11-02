@@ -143,6 +143,8 @@ def run(bun):
     master, slave = pty.openpty()
     child = None
     session = None
+    before = None
+    active = None
     try:
         window_size(slave, 80, 24)
         before = termios.tcgetattr(slave)
@@ -202,8 +204,32 @@ def run(bun):
             require(set(session.queries) == set(REPLIES), "expected XTVERSION and DA1 queries")
             print(f"PASS: {sys.platform} real PTY raw/paste/arrow/resize/normal-exit baseline")
     except Exception:
-        if session is not None:
-            print(f"PTY output suffix: {bytes(session.output[-4096:])!r}", file=sys.stderr)
+        # 必须在 terminate/kill 前采样；诊断失败不能替换原始断言异常。
+        try:
+            sampled_at = time.monotonic()
+            status_before = child.poll() if child is not None else None
+            current = termios.tcgetattr(slave)
+            status_after = child.poll() if child is not None else None
+            print(
+                f"PTY failure sample: phase=except-before-forced-cleanup "
+                f"monotonic={sampled_at} child_started={child is not None} "
+                f"child_status_before={status_before!r} child_status_after={status_after!r} "
+                f"restored={current == before}",
+                file=sys.stderr,
+            )
+            for label, attrs in (("before", before), ("active", active), ("current", current)):
+                flags = None if attrs is None else {
+                    name: bool(attrs[3] & getattr(termios, name))
+                    for name in ("ICANON", "ECHO", "ISIG")
+                }
+                print(f"PTY {label}: termios={attrs!r} flags={flags!r}", file=sys.stderr)
+            if session is not None:
+                print(f"PTY output suffix: {bytes(session.output[-4096:])!r}", file=sys.stderr)
+        except Exception as diagnostic_error:
+            try:
+                print(f"PTY diagnostics failed: {diagnostic_error!r}", file=sys.stderr)
+            except Exception:
+                pass
         raise
     finally:
         # Only our direct child is ever signalled; the fixture spawns no workers.

@@ -149,6 +149,7 @@ export default class Ink {
   private scheduleRender: (() => void) & { cancel?: () => void };
   // Ignore last render after unmounting a tree to prevent empty output before exit
   private isUnmounted = false;
+  private readonly appRef = React.createRef<App>();
   private isPaused = false;
   private readonly container: FiberRoot;
   private rootNode: dom.DOMElement;
@@ -1046,6 +1047,9 @@ export default class Ink {
    */
   detachForShutdown(): void {
     this.isUnmounted = true;
+    // 终止外部编辑器的恢复资格，同时释放保存的旧输入回调。
+    this.stdinListeners = [];
+    this.wasRawMode = false;
     // Cancel any pending throttled render so it doesn't fire between
     // cleanupTerminalModes() and process.exit() and write to main screen.
     this.scheduleRender.cancel?.();
@@ -1492,6 +1496,7 @@ export default class Ink {
   private wasRawMode = false;
 
   suspendStdin(): void {
+    if (this.isUnmounted) return;
     const stdin = this.options.stdin;
     if (!stdin.isTTY) {
       return;
@@ -1523,6 +1528,7 @@ export default class Ink {
   }
 
   resumeStdin(): void {
+    if (this.isUnmounted) return;
     const stdin = this.options.stdin;
     if (!stdin.isTTY) {
       return;
@@ -1574,6 +1580,7 @@ export default class Ink {
 
     const tree = (
       <App
+        ref={this.appRef}
         stdin={this.options.stdin}
         stdout={this.options.stdout}
         stderr={this.options.stderr}
@@ -1606,6 +1613,8 @@ export default class Ink {
       return;
     }
 
+    // signal-exit 不会等待 React 提交；必须先同步释放实际传入的 stdin。
+    this.appRef.current?.shutdownInput();
     this.onRender();
     this.unsubscribeExit();
 
@@ -1658,6 +1667,9 @@ export default class Ink {
     /* eslint-enable custom-rules/no-sync-fs */
 
     this.isUnmounted = true;
+    // 最终关闭后不再持有暂停时保存的 reader，也不能恢复 raw mode。
+    this.stdinListeners = [];
+    this.wasRawMode = false;
 
     // Cancel any pending throttled renders to prevent accessing freed Yoga nodes
     this.scheduleRender.cancel?.();

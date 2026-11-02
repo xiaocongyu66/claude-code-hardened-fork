@@ -157,6 +157,7 @@ export default class App extends PureComponent<Props, State> {
   // Count how many components enabled raw mode to avoid disabling
   // raw mode until all components don't need it anymore
   rawModeEnabledCount = 0;
+  private inputShutdown = false;
 
   internal_eventEmitter = new EventEmitter();
   keyParseState = INITIAL_STATE;
@@ -248,7 +249,15 @@ export default class App extends PureComponent<Props, State> {
       this.props.stdout.write(SHOW_CURSOR);
     }
 
-    // Clear any pending timers
+    this.shutdownInput();
+  }
+
+  // 进程退出不保证 React cleanup 执行；关闭后迟到的 hook 不能再次获取输入资源。
+  shutdownInput = (): void => {
+    if (this.inputShutdown) return;
+    this.inputShutdown = true;
+    this.rawModeEnabledCount = 0;
+
     if (this.incompleteEscapeTimer) {
       clearTimeout(this.incompleteEscapeTimer);
       this.incompleteEscapeTimer = null;
@@ -257,26 +266,33 @@ export default class App extends PureComponent<Props, State> {
       clearTimeout(this.pendingHyperlinkTimer);
       this.pendingHyperlinkTimer = null;
     }
-    // ignore calling setRawMode on an handle stdin it cannot be called
-    if (this.isRawModeSupported()) {
-      this.handleSetRawMode(false);
-    } else {
-      // Even when raw mode was never enabled (e.g. non-TTY stdin on
-      // Windows Node.js), ensure stdin is unref'd so the process can
-      // exit. earlyInput may have called ref() before Ink mounted.
+    this.disableRawMode();
+  };
+
+  private disableRawMode = (): void => {
+    const { stdin, stdout } = this.props;
+    try {
+      if (this.isRawModeSupported()) {
+        stdin.setRawMode(false);
+        stdout.write(DISABLE_MODIFY_OTHER_KEYS + DISABLE_KITTY_KEYBOARD + DFE + DBP);
+      }
+    } finally {
+      stdin.removeListener('readable', this.handleReadable);
+      // 非 TTY 也可能被早期输入捕获 ref；已销毁的 stream 则可能无法 unref。
       try {
-        this.props.stdin.unref();
+        stdin.unref();
       } catch {
-        // stdin may already be destroyed
+        // 保留上面的原始异常。
       }
     }
-  }
+  };
 
   override componentDidCatch(error: Error) {
     this.handleExit(error);
   }
 
   handleSetRawMode = (isEnabled: boolean): void => {
+    if (this.inputShutdown) return;
     const { stdin } = this.props;
 
     if (!this.isRawModeSupported()) {
@@ -338,6 +354,7 @@ export default class App extends PureComponent<Props, State> {
         // init sequence completes — avoids interleaving with alt-screen/mouse
         // tracking enable writes that may happen in the same render cycle.
         setImmediate(() => {
+          if (this.inputShutdown || this.rawModeEnabledCount === 0) return;
           void Promise.all([this.querier.send(xtversion()), this.querier.flush()]).then(([r]) => {
             if (r) {
               setXtversionName(r.name);
@@ -353,28 +370,10 @@ export default class App extends PureComponent<Props, State> {
       return;
     }
 
-    // Disable raw mode only when no components left that are using it
+    // passive listener 包含 inactive 和尚未清理的 hook，不能用于推断 layout ownership。
+    if (this.rawModeEnabledCount === 0) return;
     if (--this.rawModeEnabledCount === 0) {
-      // Guard: React 19 runs new useLayoutEffect setup before old cleanup when
-      // replacing the tree (e.g., showSetupDialog → launchResumeChooser).
-      // If the old tree had more useInput hooks than the new tree, the old
-      // cleanup over-decrements the count to 0 even though the new tree has
-      // active listeners. Detect this and fix the count instead of disabling.
-      const activeListeners = this.internal_eventEmitter.listenerCount('input');
-      if (activeListeners > 0) {
-        this.rawModeEnabledCount = activeListeners;
-        return;
-      }
-
-      this.props.stdout.write(DISABLE_MODIFY_OTHER_KEYS);
-      this.props.stdout.write(DISABLE_KITTY_KEYBOARD);
-      // Disable terminal focus reporting (DECSET 1004)
-      this.props.stdout.write(DFE);
-      // Disable bracketed paste mode
-      this.props.stdout.write(DBP);
-      stdin.setRawMode(false);
-      stdin.removeListener('readable', this.handleReadable);
-      stdin.unref();
+      this.disableRawMode();
     }
   };
 
@@ -384,7 +383,7 @@ export default class App extends PureComponent<Props, State> {
     this.incompleteEscapeTimer = null;
 
     // Only proceed if we have incomplete sequences
-    if (!this.keyParseState.incomplete) return;
+    if (this.inputShutdown || !this.keyParseState.incomplete) return;
 
     // Fullscreen: if stdin has data waiting, it's almost certainly the
     // continuation of the buffered sequence (e.g. `[<64;74;16M` after a
@@ -406,6 +405,7 @@ export default class App extends PureComponent<Props, State> {
 
   // Process input through the parser and handle the results
   processInput = (input: string | Buffer | null): void => {
+    if (this.inputShutdown) return;
     // Parse input using our state machine
     const [keys, newState] = parseMultipleKeypresses(this.keyParseState, input);
     this.keyParseState = newState;
@@ -418,6 +418,9 @@ export default class App extends PureComponent<Props, State> {
     if (keys.length > 0) {
       reconciler.discreteUpdates(processKeysInBatch, this, keys, undefined, undefined);
     }
+
+    // 输入回调可能同步关闭 App；不能在 shutdown 清理后重新创建计时器。
+    if (this.inputShutdown) return;
 
     // If we have incomplete escape sequences, set a timer to flush them
     if (this.keyParseState.incomplete) {
@@ -480,10 +483,7 @@ export default class App extends PureComponent<Props, State> {
   };
 
   handleExit = (error?: Error): void => {
-    if (this.isRawModeSupported()) {
-      this.handleSetRawMode(false);
-    }
-
+    this.shutdownInput();
     this.props.onExit(error);
   };
 
@@ -494,7 +494,7 @@ export default class App extends PureComponent<Props, State> {
   };
 
   handleSuspend = (): void => {
-    if (!this.isRawModeSupported()) {
+    if (this.inputShutdown || !this.isRawModeSupported()) {
       return;
     }
 
@@ -520,6 +520,8 @@ export default class App extends PureComponent<Props, State> {
 
     // Set up resume handler
     const resumeHandler = () => {
+      process.removeListener('SIGCONT', resumeHandler);
+      if (this.inputShutdown) return;
       // Restore raw mode to exact previous state
       for (let i = 0; i < rawModeCountBeforeSuspend; i++) {
         if (this.isRawModeSupported()) {
@@ -538,8 +540,6 @@ export default class App extends PureComponent<Props, State> {
 
       // Emit resume event for Claude Code to handle
       this.internal_eventEmitter.emit('resume');
-
-      process.removeListener('SIGCONT', resumeHandler);
     };
 
     process.on('SIGCONT', resumeHandler);
