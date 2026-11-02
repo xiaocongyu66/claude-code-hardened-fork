@@ -5,12 +5,20 @@ on:
     branches: [feat/ink-rust]
     paths:
       - 'packages/ink-rust/**'
+      - 'scripts/embeddedNativesPlugin.ts'
+      - 'scripts/compile.ts'
+      - 'src/utils/embeddedNative.ts'
+      - 'src/utils/embeddedNatives.gen.ts'
       - '.github/workflows/ink-rust.yml'
       - 'bun.lock'
       - 'package.json'
   pull_request:
     paths:
       - 'packages/ink-rust/**'
+      - 'scripts/embeddedNativesPlugin.ts'
+      - 'scripts/compile.ts'
+      - 'src/utils/embeddedNative.ts'
+      - 'src/utils/embeddedNatives.gen.ts'
       - '.github/workflows/ink-rust.yml'
       - 'bun.lock'
       - 'package.json'
@@ -122,6 +130,51 @@ jobs:
           smoke_cwd="$(mktemp -d "$RUNNER_TEMP/ink-rust-compile-cwd.XXXXXX")"
           cd "$smoke_cwd"
           "$RUNNER_TEMP/ink-rust-bun-compile/native-smoke" "$RUNNER_TEMP/ink-rust-napi.node" "$GITHUB_WORKSPACE/packages/ink-rust/fixtures/session-v1.json"
+      - name: Build real embedded native smoke executables
+        timeout-minutes: 5
+        run: |
+          evidence="$RUNNER_TEMP/ink-rust-embedded-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/source-sha.txt"
+          { rustc --version; cargo --version; bun --version; node --version; uname -a; } > "$evidence/toolchain.txt"
+          bun packages/ink-rust/tests/build-embedded-native-smoke.ts "$RUNNER_TEMP/ink-rust-napi.node" "$RUNNER_TEMP/ink-rust-embedded-bin" "$evidence"
+      - name: Real embedded native smoke (memfd provenance and strict rejection)
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/ink-rust-embedded-evidence"
+          for mode in valid missing invalid; do
+            smoke_cwd="$(mktemp -d "$RUNNER_TEMP/ink-rust-embedded-$mode.XXXXXX")"
+            mv "$RUNNER_TEMP/ink-rust-embedded-bin/$mode" "$smoke_cwd/smoke"
+            if (cd "$smoke_cwd" && timeout 45s ./smoke) > "$evidence/$mode.stdout" 2> "$evidence/$mode.stderr"; then
+              code=0
+            else
+              code=$?
+            fi
+            printf '%s\n' "$code" > "$evidence/$mode.exit-code.txt"
+            case "$mode" in
+              valid)
+                test "$code" -eq 0
+                grep -Fq '"result":"EMBEDDED_SMOKE_VALID"' "$evidence/$mode.stdout"
+                ;;
+              missing)
+                test "$code" -eq 42
+                grep -Fxq 'EMBEDDED_SMOKE_REJECTED_MISSING: loader returned null' "$evidence/$mode.stderr"
+                ;;
+              invalid)
+                test "$code" -eq 43
+                grep -Fxq 'EMBEDDED_SMOKE_REJECTED_INVALID: loader returned null' "$evidence/$mode.stderr"
+                ;;
+            esac
+          done
+      - name: Upload embedded native evidence (no binaries)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ink-rust-embedded-evidence
+          path: ${{ runner.temp }}/ink-rust-embedded-evidence/
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify locks unchanged
         if: always()
         run: git diff --exit-code HEAD -- bun.lock packages/ink-rust/native/Cargo.lock packages/ink-rust/native/napi/Cargo.lock

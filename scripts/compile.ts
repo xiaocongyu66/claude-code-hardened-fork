@@ -17,6 +17,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getMacroDefines, DEFAULT_BUILD_FEATURES } from './defines.ts'
+import { createEmbeddedNativesPlugin } from './embeddedNativesPlugin.ts'
 
 const ALL_TARGETS = [
   'bun-linux-x64',
@@ -99,24 +100,6 @@ function readNativeAsBase64(
   }
   const buffer = readFileSync(candidate)
   return buffer.toString('base64')
-}
-
-// Create a Bun plugin that overrides src/utils/embeddedNatives.gen.ts with
-// the target platform's base64 payloads.
-function createEmbeddedNativesPlugin(embeddedNatives: Record<string, string>) {
-  return {
-    name: 'embedded-natives',
-    setup(build: any) {
-      build.onResolve({ filter: /embeddedNatives\.gen(\.ts)?$/ }, args => ({
-        path: args.path,
-        namespace: 'embedded-natives',
-      }))
-      build.onLoad({ filter: /.*/, namespace: 'embedded-natives' }, () => ({
-        contents: `export const EMBEDDED_NATIVES = ${JSON.stringify(embeddedNatives)};\n`,
-        loader: 'js',
-      }))
-    },
-  }
 }
 
 // JSC bytecode 预编译默认启用。
