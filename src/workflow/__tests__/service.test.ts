@@ -248,15 +248,15 @@ test('concurrent resumes reject before asynchronous source resolution finishes',
   })
   const originalReadFile = fsPromises.readFile
   let sourceReads = 0
-  const readSpy = spyOn(fsPromises, 'readFile').mockImplementation(
-    ((...args: Parameters<typeof fsPromises.readFile>) => {
-      if (args[0] !== input.scriptPath) return originalReadFile(...args)
-      sourceReads++
-      return readGate.then(() => {
-        throw readError
-      })
-    }) as typeof fsPromises.readFile,
-  )
+  const readSpy = spyOn(fsPromises, 'readFile').mockImplementation(((
+    ...args: Parameters<typeof fsPromises.readFile>
+  ) => {
+    if (args[0] !== input.scriptPath) return originalReadFile(...args)
+    sourceReads++
+    return readGate.then(() => {
+      throw readError
+    })
+  }) as typeof fsPromises.readFile)
   const launches: Promise<unknown>[] = []
   try {
     // Bun's .rejects matcher waits for the promise even without `await`.
