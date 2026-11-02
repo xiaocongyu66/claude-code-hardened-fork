@@ -106,7 +106,10 @@ fn temp_resolution_and_overlay_cycle() {
     );
     fail(
         &mut s,
-        &[create(0, root, NodeSpec::Box), create(0, root, NodeSpec::Box)],
+        &[
+            create(0, root, NodeSpec::Box),
+            create(0, root, NodeSpec::Box),
+        ],
         ErrorCode::Ref,
     );
     fail(
@@ -211,7 +214,10 @@ fn rollback_preserves_entire_tree_allocator_and_id_sequence() {
             create(1, NodeRef::Id(root), NodeSpec::Box),
         ],
     );
-    submit(&mut s, &[delete(reused), delete(extra[0]), delete(extra[1])]);
+    submit(
+        &mut s,
+        &[delete(reused), delete(extra[0]), delete(extra[1])],
+    );
     let before = s.inspect(&all).unwrap();
     let stats = s.stats();
     // 三个空闲槽只消费两个后失败；随后逐个检查全部复用顺序及代数。
@@ -378,7 +384,9 @@ fn slot_op_visit_limits_and_local_update_work() {
     for _ in 0..50 {
         submit(&mut s, &[create(0, root, NodeSpec::Box)]);
     }
-    let applied = s.apply_batch(s.stats().revision, &[update(id, "b")]).unwrap();
+    let applied = s
+        .apply_batch(s.stats().revision, &[update(id, "b")])
+        .unwrap();
     assert_eq!(applied.visits, cost);
     let before = s.stats();
     assert_eq!(before.last_batch_visits, applied.visits);

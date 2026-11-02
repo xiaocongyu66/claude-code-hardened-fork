@@ -252,7 +252,11 @@ impl Session {
             .map_err(Into::into)
     }
 
-    pub fn apply_batch(&mut self, expected_revision: u32, ops: &[Op<'_>]) -> Result<Applied, Error> {
+    pub fn apply_batch(
+        &mut self,
+        expected_revision: u32,
+        ops: &[Op<'_>],
+    ) -> Result<Applied, Error> {
         self.open()?;
         if expected_revision != self.stats.revision {
             return Err(ErrorCode::Revision.into());
@@ -267,7 +271,9 @@ impl Session {
                 visits: 0,
             });
         }
-        let revision = expected_revision.checked_add(1).ok_or(ErrorCode::Exhausted)?;
+        let revision = expected_revision
+            .checked_add(1)
+            .ok_or(ErrorCode::Exhausted)?;
         let mut tx = Transaction::new(self);
         for (index, op) in ops.iter().enumerate() {
             tx.apply(*op).map_err(|code| Error {
@@ -400,7 +406,8 @@ impl<'a> Transaction<'a> {
     fn text(&mut self, text: &str, old: usize) -> Result<Kind, ErrorCode> {
         let limits = self.session.limits;
         // 输入为 Rust str，天然是合法 UTF-8；这里的长度只表示字节，不表示列宽。
-        if text.len() > limits.text_bytes || text.len() > limits.batch_text_bytes - self.input_bytes {
+        if text.len() > limits.text_bytes || text.len() > limits.batch_text_bytes - self.input_bytes
+        {
             return Err(ErrorCode::Limit);
         }
         self.input_bytes += text.len();
@@ -632,10 +639,16 @@ mod tests {
         };
         s.limits.visits = 10;
         let before = s.stats();
-        assert_eq!(s.apply_batch(12, &[cycle]).unwrap_err().code, ErrorCode::Limit);
+        assert_eq!(
+            s.apply_batch(12, &[cycle]).unwrap_err().code,
+            ErrorCode::Limit
+        );
         assert_eq!(s.stats(), before);
         s.limits.visits = 65536;
-        assert_eq!(s.apply_batch(12, &[cycle]).unwrap_err().code, ErrorCode::Tree);
+        assert_eq!(
+            s.apply_batch(12, &[cycle]).unwrap_err().code,
+            ErrorCode::Tree
+        );
         // 根兄弟克隆随宽度收费；降低限额不会隐藏在 Vec::clone 中绕过预算。
         for _ in 0..20 {
             s.apply_batch(
