@@ -329,7 +329,7 @@ impl Session {
 
 fn next_session(counter: &AtomicU64) -> Result<u64, ErrorCode> {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map_err(|_| ErrorCode::Exhausted)
 }
 
