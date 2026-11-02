@@ -42,7 +42,10 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "packages/**/*.ts",
-    "packages/**/*.tsx"
+    "packages/**/*.tsx",
+    "scripts/bench-ink.ts",
+    "scripts/bench-ink.test.ts",
+    "scripts/fixtures/pty-baseline.fixture.tsx"
   ],
   "exclude": ["node_modules", "packages/remote-control-server/web"]
 }

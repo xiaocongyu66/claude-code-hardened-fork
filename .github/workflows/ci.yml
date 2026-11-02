@@ -39,6 +39,49 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
+      - name: Ink P0 contract tests
+        run: |
+          bun test ./packages/@ant/ink/src/core/__tests__/
+          bun test ./scripts/bench-ink.test.ts
+
+      - name: Ink P0 microbenchmarks
+        timeout-minutes: 5
+        env:
+          TERM: xterm-256color
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+          TZ: UTC
+          CLAUDE_CODE_LEGACY_CONSOLE: "0"
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/ink-p0"
+          mkdir -p "$out"
+          status=0
+          for run in 1 2 3; do
+            if bun scripts/bench-ink.ts --mode all --width 80 --height 24 --nodes 100 --warmup 10 --samples 50 > "$out/bench-$run.jsonl" 2> "$out/bench-$run.stderr.log"; then
+              :
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Ink P0 Linux PTY lifecycle
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ink-p0"
+          python3 scripts/ink-pty-baseline.py 2>&1 | tee "$RUNNER_TEMP/ink-p0/pty.log"
+
+      - name: Upload Ink P0 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ink-p0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ink-p0/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Test with Coverage
         run: |
           # Tolerate pre-existing flaky tests (Bun mock pollution / order-dependent state).

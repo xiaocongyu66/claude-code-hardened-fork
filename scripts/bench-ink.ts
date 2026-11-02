@@ -195,7 +195,8 @@ async function frameBenchmarks(o: Options) {
     const frame = (screen: (typeof screens)[number]): Frame => ({
       screen,
       viewport: { width: o.width, height: o.height + 1 },
-      cursor: { x: 0, y: 0, visible: true },
+      // 主屏输出完成后的光标位于内容下一行，静止帧不需要归位。
+      cursor: { x: 0, y: o.height, visible: true },
     })
     const lines = ['A', 'B'].map(letter =>
       Array.from({ length: o.height }, (_, y) =>
