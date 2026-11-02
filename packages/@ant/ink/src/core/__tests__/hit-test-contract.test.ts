@@ -4,6 +4,7 @@ import {
   createNode,
   type DOMElement,
   removeChildNode,
+  setStyle,
 } from '../dom.js'
 import type { ClickEvent } from '../events/click-event.js'
 import { dispatchClick, dispatchHover, hitTest } from '../hit-test.js'
@@ -112,7 +113,7 @@ describe('hit-test contracts with committed geometry', () => {
     withTree(({ node }) => {
       const root = node({ x: 0, y: 0, width: 30, height: 20 })
       const viewport = node({ x: 3, y: 5, width: 10, height: 4 }, root)
-      viewport.style.overflow = 'scroll'
+      setStyle(viewport, { overflow: 'scroll' })
       viewport.scrollTop = 6
       // The child has already been translated into screen space by the fixture.
       const child = node({ x: 4, y: 4, width: 5, height: 3, top: 5 }, viewport)
