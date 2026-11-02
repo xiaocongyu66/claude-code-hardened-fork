@@ -17,7 +17,13 @@ export type NodeId = Readonly<{
 export type NodeRef = { id: NodeId } | { temp: number }
 export type Op =
   | { op: 'create'; temp: number; parent: NodeRef; kind: 'box' }
-  | { op: 'create'; temp: number; parent: NodeRef; kind: 'text'; text: Uint8Array }
+  | {
+      op: 'create'
+      temp: number
+      parent: NodeRef
+      kind: 'text'
+      text: Uint8Array
+    }
   | { op: 'updateText'; node: NodeRef; text: Uint8Array }
   | { op: 'reparent'; node: NodeRef; parent: NodeRef }
   | { op: 'delete'; node: NodeRef }
@@ -105,8 +111,12 @@ export function loadNative(artifact: string): Binding {
     protocolVersion: () => binding.protocolVersion(),
     Session: class implements Session {
       private readonly native = new binding.Session()
-      stats() { return this.native.stats() }
-      close() { this.native.close() }
+      stats() {
+        return this.native.stats()
+      }
+      close() {
+        this.native.close()
+      }
       applyBatch(revision: number, ops: readonly Op[]) {
         return this.native.applyBatch(encodeBatch(revision, ops))
       }
@@ -121,11 +131,26 @@ export function loadNative(artifact: string): Binding {
 export const MAX_BATCH_BYTES = 12 + 256 * 35 + 256 * 1024
 export const MAX_INSPECT_BYTES = 12 + 4096 * 16
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype)
-const bufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')!.get!
-const lengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')!.get!
-const offsetGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteOffset')!.get!
-const tagGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!
-const arrayBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')!.get!
+const bufferGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'buffer',
+)!.get!
+const lengthGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'byteLength',
+)!.get!
+const offsetGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'byteOffset',
+)!.get!
+const tagGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  Symbol.toStringTag,
+)!.get!
+const arrayBufferLength = Object.getOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  'byteLength',
+)!.get!
 
 class PacketWriter {
   readonly bytes: Uint8Array
@@ -143,10 +168,18 @@ class PacketWriter {
     throw error
   }
   number(value: number, max = 0xffffffff): number {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > max) this.fail('Input')
+    if (
+      typeof value !== 'number' ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > max
+    )
+      this.fail('Input')
     return value
   }
-  u8(value: number) { this.view.setUint8(this.offset++, value) }
+  u8(value: number) {
+    this.view.setUint8(this.offset++, value)
+  }
   u32(value: number) {
     this.view.setUint32(this.offset, this.number(value), true)
     this.offset += 4
@@ -160,7 +193,12 @@ class PacketWriter {
   id(id: NodeId) {
     if (typeof id !== 'object' || id === null) this.fail('Input')
     const { session, slot, generation } = id
-    if (typeof session !== 'string' || session.length > 20 || !/^(0|[1-9][0-9]*)$/.test(session)) this.fail('Input')
+    if (
+      typeof session !== 'string' ||
+      session.length > 20 ||
+      !/^(0|[1-9][0-9]*)$/.test(session)
+    )
+      this.fail('Input')
     const owner = BigInt(session)
     if (owner > 0xffffffffffffffffn) this.fail('Input')
     this.view.setBigUint64(this.offset, owner, true)
@@ -172,8 +210,14 @@ class PacketWriter {
     if (typeof ref !== 'object' || ref === null) this.fail('Input')
     // Discrimination is explicit: a defined id selects the ID alternative.
     const id = (ref as { id?: NodeId }).id
-    if (id !== undefined) { this.u8(0); this.id(id) }
-    else { const temp = (ref as { temp: number }).temp; this.u8(1); this.u32(temp) }
+    if (id !== undefined) {
+      this.u8(0)
+      this.id(id)
+    } else {
+      const temp = (ref as { temp: number }).temp
+      this.u8(1)
+      this.u32(temp)
+    }
   }
   text(text: Uint8Array) {
     let source: Uint8Array
@@ -194,7 +238,9 @@ class PacketWriter {
     this.bytes.set(source, this.offset)
     this.offset += source.byteLength
   }
-  finish() { return this.bytes.subarray(0, this.offset) }
+  finish() {
+    return this.bytes.subarray(0, this.offset)
+  }
 }
 
 export function encodeBatch(revision: number, ops: readonly Op[]): Uint8Array {
@@ -215,21 +261,34 @@ export function encodeBatch(revision: number, ops: readonly Op[]): Uint8Array {
         w.u8(kind === 'box' ? 1 : 2)
         w.u32(temp)
         w.reference(parent)
-        if (kind === 'text') { const text = item.text; w.text(text) }
+        if (kind === 'text') {
+          const text = item.text
+          w.text(text)
+        }
         break
       }
       case 'updateText': {
         const { node, text } = item
-        w.u8(3); w.reference(node); w.text(text)
+        w.u8(3)
+        w.reference(node)
+        w.text(text)
         break
       }
       case 'reparent': {
         const { node, parent } = item
-        w.u8(4); w.reference(node); w.reference(parent)
+        w.u8(4)
+        w.reference(node)
+        w.reference(parent)
         break
       }
-      case 'delete': { const node = item.node; w.u8(5); w.reference(node); break }
-      default: w.fail('Input')
+      case 'delete': {
+        const node = item.node
+        w.u8(5)
+        w.reference(node)
+        break
+      }
+      default:
+        w.fail('Input')
     }
   }
   return w.finish()
