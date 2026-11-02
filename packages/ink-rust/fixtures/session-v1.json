@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "initialText": "旧文本 é",
+  "updatedText": "新文本 中文",
+  "afterCreate": ["box", "text"],
+  "afterReparent": ["box"],
+  "boxChildren": ["text"],
+  "afterDelete": []
+}

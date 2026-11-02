@@ -11,6 +11,12 @@ pub struct NodeId {
     generation: u32,
 }
 
+impl NodeId {
+    pub fn parts(self) -> (u64, usize, u32) {
+        (self.session, self.slot, self.generation)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NodeRef {
     Id(NodeId),
@@ -203,6 +209,29 @@ impl Session {
                 live_text_bytes: 0,
                 last_batch_visits: 0,
             },
+        })
+    }
+
+    /// 仅恢复当前 session 中仍存活的 ID；事务仍需再次验证。
+    pub fn node_id_from_parts(
+        &self,
+        session: u64,
+        slot: usize,
+        generation: u32,
+    ) -> Result<NodeId, Error> {
+        self.open()?;
+        if session != self.stats.root.session
+            || !self
+                .arena
+                .get(slot)
+                .is_some_and(|entry| entry.generation == generation && entry.node.is_some())
+        {
+            return Err(ErrorCode::Id.into());
+        }
+        Ok(NodeId {
+            session,
+            slot,
+            generation,
         })
     }
 
@@ -529,6 +558,89 @@ impl<'a> Transaction<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_id_parts_require_live_local_open_session() {
+        let mut session = Session::new(Limits::default()).unwrap();
+        let other = Session::new(Limits::default()).unwrap();
+        let root = session.stats().root;
+        let (owner, slot, generation) = root.parts();
+        assert_eq!(
+            session.node_id_from_parts(owner, slot, generation),
+            Ok(root)
+        );
+        for parts in [
+            other.stats().root.parts(),
+            (owner, usize::MAX, generation),
+            (owner, slot, generation + 1),
+        ] {
+            assert_eq!(
+                session
+                    .node_id_from_parts(parts.0, parts.1, parts.2)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Id
+            );
+        }
+        let id = session
+            .apply_batch(
+                0,
+                &[Op::Create {
+                    temp: 0,
+                    parent: NodeRef::Id(root),
+                    kind: NodeSpec::Box,
+                }],
+            )
+            .unwrap()
+            .created[0]
+            .1;
+        let (owner, slot, generation) = id.parts();
+        assert_eq!(session.node_id_from_parts(owner, slot, generation), Ok(id));
+        session
+            .apply_batch(
+                1,
+                &[Op::Delete {
+                    node: NodeRef::Id(id),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .node_id_from_parts(owner, slot, generation)
+                .unwrap_err()
+                .code,
+            ErrorCode::Id
+        );
+        let reused = session
+            .apply_batch(
+                2,
+                &[Op::Create {
+                    temp: 0,
+                    parent: NodeRef::Id(root),
+                    kind: NodeSpec::Box,
+                }],
+            )
+            .unwrap()
+            .created[0]
+            .1;
+        assert_eq!(reused.parts(), (owner, slot, generation + 1));
+        assert_eq!(
+            session
+                .node_id_from_parts(owner, slot, generation)
+                .unwrap_err()
+                .code,
+            ErrorCode::Id
+        );
+        session.close();
+        let (owner, slot, generation) = root.parts();
+        assert_eq!(
+            session
+                .node_id_from_parts(owner, slot, generation)
+                .unwrap_err()
+                .code,
+            ErrorCode::Closed
+        );
+    }
 
     #[test]
     fn exhaustion_never_wraps() {

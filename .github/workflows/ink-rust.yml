@@ -4,18 +4,49 @@ on:
   push:
     branches: [feat/ink-rust]
     paths:
-      - 'packages/ink-rust/native/**'
+      - 'packages/ink-rust/**'
       - '.github/workflows/ink-rust.yml'
   pull_request:
     paths:
-      - 'packages/ink-rust/native/**'
+      - 'packages/ink-rust/**'
       - '.github/workflows/ink-rust.yml'
   workflow_dispatch:
+    inputs:
+      bootstrap_lock:
+        description: 'Generate NAPI lock artifact only; NOT binding acceptance'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  bootstrap-napi-lock:
+    name: NAPI lock bootstrap (NOT acceptance)
+    if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.99.1'
+      - name: Generate lock and provenance only
+        run: |
+          test ! -e packages/ink-rust/native/napi/Cargo.lock
+          cargo generate-lockfile --manifest-path packages/ink-rust/native/napi/Cargo.toml
+          mkdir -p "$RUNNER_TEMP/ink-rust-napi-lock"
+          cp packages/ink-rust/native/napi/Cargo.lock "$RUNNER_TEMP/ink-rust-napi-lock/"
+          git rev-parse HEAD > "$RUNNER_TEMP/ink-rust-napi-lock/source-sha.txt"
+          rustc --version > "$RUNNER_TEMP/ink-rust-napi-lock/toolchain.txt"
+          cargo --version >> "$RUNNER_TEMP/ink-rust-napi-lock/toolchain.txt"
+          (cd "$RUNNER_TEMP/ink-rust-napi-lock" && sha256sum Cargo.lock > Cargo.lock.sha256)
+          echo 'Bootstrap only: no build, tests, Node/Bun smoke or binding acceptance.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ink-rust-napi-lock
+          path: ${{ runner.temp }}/ink-rust-napi-lock/
+          if-no-files-found: error
+
   core:
     runs-on: ubuntu-latest
     defaults:
@@ -28,6 +59,9 @@ jobs:
         with:
           toolchain: '1.99.1'
           components: rustfmt, clippy
+      - name: Binding acceptance status
+        run: |
+          echo 'NAPI binding is NOT validated by this core job. Bootstrap preparation only; formal --locked binding CI must be added with the generated lock.' >> "$GITHUB_STEP_SUMMARY"
       - name: Record toolchain
         run: rustc --version && cargo --version
       - name: Format
