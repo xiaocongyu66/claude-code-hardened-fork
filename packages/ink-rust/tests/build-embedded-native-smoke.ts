@@ -28,7 +28,8 @@ const debugPlugin: BunPlugin = {
       return { path: args.path, namespace: 'embedded-smoke-debug' }
     })
     build.onLoad({ filter: /.*/, namespace: 'embedded-smoke-debug' }, () => ({
-      contents: 'export function logForDebugging(message) { console.error(message) }',
+      contents:
+        'export function logForDebugging(message) { console.error(message) }',
       loader: 'js',
     }))
   },
@@ -39,14 +40,21 @@ for (const mode of ['valid', 'missing', 'invalid'] as const) {
   const vendorSubPath = moduleName
   const embeddedNatives: Record<string, string> =
     mode === 'missing'
-      ? { [`${moduleName}-sentinel`]: Buffer.from('sentinel').toString('base64') }
+      ? {
+          [`${moduleName}-sentinel`]:
+            Buffer.from('sentinel').toString('base64'),
+        }
       : {
-          [moduleName]: (mode === 'valid' ? payload : Buffer.from('not an ELF'))
-            .toString('base64'),
+          [moduleName]: (mode === 'valid'
+            ? payload
+            : Buffer.from('not an ELF')
+          ).toString('base64'),
         }
   const outfile = join(outputDir, mode)
   const result = await Bun.build({
-    entrypoints: [join(root, 'packages/ink-rust/tests/embedded-native-smoke.ts')],
+    entrypoints: [
+      join(root, 'packages/ink-rust/tests/embedded-native-smoke.ts'),
+    ],
     target: 'bun',
     minify: true,
     format: 'esm',

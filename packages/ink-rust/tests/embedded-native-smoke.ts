@@ -9,14 +9,15 @@ import {
 } from '../src/index.js'
 
 // 静态 require 仍由 Bun 打包真实 loader，避免独立 tsc 引入 debug 的业务依赖树。
-const { isCompiledBinary, loadNativeModule } = require('../../../src/utils/embeddedNative.ts') as {
-  isCompiledBinary(): boolean
-  loadNativeModule<T>(
-    name: string,
-    vendorSubPath: string,
-    validate: (mod: Record<string, unknown>) => boolean,
-  ): T | null
-}
+const { isCompiledBinary, loadNativeModule } =
+  require('../../../src/utils/embeddedNative.ts') as {
+    isCompiledBinary(): boolean
+    loadNativeModule<T>(
+      name: string,
+      vendorSubPath: string,
+      validate: (mod: Record<string, unknown>) => boolean,
+    ): T | null
+  }
 
 declare const EMBEDDED_SMOKE: {
   mode: 'valid' | 'missing' | 'invalid'
